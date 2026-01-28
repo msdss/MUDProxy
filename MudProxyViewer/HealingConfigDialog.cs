@@ -6,7 +6,8 @@ public class HealingConfigDialog : Form
     
     private TabControl _tabControl = null!;
     private ListBox _spellsListBox = null!;
-    private ListBox _selfRulesListBox = null!;
+    private ListBox _selfCombatRulesListBox = null!;
+    private ListBox _selfRestingRulesListBox = null!;
     private ListBox _partyRulesListBox = null!;
     private ListBox _partyWideRulesListBox = null!;
     
@@ -20,7 +21,7 @@ public class HealingConfigDialog : Form
     private void InitializeComponent()
     {
         this.Text = "Healing Configuration";
-        this.Size = new Size(600, 500);
+        this.Size = new Size(600, 550);
         this.FormBorderStyle = FormBorderStyle.FixedDialog;
         this.MaximizeBox = false;
         this.MinimizeBox = false;
@@ -30,7 +31,7 @@ public class HealingConfigDialog : Form
         _tabControl = new TabControl
         {
             Location = new Point(10, 10),
-            Size = new Size(565, 400),
+            Size = new Size(565, 450),
             BackColor = Color.FromArgb(45, 45, 45)
         };
         
@@ -39,19 +40,19 @@ public class HealingConfigDialog : Form
         CreateSpellsTab(spellsTab);
         _tabControl.TabPages.Add(spellsTab);
         
-        // Tab 2: Self Heal Rules
+        // Tab 2: Self Heal Rules (with Combat and Resting sections)
         var selfRulesTab = new TabPage("Self Healing") { BackColor = Color.FromArgb(45, 45, 45) };
-        CreateRulesTab(selfRulesTab, "Self", out _selfRulesListBox);
+        CreateSelfHealingTab(selfRulesTab);
         _tabControl.TabPages.Add(selfRulesTab);
         
         // Tab 3: Party Heal Rules
         var partyRulesTab = new TabPage("Party Healing") { BackColor = Color.FromArgb(45, 45, 45) };
-        CreateRulesTab(partyRulesTab, "Party", out _partyRulesListBox);
+        CreateSimpleRulesTab(partyRulesTab, "Party", out _partyRulesListBox);
         _tabControl.TabPages.Add(partyRulesTab);
         
         // Tab 4: Party-Wide Heal Rules
         var partyWideRulesTab = new TabPage("Party-Wide Healing") { BackColor = Color.FromArgb(45, 45, 45) };
-        CreateRulesTab(partyWideRulesTab, "PartyWide", out _partyWideRulesListBox);
+        CreateSimpleRulesTab(partyWideRulesTab, "PartyWide", out _partyWideRulesListBox);
         _tabControl.TabPages.Add(partyWideRulesTab);
         
         this.Controls.Add(_tabControl);
@@ -59,7 +60,7 @@ public class HealingConfigDialog : Form
         var closeButton = new Button
         {
             Text = "Close",
-            Location = new Point(490, 420),
+            Location = new Point(490, 470),
             Size = new Size(80, 30),
             BackColor = Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
@@ -99,11 +100,75 @@ public class HealingConfigDialog : Form
         tab.Controls.Add(del);
     }
     
-    private void CreateRulesTab(TabPage tab, string ruleType, out ListBox listBox)
+    private void CreateSelfHealingTab(TabPage tab)
+    {
+        int y = 10;
+        
+        // Combat Rules Section
+        var combatLabel = new Label
+        {
+            Text = "Combat Rules (active during combat and idle - NOT while resting):",
+            Location = new Point(10, y),
+            AutoSize = true,
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 9, FontStyle.Bold)
+        };
+        tab.Controls.Add(combatLabel);
+        y += 22;
+        
+        _selfCombatRulesListBox = new ListBox
+        {
+            Location = new Point(10, y),
+            Size = new Size(430, 130),
+            BackColor = Color.FromArgb(30, 30, 30),
+            ForeColor = Color.White,
+            Font = new Font("Consolas", 10)
+        };
+        _selfCombatRulesListBox.DoubleClick += (s, e) => EditSelfRule_Click(HealRuleType.Combat);
+        tab.Controls.Add(_selfCombatRulesListBox);
+        
+        tab.Controls.Add(CreateButton("Add", 450, y, (s, e) => AddSelfRule_Click(HealRuleType.Combat)));
+        tab.Controls.Add(CreateButton("Edit", 450, y + 35, (s, e) => EditSelfRule_Click(HealRuleType.Combat)));
+        var delCombat = CreateButton("Delete", 450, y + 70, (s, e) => DeleteSelfRule_Click(HealRuleType.Combat));
+        delCombat.BackColor = Color.FromArgb(150, 0, 0);
+        tab.Controls.Add(delCombat);
+        
+        y += 145;
+        
+        // Resting Rules Section
+        var restingLabel = new Label
+        {
+            Text = "Resting Rules (active ONLY while resting):",
+            Location = new Point(10, y),
+            AutoSize = true,
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 9, FontStyle.Bold)
+        };
+        tab.Controls.Add(restingLabel);
+        y += 22;
+        
+        _selfRestingRulesListBox = new ListBox
+        {
+            Location = new Point(10, y),
+            Size = new Size(430, 130),
+            BackColor = Color.FromArgb(30, 30, 30),
+            ForeColor = Color.White,
+            Font = new Font("Consolas", 10)
+        };
+        _selfRestingRulesListBox.DoubleClick += (s, e) => EditSelfRule_Click(HealRuleType.Resting);
+        tab.Controls.Add(_selfRestingRulesListBox);
+        
+        tab.Controls.Add(CreateButton("Add", 450, y, (s, e) => AddSelfRule_Click(HealRuleType.Resting)));
+        tab.Controls.Add(CreateButton("Edit", 450, y + 35, (s, e) => EditSelfRule_Click(HealRuleType.Resting)));
+        var delResting = CreateButton("Delete", 450, y + 70, (s, e) => DeleteSelfRule_Click(HealRuleType.Resting));
+        delResting.BackColor = Color.FromArgb(150, 0, 0);
+        tab.Controls.Add(delResting);
+    }
+    
+    private void CreateSimpleRulesTab(TabPage tab, string ruleType, out ListBox listBox)
     {
         var helpText = ruleType switch
         {
-            "Self" => "Rules for healing yourself. Lowest HP matching a rule threshold will trigger.",
             "Party" => "Rules for healing party members (single target). Heals lowest HP party member first.",
             "PartyWide" => "Rules for party-wide heals. Triggers when X% of party is below threshold.",
             _ => ""
@@ -120,7 +185,7 @@ public class HealingConfigDialog : Form
         listBox = new ListBox
         {
             Location = new Point(10, 45),
-            Size = new Size(430, 290),
+            Size = new Size(430, 340),
             BackColor = Color.FromArgb(30, 30, 30),
             ForeColor = Color.White,
             Font = new Font("Consolas", 10)
@@ -177,13 +242,26 @@ public class HealingConfigDialog : Form
     
     private void RefreshSelfRulesList()
     {
-        _selfRulesListBox.Items.Clear();
-        foreach (var rule in _healingManager.Configuration.SelfHealRules.OrderBy(r => r.HpThresholdPercent))
+        // Combat rules
+        _selfCombatRulesListBox.Items.Clear();
+        foreach (var rule in _healingManager.Configuration.SelfHealRules
+            .Where(r => r.RuleType == HealRuleType.Combat)
+            .OrderBy(r => r.HpThresholdPercent))
         {
             var spell = _healingManager.GetHealSpell(rule.HealSpellId);
-            var criticalStr = rule.IsCritical ? "🚨 " : "";
-            _selfRulesListBox.Items.Add(new RuleListItem(rule, 
-                $"{criticalStr}HP < {rule.HpThresholdPercent}% → {spell?.DisplayName ?? "(Unknown)"}"));
+            _selfCombatRulesListBox.Items.Add(new RuleListItem(rule, 
+                $"HP < {rule.HpThresholdPercent}% → {spell?.DisplayName ?? "(Unknown)"}"));
+        }
+        
+        // Resting rules
+        _selfRestingRulesListBox.Items.Clear();
+        foreach (var rule in _healingManager.Configuration.SelfHealRules
+            .Where(r => r.RuleType == HealRuleType.Resting)
+            .OrderBy(r => r.HpThresholdPercent))
+        {
+            var spell = _healingManager.GetHealSpell(rule.HealSpellId);
+            _selfRestingRulesListBox.Items.Add(new RuleListItem(rule, 
+                $"HP < {rule.HpThresholdPercent}% → {spell?.DisplayName ?? "(Unknown)"}"));
         }
     }
     
@@ -193,9 +271,8 @@ public class HealingConfigDialog : Form
         foreach (var rule in _healingManager.Configuration.PartyHealRules.OrderBy(r => r.HpThresholdPercent))
         {
             var spell = _healingManager.GetHealSpell(rule.HealSpellId);
-            var criticalStr = rule.IsCritical ? "🚨 " : "";
             _partyRulesListBox.Items.Add(new RuleListItem(rule, 
-                $"{criticalStr}HP < {rule.HpThresholdPercent}% → {spell?.DisplayName ?? "(Unknown)"}"));
+                $"HP < {rule.HpThresholdPercent}% → {spell?.DisplayName ?? "(Unknown)"}"));
         }
     }
     
@@ -205,9 +282,8 @@ public class HealingConfigDialog : Form
         foreach (var rule in _healingManager.Configuration.PartyWideHealRules.OrderBy(r => r.HpThresholdPercent))
         {
             var spell = _healingManager.GetHealSpell(rule.HealSpellId);
-            var criticalStr = rule.IsCritical ? "🚨 " : "";
             _partyWideRulesListBox.Items.Add(new RuleListItem(rule, 
-                $"{criticalStr}{rule.PartyPercentRequired}% of party < {rule.HpThresholdPercent}% → {spell?.DisplayName ?? "(Unknown)"}"));
+                $"{rule.PartyPercentRequired}% of party < {rule.HpThresholdPercent}% → {spell?.DisplayName ?? "(Unknown)"}"));
         }
     }
     
@@ -258,7 +334,6 @@ public class HealingConfigDialog : Form
         
         var filtered = ruleType switch
         {
-            "Self" => spells.Where(s => s.TargetType != HealTargetType.PartyHeal).ToList(),
             "Party" => spells.Where(s => s.TargetType == HealTargetType.SingleTarget).ToList(),
             "PartyWide" => spells.Where(s => s.TargetType == HealTargetType.PartyHeal).ToList(),
             _ => spells
@@ -275,7 +350,6 @@ public class HealingConfigDialog : Form
         {
             switch (ruleType)
             {
-                case "Self": _healingManager.AddSelfHealRule(dialog.Rule); RefreshSelfRulesList(); break;
                 case "Party": _healingManager.AddPartyHealRule(dialog.Rule); RefreshPartyRulesList(); break;
                 case "PartyWide": _healingManager.AddPartyWideHealRule(dialog.Rule); RefreshPartyWideRulesList(); break;
             }
@@ -284,13 +358,12 @@ public class HealingConfigDialog : Form
     
     private void EditRule_Click(string ruleType)
     {
-        var listBox = ruleType switch { "Self" => _selfRulesListBox, "Party" => _partyRulesListBox, "PartyWide" => _partyWideRulesListBox, _ => null };
+        var listBox = ruleType switch { "Party" => _partyRulesListBox, "PartyWide" => _partyWideRulesListBox, _ => null };
         if (listBox?.SelectedItem is not RuleListItem item) return;
         
         var spells = _healingManager.Configuration.HealSpells;
         var filtered = ruleType switch
         {
-            "Self" => spells.Where(s => s.TargetType != HealTargetType.PartyHeal).ToList(),
             "Party" => spells.Where(s => s.TargetType == HealTargetType.SingleTarget).ToList(),
             "PartyWide" => spells.Where(s => s.TargetType == HealTargetType.PartyHeal).ToList(),
             _ => spells
@@ -301,7 +374,6 @@ public class HealingConfigDialog : Form
         {
             switch (ruleType)
             {
-                case "Self": _healingManager.UpdateSelfHealRule(dialog.Rule); RefreshSelfRulesList(); break;
                 case "Party": _healingManager.UpdatePartyHealRule(dialog.Rule); RefreshPartyRulesList(); break;
                 case "PartyWide": _healingManager.UpdatePartyWideHealRule(dialog.Rule); RefreshPartyWideRulesList(); break;
             }
@@ -310,7 +382,7 @@ public class HealingConfigDialog : Form
     
     private void DeleteRule_Click(string ruleType)
     {
-        var listBox = ruleType switch { "Self" => _selfRulesListBox, "Party" => _partyRulesListBox, "PartyWide" => _partyWideRulesListBox, _ => null };
+        var listBox = ruleType switch { "Party" => _partyRulesListBox, "PartyWide" => _partyWideRulesListBox, _ => null };
         if (listBox?.SelectedItem is not RuleListItem item) return;
         
         var spell = _healingManager.GetHealSpell(item.Rule.HealSpellId);
@@ -319,10 +391,66 @@ public class HealingConfigDialog : Form
         {
             switch (ruleType)
             {
-                case "Self": _healingManager.RemoveSelfHealRule(item.Rule.Id); RefreshSelfRulesList(); break;
                 case "Party": _healingManager.RemovePartyHealRule(item.Rule.Id); RefreshPartyRulesList(); break;
                 case "PartyWide": _healingManager.RemovePartyWideHealRule(item.Rule.Id); RefreshPartyWideRulesList(); break;
             }
+        }
+    }
+    
+    // Self heal rule handlers (state-based)
+    private void AddSelfRule_Click(HealRuleType ruleType)
+    {
+        var spells = _healingManager.Configuration.HealSpells;
+        if (spells.Count == 0)
+        {
+            MessageBox.Show("Please add heal spells first.", "No Spells", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        
+        var filtered = spells.Where(s => s.TargetType != HealTargetType.PartyHeal).ToList();
+        
+        if (filtered.Count == 0)
+        {
+            MessageBox.Show("No applicable spells for self healing.", "No Spells", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        
+        using var dialog = new HealRuleConfigDialog(filtered, null, false, ruleType);
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            dialog.Rule.RuleType = ruleType;
+            _healingManager.AddSelfHealRule(dialog.Rule);
+            RefreshSelfRulesList();
+        }
+    }
+    
+    private void EditSelfRule_Click(HealRuleType ruleType)
+    {
+        var listBox = ruleType == HealRuleType.Combat ? _selfCombatRulesListBox : _selfRestingRulesListBox;
+        if (listBox?.SelectedItem is not RuleListItem item) return;
+        
+        var spells = _healingManager.Configuration.HealSpells;
+        var filtered = spells.Where(s => s.TargetType != HealTargetType.PartyHeal).ToList();
+        
+        using var dialog = new HealRuleConfigDialog(filtered, item.Rule, false, ruleType);
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            _healingManager.UpdateSelfHealRule(dialog.Rule);
+            RefreshSelfRulesList();
+        }
+    }
+    
+    private void DeleteSelfRule_Click(HealRuleType ruleType)
+    {
+        var listBox = ruleType == HealRuleType.Combat ? _selfCombatRulesListBox : _selfRestingRulesListBox;
+        if (listBox?.SelectedItem is not RuleListItem item) return;
+        
+        var spell = _healingManager.GetHealSpell(item.Rule.HealSpellId);
+        if (MessageBox.Show($"Delete rule: HP < {item.Rule.HpThresholdPercent}% → {spell?.DisplayName}?",
+            "Confirm", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+        {
+            _healingManager.RemoveSelfHealRule(item.Rule.Id);
+            RefreshSelfRulesList();
         }
     }
     

@@ -19,7 +19,6 @@ public class CureManager
     
     // Events
     public event Action<string>? OnLogMessage;
-    public event Action? OnAilmentsChanged;
     
     // Telepath request regex: "Boost telepaths: @held"
     private static readonly Regex TelepathRequestRegex = new(
@@ -85,12 +84,46 @@ public class CureManager
                 if (config != null)
                 {
                     _config = config;
+                    
+                    // Migrate old priority values to new enum
+                    // Old: CriticalHeals=0, Cures=1, RegularHeals=2, Buffs=3
+                    // New: Heals=0, Cures=1, Buffs=2
+                    MigratePriorityOrder();
                 }
             }
         }
         catch (Exception ex)
         {
             OnLogMessage?.Invoke($"Error loading cure configuration: {ex.Message}");
+        }
+    }
+    
+    private void MigratePriorityOrder()
+    {
+        var validValues = new HashSet<CastPriorityType> 
+        { 
+            CastPriorityType.Heals, 
+            CastPriorityType.Cures, 
+            CastPriorityType.Buffs 
+        };
+        
+        // Check if migration is needed (any invalid values or duplicates)
+        var currentOrder = _config.PriorityOrder;
+        bool needsMigration = currentOrder.Any(p => !validValues.Contains(p)) ||
+                              currentOrder.Count != 3 ||
+                              currentOrder.Distinct().Count() != currentOrder.Count;
+        
+        if (needsMigration)
+        {
+            // Reset to default order
+            _config.PriorityOrder = new List<CastPriorityType>
+            {
+                CastPriorityType.Heals,
+                CastPriorityType.Cures,
+                CastPriorityType.Buffs
+            };
+            SaveConfiguration();
+            OnLogMessage?.Invoke("📋 Cast priority migrated to new format (Heals, Cures, Buffs)");
         }
     }
     
@@ -113,6 +146,131 @@ public class CureManager
         catch (Exception ex)
         {
             OnLogMessage?.Invoke($"Error saving cure configuration: {ex.Message}");
+        }
+    }
+    
+    public string ExportCures()
+    {
+        var export = new CureExport
+        {
+            ExportVersion = "1.0",
+            ExportedAt = DateTime.Now,
+            Ailments = _config.Ailments.Select(a => a.Clone()).ToList(),
+            CureSpells = _config.CureSpells.Select(s => s.Clone()).ToList()
+        };
+        
+        // Create a mapping of old ailment IDs to new ones
+        var idMapping = new Dictionary<string, string>();
+        foreach (var ailment in export.Ailments)
+        {
+            var oldId = ailment.Id;
+            ailment.Id = Guid.NewGuid().ToString();
+            idMapping[oldId] = ailment.Id;
+        }
+        
+        // Update cure spell references to use new ailment IDs
+        foreach (var spell in export.CureSpells)
+        {
+            spell.Id = Guid.NewGuid().ToString();
+            if (idMapping.TryGetValue(spell.AilmentId, out var newAilmentId))
+                spell.AilmentId = newAilmentId;
+        }
+        
+        return JsonSerializer.Serialize(export, new JsonSerializerOptions { WriteIndented = true });
+    }
+    
+    public (int imported, int skipped, string message) ImportCures(string json, bool replaceExisting)
+    {
+        try
+        {
+            var export = JsonSerializer.Deserialize<CureExport>(json);
+            if (export == null)
+                return (0, 0, "Invalid cure export file format.");
+            
+            int importedAilments = 0;
+            int skippedAilments = 0;
+            var ailmentIdMapping = new Dictionary<string, string>();
+            
+            // Import ailments first
+            foreach (var ailment in export.Ailments ?? new List<AilmentConfiguration>())
+            {
+                var existing = _config.Ailments.FirstOrDefault(a => 
+                    a.DisplayName.Equals(ailment.DisplayName, StringComparison.OrdinalIgnoreCase));
+                
+                var oldId = ailment.Id;
+                
+                if (existing != null)
+                {
+                    if (replaceExisting)
+                    {
+                        ailmentIdMapping[oldId] = existing.Id;
+                        ailment.Id = existing.Id;
+                        var index = _config.Ailments.IndexOf(existing);
+                        _config.Ailments[index] = ailment;
+                        importedAilments++;
+                    }
+                    else
+                    {
+                        ailmentIdMapping[oldId] = existing.Id; // Map to existing for spells
+                        skippedAilments++;
+                    }
+                }
+                else
+                {
+                    ailment.Id = Guid.NewGuid().ToString();
+                    ailmentIdMapping[oldId] = ailment.Id;
+                    _config.Ailments.Add(ailment);
+                    importedAilments++;
+                }
+            }
+            
+            // Import cure spells with updated ailment references
+            int importedSpells = 0;
+            int skippedSpells = 0;
+            
+            foreach (var spell in export.CureSpells ?? new List<CureSpellConfiguration>())
+            {
+                if (!ailmentIdMapping.TryGetValue(spell.AilmentId, out var newAilmentId))
+                    continue; // Skip spells for ailments we couldn't map
+                
+                var existing = _config.CureSpells.FirstOrDefault(s => 
+                    s.DisplayName.Equals(spell.DisplayName, StringComparison.OrdinalIgnoreCase));
+                
+                if (existing != null)
+                {
+                    if (replaceExisting)
+                    {
+                        spell.Id = existing.Id;
+                        spell.AilmentId = newAilmentId;
+                        var index = _config.CureSpells.IndexOf(existing);
+                        _config.CureSpells[index] = spell;
+                        importedSpells++;
+                    }
+                    else
+                    {
+                        skippedSpells++;
+                    }
+                }
+                else
+                {
+                    spell.Id = Guid.NewGuid().ToString();
+                    spell.AilmentId = newAilmentId;
+                    _config.CureSpells.Add(spell);
+                    importedSpells++;
+                }
+            }
+            
+            if (importedAilments > 0 || importedSpells > 0)
+            {
+                SaveConfiguration();
+            }
+            
+            return (importedAilments + importedSpells, skippedAilments + skippedSpells, 
+                $"Imported {importedAilments} ailment(s) and {importedSpells} cure spell(s), skipped {skippedAilments + skippedSpells} duplicate(s).");
+        }
+        catch (Exception ex)
+        {
+            return (0, 0, $"Error importing cures: {ex.Message}");
         }
     }
     
@@ -240,10 +398,16 @@ public class CureManager
                 if (targetName != null)
                 {
                     wasCureSuccess = true;
+                    OnLogMessage?.Invoke($"🔍 Cure detected (self pattern): target='{targetName}', isTargetSelf={_isTargetSelf(targetName)}");
                     if (_isTargetSelf(targetName))
                     {
                         RemoveActiveAilment(cureSpell.AilmentId, "");
                         OnLogMessage?.Invoke($"✨ Cured self of {GetAilment(cureSpell.AilmentId)?.DisplayName ?? "ailment"}");
+                    }
+                    else
+                    {
+                        RemoveActiveAilment(cureSpell.AilmentId, targetName);
+                        OnLogMessage?.Invoke($"✨ Cured {targetName} of {GetAilment(cureSpell.AilmentId)?.DisplayName ?? "ailment"}");
                     }
                 }
             }
@@ -255,6 +419,7 @@ public class CureManager
                 if (targetName != null)
                 {
                     wasCureSuccess = true;
+                    OnLogMessage?.Invoke($"🔍 Cure detected (party pattern): target='{targetName}', isTargetSelf={_isTargetSelf(targetName)}");
                     if (_isTargetSelf(targetName))
                     {
                         RemoveActiveAilment(cureSpell.AilmentId, "");
@@ -300,7 +465,20 @@ public class CureManager
         
         var patternWithPlaceholder = pattern.Replace("{target}", "<<<TARGET>>>");
         var escapedPattern = Regex.Escape(patternWithPlaceholder);
-        var regexPattern = escapedPattern.Replace("<<<TARGET>>>", "(.+?)");
+        
+        // Use greedy (.+) if {target} is at the end of pattern, non-greedy (.+?) otherwise
+        // This ensures we capture full names like "Azii" instead of just "A"
+        string regexPattern;
+        if (pattern.TrimEnd().EndsWith("{target}"))
+        {
+            // Target is at end - use greedy match up to common ending punctuation or end of string
+            regexPattern = escapedPattern.Replace("<<<TARGET>>>", @"(.+?)(?:[!\.\,\?\;\:]|$)");
+        }
+        else
+        {
+            // Target is in middle - use non-greedy
+            regexPattern = escapedPattern.Replace("<<<TARGET>>>", "(.+?)");
+        }
         
         try
         {
@@ -359,17 +537,29 @@ public class CureManager
             TargetName = targetName,
             DetectedAt = DateTime.Now
         });
-        OnAilmentsChanged?.Invoke();
     }
     
     private void RemoveActiveAilment(string ailmentId, string targetName)
     {
-        var removed = _activeAilments.RemoveAll(a => 
+        var beforeCount = _activeAilments.Count;
+        _activeAilments.RemoveAll(a => 
             a.AilmentId == ailmentId && 
             a.TargetName.Equals(targetName, StringComparison.OrdinalIgnoreCase));
+        var afterCount = _activeAilments.Count;
         
-        if (removed > 0)
-            OnAilmentsChanged?.Invoke();
+        if (beforeCount != afterCount)
+        {
+            OnLogMessage?.Invoke($"🔍 Removed ailment: ailmentId={ailmentId}, target='{targetName}', removed={beforeCount - afterCount}");
+        }
+        else
+        {
+            OnLogMessage?.Invoke($"🔍 No ailment found to remove: ailmentId={ailmentId}, target='{targetName}'");
+            // Debug: show what ailments we have
+            foreach (var a in _activeAilments)
+            {
+                OnLogMessage?.Invoke($"   Active ailment: id={a.AilmentId}, target='{a.TargetName}'");
+            }
+        }
     }
     
     public bool HasActiveAilment(string ailmentId, string targetName)
@@ -387,7 +577,6 @@ public class CureManager
     public void ClearAllAilments()
     {
         _activeAilments.Clear();
-        OnAilmentsChanged?.Invoke();
     }
     
     /// <summary>
@@ -401,7 +590,6 @@ public class CureManager
         if (removed > 0)
         {
             OnLogMessage?.Invoke($"🧹 Cleared {removed} ailment(s) for {targetName} (left party)");
-            OnAilmentsChanged?.Invoke();
         }
     }
     
@@ -418,7 +606,6 @@ public class CureManager
         if (removed > 0)
         {
             OnLogMessage?.Invoke($"🧹 Cleared {removed} ailment(s) for members no longer in party");
-            OnAilmentsChanged?.Invoke();
         }
     }
     
@@ -429,7 +616,7 @@ public class CureManager
     /// <summary>
     /// Check if anyone needs curing and return the command to cast, or null if no curing needed.
     /// </summary>
-    public (string? Command, string Description)? CheckCuring()
+    public (string? Command, string Description, ActiveAilment? Ailment)? CheckCuring()
     {
         if (!_config.CuringEnabled) return null;
         if (_activeAilments.Count == 0) return null;
@@ -438,12 +625,20 @@ public class CureManager
         var partyMembers = _getPartyMembers().ToList();
         var partyNames = partyMembers.Select(p => p.Name.ToLowerInvariant()).ToHashSet();
         
+        // Clean up expired pending cures (re-allow curing after 10 seconds if cure didn't work)
+        foreach (var expiredAilment in _activeAilments.Where(a => a.IsCurePendingExpired))
+        {
+            expiredAilment.CureInitiatedAt = null;  // Reset so we can try again
+            OnLogMessage?.Invoke($"🔄 Cure timeout expired for {expiredAilment.TargetName}, will retry");
+        }
+        
         // Debug: Log active ailments
         foreach (var aa in _activeAilments)
         {
             var ailmentName = GetAilment(aa.AilmentId)?.DisplayName ?? "Unknown";
             var debugTarget = aa.IsSelf ? "SELF" : aa.TargetName;
-            OnLogMessage?.Invoke($"🔍 Active ailment: {ailmentName} on {debugTarget}");
+            var pendingNote = aa.CurePending ? " (cure pending)" : "";
+            OnLogMessage?.Invoke($"🔍 Active ailment: {ailmentName} on {debugTarget}{pendingNote}");
         }
         
         var currentMana = _getCurrentMana();
@@ -456,6 +651,12 @@ public class CureManager
         
         foreach (var activeAilment in _activeAilments)
         {
+            // Skip ailments with pending cures (already initiated a cure for this)
+            if (activeAilment.CurePending)
+            {
+                continue;
+            }
+            
             // Skip party members who are no longer in the party
             if (!activeAilment.IsSelf && !partyNames.Contains(activeAilment.TargetName.ToLowerInvariant()))
             {
@@ -501,7 +702,15 @@ public class CureManager
         var ailment = GetAilment(bestCure.Ailment.AilmentId);
         var targetDesc = bestCure.Ailment.IsSelf ? "self" : bestCure.Ailment.TargetName;
         
-        return (bestCure.Command, $"{bestCure.Spell.DisplayName} on {targetDesc} ({ailment?.DisplayName ?? "ailment"})");
+        return (bestCure.Command, $"{bestCure.Spell.DisplayName} on {targetDesc} ({ailment?.DisplayName ?? "ailment"})", bestCure.Ailment);
+    }
+    
+    /// <summary>
+    /// Mark an ailment as having a cure initiated (to prevent duplicate cures)
+    /// </summary>
+    public void MarkCureInitiated(ActiveAilment ailment)
+    {
+        ailment.CureInitiatedAt = DateTime.Now;
     }
     
     #endregion

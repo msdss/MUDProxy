@@ -136,16 +136,16 @@ public class BuffConfigDialog : Form
         _partyCastMessageTextBox = AddTextBox(controlLeft, y, controlWidth);
         y += rowHeight;
         
-        // Help text for party cast
-        var partyHelpLabel = new Label
+        // Help text for both messages
+        var helpLabel = new Label
         {
-            Text = "Use {target} as placeholder for player name",
+            Text = "Use {target} as placeholder for player name (e.g., \"You cast bless on {target}\")",
             Location = new Point(controlLeft, y),
             AutoSize = true,
             ForeColor = Color.Gray,
             Font = new Font("Segoe UI", 8)
         };
-        this.Controls.Add(partyHelpLabel);
+        this.Controls.Add(helpLabel);
         y += 22;
         
         // Expire Message

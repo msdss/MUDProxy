@@ -14,6 +14,9 @@ public class BuffManager
     private readonly string _settingsFilePath;
     private readonly HealingManager _healingManager;
     private readonly CureManager _cureManager;
+    private readonly PlayerDatabaseManager _playerDatabaseManager;
+    private readonly MonsterDatabaseManager _monsterDatabaseManager;
+    private readonly CombatManager _combatManager;
     
     // Events for UI updates
     public event Action? OnBuffsChanged;
@@ -29,6 +32,17 @@ public class BuffManager
     private int _currentHp = 0;
     private int _maxHp = 0;
     private int _manaReservePercent = 20; // Don't cast if mana below this %
+    private bool _isResting = false;  // Player is in resting state
+    private bool _inCombat = false;   // Player is in combat
+    private bool _inTrainingScreen = false;  // Player is in character training screen
+    private bool _commandsPaused = false;  // Manual pause for all commands
+    
+    // Buff state settings (persisted)
+    private bool _buffWhileResting = true;
+    private bool _buffWhileInCombat = true;
+    
+    // App settings (persisted)
+    private bool _autoStartProxy = false;
     
     // Par frequency settings (persisted)
     private bool _parAutoEnabled = false;
@@ -66,16 +80,19 @@ public class BuffManager
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
     
     private static readonly Regex HpManaPromptRegex = new(
-        @"\[HP=(\d+)(?:/(\d+))?/(MA|KAI)=(\d+)(?:/(\d+))?\]",
-        RegexOptions.Compiled);
+        @"\[HP=(\d+)(?:/(\d+))?/(MA|KAI)=(\d+)(?:/(\d+))?\]:?\s*(\(Resting\))?",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
     
     // Telepath HP update variations:
     // "Xyz telepaths: {HP=745/745}" (non-mana user)
     // "Azii telepaths: {HP=151/160,MA=82/110}" (mana user)
     // "Boost telepaths: {HP=149/149,KAI=3/16}" (kai user)
-    // "Boost telepaths: {HP=149/149,KAI=3/16, Resting}" (kai user, resting)
+    // "Boost telepaths: {HP=149/149,KAI=3/16, Resting}" (resting)
+    // "Boost telepaths: {HP=174/189,KAI=20/21, Resting, Losing HPs}" (resting + losing hp)
+    // "Boost telepaths: {HP=189/189,KAI=21/21, Resting, Poisoned}" (resting + poisoned)
+    // "Boost telepaths: {HP=189/189,KAI=21/21, Poisoned}" (poisoned, not resting)
     private static readonly Regex TelepathHpRegex = new(
-        @"(\w+)\s+telepaths:\s*\{HP=(\d+)/(\d+)(?:,(MA|KAI)=(\d+)/(\d+))?(?:,\s*Resting)?\}",
+        @"(\w+)\s+telepaths:\s*\{HP=(\d+)/(\d+)(?:,(MA|KAI)=(\d+)/(\d+))?(?:,\s*(?:Resting|Poisoned|Losing HPs))*\}",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
     
     public int ManaReservePercent
@@ -114,8 +131,66 @@ public class BuffManager
         set { _healthRequestIntervalSeconds = Math.Clamp(value, 30, 300); SaveSettings(); }
     }
     
+    public bool BuffWhileResting
+    {
+        get => _buffWhileResting;
+        set { _buffWhileResting = value; SaveSettings(); }
+    }
+    
+    public bool BuffWhileInCombat
+    {
+        get => _buffWhileInCombat;
+        set { _buffWhileInCombat = value; SaveSettings(); }
+    }
+    
+    public bool AutoStartProxy
+    {
+        get => _autoStartProxy;
+        set { _autoStartProxy = value; SaveSettings(); }
+    }
+    
+    public bool IsResting => _isResting;
+    public bool InCombat => _inCombat;
+    public bool InTrainingScreen => _inTrainingScreen;
+    
+    /// <summary>
+    /// Manual pause for all automatic commands
+    /// </summary>
+    public bool CommandsPaused
+    {
+        get => _commandsPaused;
+        set
+        {
+            if (_commandsPaused != value)
+            {
+                _commandsPaused = value;
+                OnLogMessage?.Invoke(value ? "⏸️ All commands PAUSED" : "▶️ Commands RESUMED");
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Returns true if commands should not be sent (training screen or manually paused)
+    /// </summary>
+    public bool ShouldPauseCommands => _inTrainingScreen || _commandsPaused;
+    
+    /// <summary>
+    /// Set the combat state (called from MainForm when combat state changes)
+    /// </summary>
+    public void SetCombatState(bool inCombat)
+    {
+        if (_inCombat != inCombat)
+        {
+            _inCombat = inCombat;
+            OnLogMessage?.Invoke(inCombat ? "⚔️ Entered combat" : "🏠 Left combat");
+        }
+    }
+
     public HealingManager HealingManager => _healingManager;
     public CureManager CureManager => _cureManager;
+    public PlayerDatabaseManager PlayerDatabase => _playerDatabaseManager;
+    public MonsterDatabaseManager MonsterDatabase => _monsterDatabaseManager;
+    public CombatManager CombatManager => _combatManager;
     public int CurrentHp => _currentHp;
     public int MaxHp => _maxHp;
     public int CurrentMana => _currentMana;
@@ -136,8 +211,9 @@ public class BuffManager
             () => _partyMembers,
             () => _currentMana,
             () => _maxMana,
-            () => _manaReservePercent,
-            IsTargetSelf
+            IsTargetSelf,
+            () => _isResting,
+            () => _inCombat
         );
         _healingManager.OnLogMessage += msg => OnLogMessage?.Invoke(msg);
         
@@ -150,6 +226,15 @@ public class BuffManager
             IsTargetSelf
         );
         _cureManager.OnLogMessage += msg => OnLogMessage?.Invoke(msg);
+        
+        _playerDatabaseManager = new PlayerDatabaseManager();
+        _playerDatabaseManager.OnLogMessage += msg => OnLogMessage?.Invoke(msg);
+        
+        _monsterDatabaseManager = new MonsterDatabaseManager();
+        _monsterDatabaseManager.OnLogMessage += msg => OnLogMessage?.Invoke(msg);
+        
+        _combatManager = new CombatManager();
+        _combatManager.OnLogMessage += msg => OnLogMessage?.Invoke(msg);
         
         LoadConfigurations();
         LoadSettings();
@@ -230,6 +315,77 @@ public class BuffManager
         }
     }
     
+    public string ExportBuffs()
+    {
+        var export = new BuffExport
+        {
+            ExportVersion = "1.0",
+            ExportedAt = DateTime.Now,
+            Buffs = _buffConfigurations.Select(b => b.Clone()).ToList()
+        };
+        
+        // Generate new IDs on export to avoid conflicts when importing
+        foreach (var buff in export.Buffs)
+        {
+            buff.Id = Guid.NewGuid().ToString();
+        }
+        
+        return JsonSerializer.Serialize(export, new JsonSerializerOptions { WriteIndented = true });
+    }
+    
+    public (int imported, int skipped, string message) ImportBuffs(string json, bool replaceExisting)
+    {
+        try
+        {
+            var export = JsonSerializer.Deserialize<BuffExport>(json);
+            if (export == null || export.Buffs == null)
+                return (0, 0, "Invalid buff export file format.");
+            
+            int imported = 0;
+            int skipped = 0;
+            
+            foreach (var buff in export.Buffs)
+            {
+                // Check for duplicate by name
+                var existing = _buffConfigurations.FirstOrDefault(b => 
+                    b.DisplayName.Equals(buff.DisplayName, StringComparison.OrdinalIgnoreCase));
+                
+                if (existing != null)
+                {
+                    if (replaceExisting)
+                    {
+                        buff.Id = existing.Id; // Keep same ID for replacement
+                        var index = _buffConfigurations.IndexOf(existing);
+                        _buffConfigurations[index] = buff;
+                        imported++;
+                    }
+                    else
+                    {
+                        skipped++;
+                    }
+                }
+                else
+                {
+                    buff.Id = Guid.NewGuid().ToString(); // New ID
+                    _buffConfigurations.Add(buff);
+                    imported++;
+                }
+            }
+            
+            if (imported > 0)
+            {
+                SaveConfigurations();
+                OnBuffsChanged?.Invoke();
+            }
+            
+            return (imported, skipped, $"Imported {imported} buff(s), skipped {skipped} duplicate(s).");
+        }
+        catch (Exception ex)
+        {
+            return (0, 0, $"Error importing buffs: {ex.Message}");
+        }
+    }
+    
     private void LoadSettings()
     {
         try
@@ -246,6 +402,9 @@ public class BuffManager
                     _healthRequestEnabled = settings.HealthRequestEnabled;
                     _healthRequestIntervalSeconds = settings.HealthRequestIntervalSeconds;
                     _manaReservePercent = settings.ManaReservePercent;
+                    _buffWhileResting = settings.BuffWhileResting;
+                    _buffWhileInCombat = settings.BuffWhileInCombat;
+                    _autoStartProxy = settings.AutoStartProxy;
                 }
             }
         }
@@ -272,7 +431,10 @@ public class BuffManager
                 ParAfterCombatTick = _parAfterCombatTick,
                 HealthRequestEnabled = _healthRequestEnabled,
                 HealthRequestIntervalSeconds = _healthRequestIntervalSeconds,
-                ManaReservePercent = _manaReservePercent
+                ManaReservePercent = _manaReservePercent,
+                BuffWhileResting = _buffWhileResting,
+                BuffWhileInCombat = _buffWhileInCombat,
+                AutoStartProxy = _autoStartProxy
             };
             
             var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions 
@@ -293,6 +455,16 @@ public class BuffManager
     
     public void ProcessMessage(string message)
     {
+        // Check for training/character creation screen
+        if (message.Contains("Point Cost Chart"))
+        {
+            if (!_inTrainingScreen)
+            {
+                _inTrainingScreen = true;
+                OnLogMessage?.Invoke("📋 Training screen detected - commands paused");
+            }
+        }
+        
         // Check for stat command output
         if (message.Contains("Name:") && message.Contains("Race:") && message.Contains("Class:"))
         {
@@ -329,10 +501,20 @@ public class BuffManager
         // Process cure-related messages (ailment detection, telepath requests, cure success)
         _cureManager.ProcessMessage(message, _partyMembers);
         
+        // Process player database (parse "who" command output)
+        _playerDatabaseManager.ProcessMessage(message);
+        
         // Track HP and mana from prompt [HP=X/Y/MA=Z/W]: or [HP=X/MA=Z]:
         var promptMatch = HpManaPromptRegex.Match(message);
         if (promptMatch.Success)
         {
+            // If we see the HP prompt, we're back in the game
+            if (_inTrainingScreen)
+            {
+                _inTrainingScreen = false;
+                OnLogMessage?.Invoke("🎮 Returned to game - commands resumed");
+            }
+            
             if (int.TryParse(promptMatch.Groups[1].Value, out int hp))
             {
                 _currentHp = hp;
@@ -366,6 +548,15 @@ public class BuffManager
                     _playerInfo.MaxMana = _currentMana;
                 }
             }
+            
+            // Check for resting state (Group 6 is the optional "(Resting)" capture)
+            bool wasResting = _isResting;
+            _isResting = promptMatch.Groups[6].Success;
+            
+            if (_isResting != wasResting)
+            {
+                OnLogMessage?.Invoke(_isResting ? "💤 Player is now resting" : "🏃 Player is no longer resting");
+            }
         }
         
         // Check for cast failures - block until next tick
@@ -397,19 +588,31 @@ public class BuffManager
         // Check for buff cast success
         foreach (var config in _buffConfigurations)
         {
-            // Check self cast
-            if (!string.IsNullOrEmpty(config.SelfCastMessage) && 
-                message.Contains(config.SelfCastMessage, StringComparison.OrdinalIgnoreCase))
+            // Check self cast message (supports {target} placeholder)
+            if (!string.IsNullOrEmpty(config.SelfCastMessage))
             {
-                ActivateBuff(config, string.Empty);
-                continue;
+                var targetName = TryExtractTargetFromPattern(message, config.SelfCastMessage);
+                if (targetName != null)
+                {
+                    if (IsTargetSelf(targetName))
+                    {
+                        ActivateBuff(config, string.Empty);
+                        continue;
+                    }
+                }
+                // Also try literal match for backwards compatibility
+                else if (message.Contains(config.SelfCastMessage, StringComparison.OrdinalIgnoreCase))
+                {
+                    ActivateBuff(config, string.Empty);
+                    continue;
+                }
             }
             
-            // Check party cast
+            // Check party cast message (supports {target} placeholder)
             if (!string.IsNullOrEmpty(config.PartyCastMessage) && 
                 config.TargetType != BuffTargetType.SelfOnly)
             {
-                var targetName = TryExtractTargetFromPartyCast(message, config.PartyCastMessage);
+                var targetName = TryExtractTargetFromPattern(message, config.PartyCastMessage);
                 if (targetName != null)
                 {
                     // Check if it's self (player name starts with target, or target starts with player name)
@@ -434,7 +637,7 @@ public class BuffManager
         }
     }
     
-    private string? TryExtractTargetFromPartyCast(string message, string pattern)
+    private string? TryExtractTargetFromPattern(string message, string pattern)
     {
         // Pattern contains {target} placeholder
         // Convert it to a regex to extract the name
@@ -446,14 +649,27 @@ public class BuffManager
         // then escape everything else
         var patternWithPlaceholder = pattern.Replace("{target}", "<<<TARGET>>>");
         var escapedPattern = Regex.Escape(patternWithPlaceholder);
-        var regexPattern = escapedPattern.Replace("<<<TARGET>>>", "(.+)");
+        
+        // Use appropriate regex based on where {target} appears
+        string regexPattern;
+        if (pattern.TrimEnd().EndsWith("{target}"))
+        {
+            // Target is at end - match up to common ending punctuation or end of string
+            regexPattern = escapedPattern.Replace("<<<TARGET>>>", @"(.+?)(?:[!\.\,\?\;\:]|$)");
+        }
+        else
+        {
+            // Target is in middle - use non-greedy
+            regexPattern = escapedPattern.Replace("<<<TARGET>>>", "(.+?)");
+        }
         
         try
         {
             var match = Regex.Match(message, regexPattern, RegexOptions.IgnoreCase);
             if (match.Success && match.Groups.Count > 1)
             {
-                var extracted = match.Groups[1].Value.Trim();
+                // Trim whitespace and common punctuation from the target
+                var extracted = match.Groups[1].Value.Trim().TrimEnd('!', '.', ',', '?', ';', ':');
                 return extracted;
             }
         }
@@ -638,7 +854,8 @@ public class BuffManager
             
             var restingIndicator = isResting ? " 💤" : "";
             var poisonIndicator = isPoisoned ? " ☠️" : "";
-            OnLogMessage?.Invoke($"  👤 {member.Name} ({member.Class}) H:{member.HealthPercent}%{restingIndicator}{poisonIndicator} - {member.Rank}");
+            var manaDisplay = member.ManaPercent > 0 ? $" M:{member.ManaPercent}%" : "";
+            OnLogMessage?.Invoke($"  👤 {member.Name} ({member.Class}) H:{member.HealthPercent}%{manaDisplay}{restingIndicator}{poisonIndicator} - {member.Rank}");
         }
         
         OnLogMessage?.Invoke($"👥 Party updated: {_partyMembers.Count} members detected");
@@ -789,10 +1006,14 @@ public class BuffManager
     /// </summary>
     public void CheckAutoRecast()
     {
-        if (!_autoRecastEnabled)
+        // If commands are paused (training screen or manual), don't do anything
+        if (ShouldPauseCommands)
         {
             return;
         }
+        
+        // Note: AutoRecastEnabled only controls BUFFS, not heals/cures
+        // We still need to process heals and cures even if buff auto-recast is disabled
         
         // If we're blocked from casting due to failure/already cast, don't try
         if (_castBlockedUntilNextTick)
@@ -814,16 +1035,8 @@ public class BuffManager
         if (timeSinceLastRecast < MIN_RECAST_INTERVAL_MS)
             return;
         
-        // Check mana reserve
-        if (_maxMana > 0)
-        {
-            var manaPercent = (_currentMana * 100) / _maxMana;
-            if (manaPercent < _manaReservePercent)
-            {
-                OnLogMessage?.Invoke($"⏸️ Mana too low: {manaPercent}% < {_manaReservePercent}% reserve");
-                return;
-            }
-        }
+        // NOTE: Mana reserve check is NOT done here - it only applies to buffs
+        // Heals and cures should always attempt to cast if we have enough mana for the spell
         
         // Process by priority order
         foreach (var priorityType in _cureManager.PriorityOrder)
@@ -843,6 +1056,7 @@ public class BuffManager
     public void CheckParCommand()
     {
         if (!_parAutoEnabled) return;
+        if (ShouldPauseCommands) return;
         
         var timeSinceLastPar = (DateTime.Now - _lastParSent).TotalSeconds;
         if (timeSinceLastPar >= _parFrequencySeconds)
@@ -859,6 +1073,9 @@ public class BuffManager
         // Unblock casting for next round
         _castBlockedUntilNextTick = false;
         _lastCastCommandSent = DateTime.MinValue; // Reset cooldown on tick
+        
+        // Don't send commands if paused
+        if (ShouldPauseCommands) return;
         
         // Send par after combat tick if configured
         // Check that we haven't sent par in the last 2 seconds to prevent duplicates
@@ -886,6 +1103,7 @@ public class BuffManager
     public void CheckHealthRequests()
     {
         if (!_healthRequestEnabled) return;
+        if (ShouldPauseCommands) return;
         
         var timeSinceLastCheck = (DateTime.Now - _lastHealthRequestCheck).TotalSeconds;
         if (timeSinceLastCheck < _healthRequestIntervalSeconds) return;
@@ -914,14 +1132,11 @@ public class BuffManager
     {
         switch (priorityType)
         {
-            case CastPriorityType.CriticalHeals:
-                return TryCastCriticalHeal();
+            case CastPriorityType.Heals:
+                return TryCastHeal();
             
             case CastPriorityType.Cures:
                 return TryCastCure();
-            
-            case CastPriorityType.RegularHeals:
-                return TryCastRegularHeal();
             
             case CastPriorityType.Buffs:
                 return TryCastBuff();
@@ -931,19 +1146,20 @@ public class BuffManager
         }
     }
     
-    private bool TryCastCriticalHeal()
+    private bool TryCastHeal()
     {
         if (!_healingManager.HealingEnabled) return false;
         
-        var healResult = _healingManager.CheckCriticalHealing();
+        var healResult = _healingManager.CheckHealing();
         if (healResult.HasValue && healResult.Value.Command != null)
         {
             _lastRecastAttempt = DateTime.Now;
             _lastCastCommandSent = DateTime.Now;
-            OnLogMessage?.Invoke($"🚨 Critical heal: {healResult.Value.Description}");
+            OnLogMessage?.Invoke($"💚 Auto-healing: {healResult.Value.Description}");
             OnSendCommand?.Invoke(healResult.Value.Command);
             return true;
         }
+        
         return false;
     }
     
@@ -958,22 +1174,13 @@ public class BuffManager
             _lastCastCommandSent = DateTime.Now;
             OnLogMessage?.Invoke($"💊 Auto-curing: {cureResult.Value.Description}");
             OnSendCommand?.Invoke(cureResult.Value.Command);
-            return true;
-        }
-        return false;
-    }
-    
-    private bool TryCastRegularHeal()
-    {
-        if (!_healingManager.HealingEnabled) return false;
-        
-        var healResult = _healingManager.CheckRegularHealing();
-        if (healResult.HasValue && healResult.Value.Command != null)
-        {
-            _lastRecastAttempt = DateTime.Now;
-            _lastCastCommandSent = DateTime.Now;
-            OnLogMessage?.Invoke($"💚 Auto-healing: {healResult.Value.Description}");
-            OnSendCommand?.Invoke(healResult.Value.Command);
+            
+            // Mark the ailment as having a cure initiated to prevent duplicate casts
+            if (cureResult.Value.Ailment != null)
+            {
+                _cureManager.MarkCureInitiated(cureResult.Value.Ailment);
+            }
+            
             return true;
         }
         return false;
@@ -981,10 +1188,37 @@ public class BuffManager
     
     private bool TryCastBuff()
     {
+        // Check if buff auto-recast is enabled
+        if (!_autoRecastEnabled) return false;
+        
+        // Check if we should buff in current state
+        if (_isResting && !_buffWhileResting)
+        {
+            // Don't log every time to avoid spam - only when there are buffs to cast
+            return false;
+        }
+        
+        if (_inCombat && !_buffWhileInCombat)
+        {
+            // Don't log every time to avoid spam - only when there are buffs to cast
+            return false;
+        }
+        
         // Get buffs that need recasting, sorted by priority
-        var buffsToRecast = GetBuffsNeedingRecast().ToList();
+        var buffsToRecast = GetBuffsNeedingRecast().ToList();;
         
         if (buffsToRecast.Count == 0) return false;
+        
+        // Check mana reserve before attempting any buff
+        if (_maxMana > 0)
+        {
+            var currentManaPercent = (_currentMana * 100) / _maxMana;
+            if (currentManaPercent < _manaReservePercent)
+            {
+                OnLogMessage?.Invoke($"⏸️ Buff skipped: mana {currentManaPercent}% < {_manaReservePercent}% reserve");
+                return false;
+            }
+        }
         
         // Find a buff we can afford to cast
         BuffConfiguration? configToCast = null;
@@ -995,6 +1229,7 @@ public class BuffManager
             // Check if we have enough mana for this spell
             if (config.ManaCost > 0 && _currentMana < config.ManaCost)
             {
+                OnLogMessage?.Invoke($"⏸️ Buff {config.DisplayName} skipped: need {config.ManaCost} mana, have {_currentMana}");
                 continue; // Skip, can't afford
             }
             
@@ -1005,6 +1240,7 @@ public class BuffManager
                 var manaPercentAfter = (manaAfterCast * 100) / _maxMana;
                 if (manaPercentAfter < _manaReservePercent)
                 {
+                    OnLogMessage?.Invoke($"⏸️ Buff {config.DisplayName} skipped: would drop mana to {manaPercentAfter}% (reserve: {_manaReservePercent}%)");
                     continue; // Skip, would put us below reserve
                 }
             }

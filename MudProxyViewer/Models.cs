@@ -129,8 +129,8 @@ public class PlayerInfo
     public int CurrentMana { get; set; }
     public int MaxMana { get; set; }
     
-    public bool IsMelee => PartyMember.MeleeClasses.Contains(Class);
-    public bool IsCaster => PartyMember.CasterClasses.Contains(Class);
+    public bool IsMelee => PartyMember.MeleeClasses.Contains(Class, StringComparer.OrdinalIgnoreCase);
+    public bool IsCaster => PartyMember.CasterClasses.Contains(Class, StringComparer.OrdinalIgnoreCase);
     
     public double HpPercent => MaxHp > 0 ? (CurrentHp * 100.0 / MaxHp) : 100;
 }
@@ -169,14 +169,22 @@ public class HealSpellConfiguration
     }
 }
 
+public enum HealRuleType
+{
+    Combat,   // Active during combat AND idle (not resting)
+    Resting   // Active only while resting
+}
+
 public class HealRule
 {
     public string Id { get; set; } = Guid.NewGuid().ToString();
     public string HealSpellId { get; set; } = string.Empty;  // Reference to HealSpellConfiguration
     public int HpThresholdPercent { get; set; } = 70;        // Cast when HP below this %
-    public bool IsCritical { get; set; } = false;             // Critical heals happen before cures
     
-    // For party heals only
+    // State-based rule type (only applies to self-healing rules)
+    public HealRuleType RuleType { get; set; } = HealRuleType.Combat;
+    
+    // For party-wide heals only
     public bool IsPartyHealRule { get; set; } = false;
     public int PartyPercentRequired { get; set; } = 50;       // % of party that must be below threshold
     
@@ -187,7 +195,7 @@ public class HealRule
             Id = this.Id,
             HealSpellId = this.HealSpellId,
             HpThresholdPercent = this.HpThresholdPercent,
-            IsCritical = this.IsCritical,
+            RuleType = this.RuleType,
             IsPartyHealRule = this.IsPartyHealRule,
             PartyPercentRequired = this.PartyPercentRequired
         };
@@ -197,7 +205,6 @@ public class HealRule
 public class HealingConfiguration
 {
     public bool HealingEnabled { get; set; } = true;
-    public bool HealsPriorityOverBuffs { get; set; } = true;
     public List<HealSpellConfiguration> HealSpells { get; set; } = new();
     public List<HealRule> SelfHealRules { get; set; } = new();
     public List<HealRule> PartyHealRules { get; set; } = new();  // Single target heals on party members
@@ -258,16 +265,21 @@ public class ActiveAilment
     public string AilmentId { get; set; } = string.Empty;
     public string TargetName { get; set; } = string.Empty;  // Empty = self
     public DateTime DetectedAt { get; set; } = DateTime.Now;
+    public DateTime? CureInitiatedAt { get; set; } = null;  // When we started casting a cure
     
     public bool IsSelf => string.IsNullOrEmpty(TargetName);
+    public bool CurePending => CureInitiatedAt.HasValue;
+    
+    // Consider cure pending for 10 seconds (enough time for cast + server response)
+    public bool IsCurePendingExpired => CureInitiatedAt.HasValue && 
+        (DateTime.Now - CureInitiatedAt.Value).TotalSeconds > 10;
 }
 
 public enum CastPriorityType
 {
-    CriticalHeals = 0,
+    Heals = 0,
     Cures = 1,
-    RegularHeals = 2,
-    Buffs = 3
+    Buffs = 2
 }
 
 public class CureConfiguration
@@ -279,9 +291,8 @@ public class CureConfiguration
     // Priority order (lower index = higher priority)
     public List<CastPriorityType> PriorityOrder { get; set; } = new()
     {
-        CastPriorityType.CriticalHeals,
+        CastPriorityType.Heals,
         CastPriorityType.Cures,
-        CastPriorityType.RegularHeals,
         CastPriorityType.Buffs
     };
 }
@@ -294,4 +305,175 @@ public class ProxySettings
     public bool HealthRequestEnabled { get; set; } = false;
     public int HealthRequestIntervalSeconds { get; set; } = 60;
     public int ManaReservePercent { get; set; } = 20;
+    public bool BuffWhileResting { get; set; } = true;  // Allow buffing while resting
+    public bool BuffWhileInCombat { get; set; } = true;  // Allow buffing while in combat
+    public bool AutoStartProxy { get; set; } = false;  // Auto-start proxy on app launch
+}
+
+// Export/Import classes
+public class BuffExport
+{
+    public string ExportVersion { get; set; } = "1.0";
+    public DateTime ExportedAt { get; set; } = DateTime.Now;
+    public List<BuffConfiguration> Buffs { get; set; } = new();
+}
+
+public class HealExport
+{
+    public string ExportVersion { get; set; } = "1.0";
+    public DateTime ExportedAt { get; set; } = DateTime.Now;
+    public List<HealSpellConfiguration> HealSpells { get; set; } = new();
+    public List<HealRule> SelfHealRules { get; set; } = new();
+    public List<HealRule> PartyHealRules { get; set; } = new();
+    public List<HealRule> PartyWideHealRules { get; set; } = new();
+}
+
+public class CureExport
+{
+    public string ExportVersion { get; set; } = "1.0";
+    public DateTime ExportedAt { get; set; } = DateTime.Now;
+    public List<AilmentConfiguration> Ailments { get; set; } = new();
+    public List<CureSpellConfiguration> CureSpells { get; set; } = new();
+}
+
+// Player Database
+public enum PlayerRelationship
+{
+    Neutral,
+    Friend,
+    Enemy
+}
+
+public class PlayerData
+{
+    public string FirstName { get; set; } = string.Empty;  // Unique identifier, never changes
+    public string LastName { get; set; } = string.Empty;   // From game, may be empty
+    public PlayerRelationship Relationship { get; set; } = PlayerRelationship.Neutral;
+    public DateTime LastSeen { get; set; } = DateTime.Now;
+    
+    public string FullName => string.IsNullOrEmpty(LastName) ? FirstName : $"{FirstName} {LastName}";
+}
+
+public class PlayerDatabase
+{
+    public List<PlayerData> Players { get; set; } = new();
+}
+
+// Monster Database (from CSV)
+public class MonsterAttack
+{
+    public string Name { get; set; } = string.Empty;
+    public int Min { get; set; }
+    public int Max { get; set; }
+    public int Accuracy { get; set; }
+}
+
+public class MonsterDrop
+{
+    public int ItemId { get; set; }
+    public int DropPercent { get; set; }
+}
+
+public class MonsterData
+{
+    public int Number { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public int ArmourClass { get; set; }
+    public int DamageResist { get; set; }
+    public int MagicRes { get; set; }
+    public int BSDefense { get; set; }
+    public int EXP { get; set; }
+    public int HP { get; set; }
+    public double AvgDmg { get; set; }
+    public int HPRegen { get; set; }
+    public int Type { get; set; }
+    public bool Undead { get; set; }
+    public int Align { get; set; }
+    public bool InGame { get; set; }
+    public int Energy { get; set; }
+    public int CharmLVL { get; set; }  // Enslave Level
+    public int Weapon { get; set; }
+    public int FollowPercent { get; set; }
+    
+    // Attacks (up to 5)
+    public List<MonsterAttack> Attacks { get; set; } = new();
+    
+    // Drops (up to 10)
+    public List<MonsterDrop> Drops { get; set; } = new();
+}
+
+// Monster user overrides (stored separately from CSV data)
+public enum MonsterRelationship
+{
+    Neutral,
+    Friend,
+    Enemy
+}
+
+public enum AttackPriority
+{
+    First,
+    High,
+    Normal,
+    Low,
+    Last
+}
+
+public class MonsterOverride
+{
+    public int MonsterNumber { get; set; }
+    public string CustomName { get; set; } = string.Empty;  // For manually added monsters
+    public MonsterRelationship Relationship { get; set; } = MonsterRelationship.Neutral;
+    public string PreAttackSpell { get; set; } = string.Empty;
+    public int PreAttackSpellMax { get; set; }
+    public string AttackSpell { get; set; } = string.Empty;
+    public int AttackSpellMax { get; set; }
+    public AttackPriority Priority { get; set; } = AttackPriority.Normal;
+    public bool NotHostile { get; set; } = false;
+}
+
+public class MonsterOverrideDatabase
+{
+    public List<MonsterOverride> Overrides { get; set; } = new();
+}
+
+// Combat Settings (per character)
+public class CombatSettings
+{
+    public string CharacterName { get; set; } = string.Empty;
+    
+    // Weapon Combat
+    public string AttackCommand { get; set; } = string.Empty;
+    public string BackstabWeapon { get; set; } = string.Empty;
+    public string NormalWeapon { get; set; } = string.Empty;
+    public string AlternateWeapon { get; set; } = string.Empty;
+    public string Shield { get; set; } = string.Empty;
+    public bool UseShieldWithBSWeapon { get; set; } = false;
+    public bool UseNormalWeaponForAtkSpells { get; set; } = false;
+    
+    // Spell Combat - Multi-Attack
+    public string MultiAttackSpell { get; set; } = string.Empty;
+    public int MultiAttackMinEnemies { get; set; } = 2;
+    public int MultiAttackMaxCast { get; set; } = 1;
+    public int MultiAttackReqManaPercent { get; set; } = 0;
+    
+    // Spell Combat - Pre-Attack
+    public string PreAttackSpell { get; set; } = string.Empty;
+    public int PreAttackMaxCast { get; set; } = 1;
+    public int PreAttackReqManaPercent { get; set; } = 0;
+    
+    // Spell Combat - Attack
+    public string AttackSpell { get; set; } = string.Empty;
+    public int AttackMaxCast { get; set; } = 1;
+    public int AttackReqManaPercent { get; set; } = 0;
+    
+    // Options
+    public bool DoBackstabAttack { get; set; } = false;
+    public int MaxMonsters { get; set; } = 99;
+    public int RunDistance { get; set; } = 0;
+}
+
+public class CombatSettingsDatabase
+{
+    public List<CombatSettings> Characters { get; set; } = new();
 }

@@ -7,7 +7,6 @@ public class CureConfigDialog : Form
     private TabControl _tabControl = null!;
     private ListBox _ailmentsListBox = null!;
     private ListBox _cureSpellsListBox = null!;
-    private ListBox _priorityListBox = null!;
     
     public CureConfigDialog(CureManager cureManager)
     {
@@ -43,10 +42,7 @@ public class CureConfigDialog : Form
         CreateCureSpellsTab(cureSpellsTab);
         _tabControl.TabPages.Add(cureSpellsTab);
         
-        // Tab 3: Priority Order
-        var priorityTab = new TabPage("Cast Priority") { BackColor = Color.FromArgb(45, 45, 45) };
-        CreatePriorityTab(priorityTab);
-        _tabControl.TabPages.Add(priorityTab);
+        // Note: Cast Priority has been moved to the main Settings dialog (General tab)
         
         this.Controls.Add(_tabControl);
         
@@ -122,48 +118,6 @@ public class CureConfigDialog : Form
         tab.Controls.Add(del);
     }
     
-    private void CreatePriorityTab(TabPage tab)
-    {
-        var label = new Label
-        {
-            Text = "Set the order in which actions are performed (top = highest priority).",
-            Location = new Point(10, 10),
-            Size = new Size(530, 20),
-            ForeColor = Color.Gray
-        };
-        tab.Controls.Add(label);
-        
-        _priorityListBox = new ListBox
-        {
-            Location = new Point(10, 35),
-            Size = new Size(300, 150),
-            BackColor = Color.FromArgb(30, 30, 30),
-            ForeColor = Color.White,
-            Font = new Font("Consolas", 11)
-        };
-        tab.Controls.Add(_priorityListBox);
-        
-        var upButton = CreateButton("▲ Up", 320, 35, MoveUp_Click);
-        tab.Controls.Add(upButton);
-        
-        var downButton = CreateButton("▼ Down", 320, 70, MoveDown_Click);
-        tab.Controls.Add(downButton);
-        
-        // Description of each priority type
-        var descLabel = new Label
-        {
-            Text = "Priority Types:\n\n" +
-                   "• Critical Heals - Heal rules marked as 'Critical'\n" +
-                   "• Cures - Cure ailments (poison, paralysis, etc.)\n" +
-                   "• Regular Heals - Heal rules NOT marked as 'Critical'\n" +
-                   "• Buffs - Buff spells with auto-recast enabled",
-            Location = new Point(10, 200),
-            Size = new Size(400, 120),
-            ForeColor = Color.LightGray
-        };
-        tab.Controls.Add(descLabel);
-    }
-    
     private Button CreateButton(string text, int x, int y, EventHandler? onClick)
     {
         var button = new Button
@@ -183,7 +137,6 @@ public class CureConfigDialog : Form
     {
         RefreshAilmentsList();
         RefreshCureSpellsList();
-        RefreshPriorityList();
     }
     
     private void RefreshAilmentsList()
@@ -213,24 +166,6 @@ public class CureConfigDialog : Form
                 $"[P{spell.Priority}] {spell.DisplayName} ({spell.Command}) - cures {ailment?.DisplayName ?? "?"}"));
         }
     }
-    
-    private void RefreshPriorityList()
-    {
-        _priorityListBox.Items.Clear();
-        foreach (var priority in _cureManager.PriorityOrder)
-        {
-            _priorityListBox.Items.Add(new PriorityListItem(priority, GetPriorityDisplayName(priority)));
-        }
-    }
-    
-    private string GetPriorityDisplayName(CastPriorityType type) => type switch
-    {
-        CastPriorityType.CriticalHeals => "🚨 Critical Heals",
-        CastPriorityType.Cures => "💊 Cures",
-        CastPriorityType.RegularHeals => "💚 Regular Heals",
-        CastPriorityType.Buffs => "✨ Buffs",
-        _ => type.ToString()
-    };
     
     // Ailment CRUD
     private void AddAilment_Click(object? sender, EventArgs e)
@@ -312,33 +247,6 @@ public class CureConfigDialog : Form
         }
     }
     
-    // Priority reordering
-    private void MoveUp_Click(object? sender, EventArgs e)
-    {
-        var index = _priorityListBox.SelectedIndex;
-        if (index > 0)
-        {
-            var order = _cureManager.PriorityOrder;
-            (order[index], order[index - 1]) = (order[index - 1], order[index]);
-            _cureManager.PriorityOrder = order;
-            RefreshPriorityList();
-            _priorityListBox.SelectedIndex = index - 1;
-        }
-    }
-    
-    private void MoveDown_Click(object? sender, EventArgs e)
-    {
-        var index = _priorityListBox.SelectedIndex;
-        if (index >= 0 && index < _priorityListBox.Items.Count - 1)
-        {
-            var order = _cureManager.PriorityOrder;
-            (order[index], order[index + 1]) = (order[index + 1], order[index]);
-            _cureManager.PriorityOrder = order;
-            RefreshPriorityList();
-            _priorityListBox.SelectedIndex = index + 1;
-        }
-    }
-    
     private class AilmentListItem
     {
         public AilmentConfiguration Ailment { get; }
@@ -352,14 +260,6 @@ public class CureConfigDialog : Form
         public CureSpellConfiguration Spell { get; }
         public string DisplayText { get; }
         public CureSpellListItem(CureSpellConfiguration spell, string text) { Spell = spell; DisplayText = text; }
-        public override string ToString() => DisplayText;
-    }
-    
-    private class PriorityListItem
-    {
-        public CastPriorityType Priority { get; }
-        public string DisplayText { get; }
-        public PriorityListItem(CastPriorityType priority, string text) { Priority = priority; DisplayText = text; }
         public override string ToString() => DisplayText;
     }
 }

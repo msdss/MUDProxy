@@ -52,6 +52,7 @@ public partial class MainForm : Form
     private int _selfStatusPanelBaseY = 0;  // Y position where self status panel starts
     
     // Quick toggle buttons
+    private Button _pauseButton = null!;
     private Button _healToggleButton = null!;
     private Button _buffToggleButton = null!;
     private Button _cureToggleButton = null!;
@@ -97,6 +98,24 @@ public partial class MainForm : Form
         InitializeComponent();
         InitializeTimers();
         InitializeBuffManagerEvents();
+        
+        // Auto-start proxy if enabled
+        this.Shown += MainForm_Shown;
+    }
+    
+    private void MainForm_Shown(object? sender, EventArgs e)
+    {
+        if (_buffManager.AutoStartProxy)
+        {
+            // Small delay to let the UI fully render, then start proxy
+            Task.Delay(500).ContinueWith(async _ => 
+            {
+                if (InvokeRequired)
+                    BeginInvoke(async () => await StartProxy());
+                else
+                    await StartProxy();
+            });
+        }
     }
 
     private void InitializeTimers()
@@ -260,30 +279,60 @@ public partial class MainForm : Form
 
     private void InitializeComponent()
     {
-        this.Text = "MUD Proxy Viewer v0.3 - Combat Assistant";
+        this.Text = "MUD Proxy Viewer v1.3.0 - Combat Assistant";
         this.Size = new Size(1250, 800);
         this.MinimumSize = new Size(1100, 700);
         this.StartPosition = FormStartPosition.CenterScreen;
         this.BackColor = Color.FromArgb(30, 30, 30);
 
-        // Create menu strip
+        // Create menu strip with dark theme
         var menuStrip = new MenuStrip();
         menuStrip.BackColor = Color.FromArgb(45, 45, 45);
         menuStrip.ForeColor = Color.White;
+        menuStrip.Renderer = new DarkMenuRenderer();
 
         var fileMenu = new ToolStripMenuItem("File") { ForeColor = Color.White };
-        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Save Log...", null, SaveLog_Click));
-        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Clear Log", null, ClearLog_Click));
+        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Save Log...", null, SaveLog_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Clear Log", null, ClearLog_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         fileMenu.DropDownItems.Add(new ToolStripSeparator());
-        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Exit", null, (s, e) => this.Close()));
+        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Exit", null, (s, e) => this.Close()) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
 
         var optionsMenu = new ToolStripMenuItem("Options") { ForeColor = Color.White };
-        optionsMenu.DropDownItems.Add(new ToolStripMenuItem("Settings...", null, OpenSettings_Click));
+        optionsMenu.DropDownItems.Add(new ToolStripMenuItem("Settings...", null, OpenSettings_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        optionsMenu.DropDownItems.Add(new ToolStripSeparator());
+        var autoStartMenuItem = new ToolStripMenuItem("Auto-Start Proxy", null, ToggleAutoStart_Click) 
+        { 
+            ForeColor = Color.White, 
+            BackColor = Color.FromArgb(45, 45, 45),
+            CheckOnClick = true,
+            Checked = _buffManager.AutoStartProxy
+        };
+        optionsMenu.DropDownItems.Add(autoStartMenuItem);
+        optionsMenu.DropDownItems.Add(new ToolStripSeparator());
+        
+        // Export submenu
+        var exportMenu = new ToolStripMenuItem("Export") { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) };
+        exportMenu.DropDownItems.Add(new ToolStripMenuItem("Export Buffs...", null, ExportBuffs_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        exportMenu.DropDownItems.Add(new ToolStripMenuItem("Export Heals...", null, ExportHeals_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        exportMenu.DropDownItems.Add(new ToolStripMenuItem("Export Cures...", null, ExportCures_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        optionsMenu.DropDownItems.Add(exportMenu);
+        
+        // Import submenu
+        var importMenu = new ToolStripMenuItem("Import") { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) };
+        importMenu.DropDownItems.Add(new ToolStripMenuItem("Import Buffs...", null, ImportBuffs_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        importMenu.DropDownItems.Add(new ToolStripMenuItem("Import Heals...", null, ImportHeals_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        importMenu.DropDownItems.Add(new ToolStripMenuItem("Import Cures...", null, ImportCures_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        optionsMenu.DropDownItems.Add(importMenu);
+
+        // Game Data menu
+        var gameDataMenu = new ToolStripMenuItem("Game Data") { ForeColor = Color.White };
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Player DB...", null, OpenPlayerDB_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Monster DB...", null, OpenMonsterDB_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
 
         var helpMenu = new ToolStripMenuItem("Help") { ForeColor = Color.White };
-        helpMenu.DropDownItems.Add(new ToolStripMenuItem("About", null, About_Click));
+        helpMenu.DropDownItems.Add(new ToolStripMenuItem("About", null, About_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
 
-        menuStrip.Items.AddRange(new ToolStripItem[] { fileMenu, optionsMenu, helpMenu });
+        menuStrip.Items.AddRange(new ToolStripItem[] { fileMenu, optionsMenu, gameDataMenu, helpMenu });
         this.MainMenuStrip = menuStrip;
         this.Controls.Add(menuStrip);
 
@@ -317,13 +366,28 @@ public partial class MainForm : Form
         };
         _startStopButton.Click += StartStopButton_Click;
 
+        // Pause all commands button
+        _pauseButton = new Button
+        {
+            Text = "||",
+            Width = 35,
+            Height = 28,
+            Location = new Point(595, 5),
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Font = new Font("Segoe UI", 9, FontStyle.Bold)
+        };
+        _pauseButton.FlatAppearance.BorderColor = Color.FromArgb(80, 80, 80);
+        _pauseButton.Click += PauseButton_Click;
+
         // Quick toggle buttons for Heal/Buff/Cure
         _healToggleButton = new Button
         {
             Text = "Heal",
             Width = 55,
             Height = 28,
-            Location = new Point(600, 5),
+            Location = new Point(635, 5),
             BackColor = _buffManager.HealingManager.HealingEnabled ? Color.FromArgb(70, 130, 180) : Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat
@@ -336,7 +400,7 @@ public partial class MainForm : Form
             Text = "Buff",
             Width = 55,
             Height = 28,
-            Location = new Point(660, 5),
+            Location = new Point(695, 5),
             BackColor = _buffManager.AutoRecastEnabled ? Color.FromArgb(70, 130, 180) : Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat
@@ -349,7 +413,7 @@ public partial class MainForm : Form
             Text = "Cure",
             Width = 55,
             Height = 28,
-            Location = new Point(720, 5),
+            Location = new Point(755, 5),
             BackColor = _buffManager.CureManager.CuringEnabled ? Color.FromArgb(70, 130, 180) : Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat
@@ -367,7 +431,7 @@ public partial class MainForm : Form
             remotePortLabel, _remotePortTextBox,
             localPortLabel, _localPortTextBox,
             _startStopButton,
-            _healToggleButton, _buffToggleButton, _cureToggleButton,
+            _pauseButton, _healToggleButton, _buffToggleButton, _cureToggleButton,
             _autoScrollCheckBox, _autoScrollLogsCheckBox, _showTimestampsCheckBox, _stripAnsiCheckBox
         });
 
@@ -487,7 +551,8 @@ public partial class MainForm : Form
             Text = "Clear Buffs",
             Font = new Font("Segoe UI", 8),
             ForeColor = Color.FromArgb(120, 120, 120),
-            Location = new Point(panelWidth - 60, y + 4),
+            BackColor = Color.FromArgb(35, 45, 55),  // Match self status panel background
+            Location = new Point(panelWidth - 70, y + 4),
             AutoSize = true,
             Cursor = Cursors.Hand
         };
@@ -503,6 +568,10 @@ public partial class MainForm : Form
         };
         _selfStatusPanel.UpdatePlayer("(type 'stat' to detect)", "", 100, 100);
         _combatPanel.Controls.Add(_selfStatusPanel);
+        
+        // Bring clear buffs label to front so it's on top of self status panel
+        _clearBuffsLabel.BringToFront();
+        
         y += _selfStatusPanel.Height + 6;
 
         // Separator (store reference for dynamic positioning)
@@ -688,10 +757,10 @@ public partial class MainForm : Form
             _resetTickButton.Location = new Point(panelWidth - 82, _resetTickButton.Location.Y);
         }
         
-        // Update Clear Buffs label position (right-aligned with self status panel)
+        // Update Clear Buffs label position (right-aligned, inside the border)
         if (_clearBuffsLabel != null)
         {
-            _clearBuffsLabel.Location = new Point(panelWidth - 54, _clearBuffsLabel.Location.Y);
+            _clearBuffsLabel.Location = new Point(panelWidth - 64, _clearBuffsLabel.Location.Y);
         }
         
         // Refresh displays to update buff bar layouts
@@ -972,7 +1041,8 @@ public partial class MainForm : Form
     
     private void OpenSettings_Click(object? sender, EventArgs e)
     {
-        using var dialog = new SettingsDialog(_buffManager);
+        var currentCharacter = _buffManager.PlayerInfo.Name;
+        using var dialog = new SettingsDialog(_buffManager, _buffManager.CombatManager, currentCharacter);
         dialog.ShowDialog(this);
         // Refresh toggle button states after settings close
         UpdateToggleButtonStates();
@@ -999,10 +1069,30 @@ public partial class MainForm : Form
         LogMessage($"Auto-curing {(_buffManager.CureManager.CuringEnabled ? "ENABLED" : "DISABLED")}", MessageType.System);
     }
     
+    private void PauseButton_Click(object? sender, EventArgs e)
+    {
+        _buffManager.CommandsPaused = !_buffManager.CommandsPaused;
+        UpdateToggleButtonStates();
+        LogMessage($"All commands {(_buffManager.CommandsPaused ? "PAUSED" : "RESUMED")}", MessageType.System);
+    }
+    
     private void UpdateToggleButtonStates()
     {
         var enabledColor = Color.FromArgb(70, 130, 180);  // Blue when enabled
         var disabledColor = Color.FromArgb(60, 60, 60);   // Gray when disabled
+        var pausedColor = Color.FromArgb(180, 100, 50);   // Orange when paused
+        
+        // Pause button shows orange when paused or when in training screen
+        if (_buffManager.ShouldPauseCommands)
+        {
+            _pauseButton.BackColor = pausedColor;
+            _pauseButton.Text = ">";  // Play icon to indicate "click to resume"
+        }
+        else
+        {
+            _pauseButton.BackColor = disabledColor;
+            _pauseButton.Text = "||";  // Pause icon to indicate "click to pause"
+        }
         
         _healToggleButton.BackColor = _buffManager.HealingManager.HealingEnabled ? enabledColor : disabledColor;
         _buffToggleButton.BackColor = _buffManager.AutoRecastEnabled ? enabledColor : disabledColor;
@@ -1034,16 +1124,6 @@ public partial class MainForm : Form
         }
     }
     
-    private void ToggleHealsPriority_Click(object? sender, EventArgs e)
-    {
-        // Kept for compatibility - priority is now managed through CureManager
-        if (sender is ToolStripMenuItem item)
-        {
-            _buffManager.HealingManager.HealsPriorityOverBuffs = item.Checked;
-            LogMessage($"Heals priority over buffs: {(item.Checked ? "YES" : "NO")}", MessageType.System);
-        }
-    }
-    
     private void ConfigureCures_Click(object? sender, EventArgs e)
     {
         using var dialog = new CureConfigDialog(_buffManager.CureManager);
@@ -1065,6 +1145,206 @@ public partial class MainForm : Form
         LogMessage("All active ailments cleared.", MessageType.System);
     }
     
+    private void ToggleAutoStart_Click(object? sender, EventArgs e)
+    {
+        if (sender is ToolStripMenuItem item)
+        {
+            _buffManager.AutoStartProxy = item.Checked;
+            LogMessage($"Auto-start proxy on launch: {(item.Checked ? "ENABLED" : "DISABLED")}", MessageType.System);
+        }
+    }
+    
+    #region Export/Import
+    
+    private void ExportBuffs_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new SaveFileDialog
+        {
+            Title = "Export Buffs",
+            Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
+            DefaultExt = "json",
+            FileName = "buffs_export.json"
+        };
+        
+        if (dialog.ShowDialog() == DialogResult.OK)
+        {
+            try
+            {
+                var json = _buffManager.ExportBuffs();
+                File.WriteAllText(dialog.FileName, json);
+                LogMessage($"Exported buffs to {dialog.FileName}", MessageType.System);
+                MessageBox.Show($"Successfully exported {_buffManager.BuffConfigurations.Count} buff(s).", 
+                    "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error exporting buffs: {ex.Message}", "Export Error", 
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+    }
+    
+    private void ExportHeals_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new SaveFileDialog
+        {
+            Title = "Export Heals",
+            Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
+            DefaultExt = "json",
+            FileName = "heals_export.json"
+        };
+        
+        if (dialog.ShowDialog() == DialogResult.OK)
+        {
+            try
+            {
+                var json = _buffManager.HealingManager.ExportHeals();
+                File.WriteAllText(dialog.FileName, json);
+                LogMessage($"Exported heals to {dialog.FileName}", MessageType.System);
+                MessageBox.Show("Successfully exported heal spells and rules.", 
+                    "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error exporting heals: {ex.Message}", "Export Error", 
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+    }
+    
+    private void ExportCures_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new SaveFileDialog
+        {
+            Title = "Export Cures",
+            Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
+            DefaultExt = "json",
+            FileName = "cures_export.json"
+        };
+        
+        if (dialog.ShowDialog() == DialogResult.OK)
+        {
+            try
+            {
+                var json = _buffManager.CureManager.ExportCures();
+                File.WriteAllText(dialog.FileName, json);
+                LogMessage($"Exported cures to {dialog.FileName}", MessageType.System);
+                MessageBox.Show("Successfully exported ailments and cure spells.", 
+                    "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error exporting cures: {ex.Message}", "Export Error", 
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+    }
+    
+    private void ImportBuffs_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Title = "Import Buffs",
+            Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*"
+        };
+        
+        if (dialog.ShowDialog() == DialogResult.OK)
+        {
+            try
+            {
+                var json = File.ReadAllText(dialog.FileName);
+                
+                var replaceResult = MessageBox.Show(
+                    "Replace existing buffs with the same name?\n\n" +
+                    "Yes = Replace duplicates\n" +
+                    "No = Skip duplicates",
+                    "Import Options", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                
+                if (replaceResult == DialogResult.Cancel) return;
+                
+                var (imported, skipped, message) = _buffManager.ImportBuffs(json, replaceResult == DialogResult.Yes);
+                LogMessage(message, MessageType.System);
+                MessageBox.Show(message, "Import Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error importing buffs: {ex.Message}", "Import Error", 
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+    }
+    
+    private void ImportHeals_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Title = "Import Heals",
+            Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*"
+        };
+        
+        if (dialog.ShowDialog() == DialogResult.OK)
+        {
+            try
+            {
+                var json = File.ReadAllText(dialog.FileName);
+                
+                var replaceResult = MessageBox.Show(
+                    "Replace existing heal spells with the same name?\n\n" +
+                    "Yes = Replace duplicates\n" +
+                    "No = Skip duplicates\n\n" +
+                    "Note: Heal rules will be added (not replaced).",
+                    "Import Options", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                
+                if (replaceResult == DialogResult.Cancel) return;
+                
+                var (imported, skipped, message) = _buffManager.HealingManager.ImportHeals(json, replaceResult == DialogResult.Yes);
+                LogMessage(message, MessageType.System);
+                MessageBox.Show(message, "Import Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error importing heals: {ex.Message}", "Import Error", 
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+    }
+    
+    private void ImportCures_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Title = "Import Cures",
+            Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*"
+        };
+        
+        if (dialog.ShowDialog() == DialogResult.OK)
+        {
+            try
+            {
+                var json = File.ReadAllText(dialog.FileName);
+                
+                var replaceResult = MessageBox.Show(
+                    "Replace existing ailments and cure spells with the same name?\n\n" +
+                    "Yes = Replace duplicates\n" +
+                    "No = Skip duplicates",
+                    "Import Options", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+                
+                if (replaceResult == DialogResult.Cancel) return;
+                
+                var (imported, skipped, message) = _buffManager.CureManager.ImportCures(json, replaceResult == DialogResult.Yes);
+                LogMessage(message, MessageType.System);
+                MessageBox.Show(message, "Import Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error importing cures: {ex.Message}", "Import Error", 
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+    }
+    
+    #endregion
+    
     private void ToggleParAuto_Click(object? sender, EventArgs e)
     {
         if (sender is ToolStripMenuItem item)
@@ -1072,6 +1352,18 @@ public partial class MainForm : Form
             _buffManager.ParAutoEnabled = item.Checked;
             LogMessage($"Auto 'par' command {(item.Checked ? "ENABLED" : "DISABLED")}", MessageType.System);
         }
+    }
+    
+    private void OpenPlayerDB_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new PlayerDatabaseDialog(_buffManager.PlayerDatabase);
+        dialog.ShowDialog(this);
+    }
+    
+    private void OpenMonsterDB_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new MonsterDatabaseDialog(_buffManager.MonsterDatabase);
+        dialog.ShowDialog(this);
     }
     
     private void SetParFrequency_Click(object? sender, EventArgs e)
@@ -1259,7 +1551,17 @@ public partial class MainForm : Form
     private void ProcessServerMessage(string text)
     {
         // Pass to buff manager for processing
+        var wasPaused = _buffManager.ShouldPauseCommands;
         _buffManager.ProcessMessage(text);
+        
+        // Update pause button if state changed (e.g., training screen detected/exited)
+        if (wasPaused != _buffManager.ShouldPauseCommands)
+        {
+            if (InvokeRequired)
+                BeginInvoke(UpdateToggleButtonStates);
+            else
+                UpdateToggleButtonStates();
+        }
 
         // Combat state changes
         if (CombatEngagedRegex.IsMatch(text))
@@ -1319,6 +1621,9 @@ public partial class MainForm : Form
     private void SetCombatState(bool inCombat)
     {
         _inCombat = inCombat;
+        
+        // Notify BuffManager of combat state change
+        _buffManager.SetCombatState(inCombat);
 
         if (InvokeRequired)
             BeginInvoke(UpdateCombatStateUI);
@@ -1679,4 +1984,75 @@ public enum MessageType
     Server,
     Client,
     System
+}
+
+// Custom renderer for dark theme menus
+public class DarkMenuRenderer : ToolStripProfessionalRenderer
+{
+    public DarkMenuRenderer() : base(new DarkColorTable()) { }
+    
+    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+    {
+        if (e.Item.Selected)
+        {
+            using var brush = new SolidBrush(Color.FromArgb(70, 70, 70));
+            e.Graphics.FillRectangle(brush, e.Item.ContentRectangle);
+        }
+        else
+        {
+            using var brush = new SolidBrush(Color.FromArgb(45, 45, 45));
+            e.Graphics.FillRectangle(brush, e.Item.ContentRectangle);
+        }
+    }
+    
+    protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
+    {
+        // Draw dark background for check area
+        var rect = new Rectangle(e.ImageRectangle.X - 2, e.ImageRectangle.Y - 2, 
+                                  e.ImageRectangle.Width + 4, e.ImageRectangle.Height + 4);
+        using var bgBrush = new SolidBrush(Color.FromArgb(60, 60, 60));
+        e.Graphics.FillRectangle(bgBrush, rect);
+        
+        // Draw border
+        using var borderPen = new Pen(Color.FromArgb(100, 100, 100));
+        e.Graphics.DrawRectangle(borderPen, rect);
+        
+        // Draw checkmark in white/light gray
+        using var checkPen = new Pen(Color.FromArgb(200, 200, 200), 2);
+        var checkRect = e.ImageRectangle;
+        int x = checkRect.X + 3;
+        int y = checkRect.Y + checkRect.Height / 2;
+        e.Graphics.DrawLine(checkPen, x, y, x + 3, y + 3);
+        e.Graphics.DrawLine(checkPen, x + 3, y + 3, x + 9, y - 3);
+    }
+    
+    protected override void OnRenderImageMargin(ToolStripRenderEventArgs e)
+    {
+        using var brush = new SolidBrush(Color.FromArgb(45, 45, 45));
+        e.Graphics.FillRectangle(brush, e.AffectedBounds);
+    }
+    
+    protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+    {
+        using var pen = new Pen(Color.FromArgb(70, 70, 70));
+        int y = e.Item.ContentRectangle.Height / 2;
+        e.Graphics.DrawLine(pen, 0, y, e.Item.Width, y);
+    }
+}
+
+public class DarkColorTable : ProfessionalColorTable
+{
+    public override Color MenuBorder => Color.FromArgb(70, 70, 70);
+    public override Color MenuItemBorder => Color.FromArgb(70, 70, 70);
+    public override Color MenuItemSelected => Color.FromArgb(70, 70, 70);
+    public override Color MenuStripGradientBegin => Color.FromArgb(45, 45, 45);
+    public override Color MenuStripGradientEnd => Color.FromArgb(45, 45, 45);
+    public override Color MenuItemSelectedGradientBegin => Color.FromArgb(70, 70, 70);
+    public override Color MenuItemSelectedGradientEnd => Color.FromArgb(70, 70, 70);
+    public override Color MenuItemPressedGradientBegin => Color.FromArgb(60, 60, 60);
+    public override Color MenuItemPressedGradientEnd => Color.FromArgb(60, 60, 60);
+    public override Color ToolStripDropDownBackground => Color.FromArgb(45, 45, 45);
+    public override Color ImageMarginGradientBegin => Color.FromArgb(45, 45, 45);
+    public override Color ImageMarginGradientMiddle => Color.FromArgb(45, 45, 45);
+    public override Color ImageMarginGradientEnd => Color.FromArgb(45, 45, 45);
 }

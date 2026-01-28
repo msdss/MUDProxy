@@ -3,6 +3,8 @@ namespace MudProxyViewer;
 public class SettingsDialog : Form
 {
     private readonly BuffManager _buffManager;
+    private readonly CombatManager _combatManager;
+    private readonly string _currentCharacter;
     private TabControl _tabControl = null!;
     
     // General tab controls
@@ -16,9 +18,36 @@ public class SettingsDialog : Form
     private CheckBox _healthRequestCheckBox = null!;
     private NumericUpDown _healthRequestIntervalNumeric = null!;
     
-    public SettingsDialog(BuffManager buffManager)
+    // Combat tab controls
+    private TextBox _attackCommandText = null!;
+    private TextBox _backstabWeaponText = null!;
+    private TextBox _normalWeaponText = null!;
+    private TextBox _alternateWeaponText = null!;
+    private TextBox _shieldText = null!;
+    private CheckBox _useShieldWithBSCheck = null!;
+    private CheckBox _useNormalForAtkSpellsCheck = null!;
+    private TextBox _multiAttackSpellText = null!;
+    private NumericUpDown _multiAttackMinEnemiesNum = null!;
+    private NumericUpDown _multiAttackMaxCastNum = null!;
+    private NumericUpDown _multiAttackReqManaNum = null!;
+    private Label _multiAttackManaLabel = null!;
+    private TextBox _preAttackSpellText = null!;
+    private NumericUpDown _preAttackMaxCastNum = null!;
+    private NumericUpDown _preAttackReqManaNum = null!;
+    private Label _preAttackManaLabel = null!;
+    private TextBox _attackSpellText = null!;
+    private NumericUpDown _attackMaxCastNum = null!;
+    private NumericUpDown _attackReqManaNum = null!;
+    private Label _attackManaLabel = null!;
+    private CheckBox _doBackstabCheck = null!;
+    private NumericUpDown _maxMonstersNum = null!;
+    private NumericUpDown _runDistanceNum = null!;
+    
+    public SettingsDialog(BuffManager buffManager, CombatManager combatManager, string currentCharacter = "")
     {
         _buffManager = buffManager;
+        _combatManager = combatManager;
+        _currentCharacter = currentCharacter;
         InitializeComponent();
     }
     
@@ -42,12 +71,13 @@ public class SettingsDialog : Form
         
         // Create tabs
         var generalTab = CreateGeneralTab();
+        var combatTab = CreateCombatTab();
         var healingTab = CreateHealingTab();
         var curesTab = CreateCuresTab();
         var buffsTab = CreateBuffsTab();
         var partyTab = CreatePartyTab();
         
-        _tabControl.TabPages.AddRange(new TabPage[] { generalTab, healingTab, curesTab, buffsTab, partyTab });
+        _tabControl.TabPages.AddRange(new TabPage[] { generalTab, combatTab, healingTab, curesTab, buffsTab, partyTab });
         this.Controls.Add(_tabControl);
         
         // Close button
@@ -61,8 +91,420 @@ public class SettingsDialog : Form
             FlatStyle = FlatStyle.Flat,
             DialogResult = DialogResult.OK
         };
+        closeButton.Click += CloseButton_Click;
         this.Controls.Add(closeButton);
         this.AcceptButton = closeButton;
+    }
+    
+    private void CloseButton_Click(object? sender, EventArgs e)
+    {
+        // Save combat settings on close
+        SaveCombatSettings();
+    }
+    
+    private TabPage CreateCombatTab()
+    {
+        var tab = new TabPage("Combat")
+        {
+            BackColor = Color.FromArgb(45, 45, 45)
+        };
+        
+        var settings = _combatManager.GetSettings(_currentCharacter);
+        
+        // ── Weapon Combat Panel ──
+        var weaponPanel = new Panel
+        {
+            Location = new Point(10, 10),
+            Size = new Size(270, 205),
+            BackColor = Color.FromArgb(40, 40, 40)
+        };
+        
+        int wy = 8;
+        AddLabel(weaponPanel, "── Weapon Combat ──", 10, wy);
+        wy += 22;
+        
+        AddLabel(weaponPanel, "Attack Command:", 10, wy + 2);
+        _attackCommandText = new TextBox
+        {
+            Location = new Point(120, wy),
+            Width = 60,
+            MaxLength = 5,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Text = settings.AttackCommand
+        };
+        weaponPanel.Controls.Add(_attackCommandText);
+        wy += 26;
+        
+        AddLabel(weaponPanel, "Backstab Weapon:", 10, wy + 2);
+        _backstabWeaponText = new TextBox
+        {
+            Location = new Point(120, wy),
+            Width = 140,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Text = settings.BackstabWeapon
+        };
+        weaponPanel.Controls.Add(_backstabWeaponText);
+        wy += 26;
+        
+        AddLabel(weaponPanel, "Normal Weapon:", 10, wy + 2);
+        _normalWeaponText = new TextBox
+        {
+            Location = new Point(120, wy),
+            Width = 140,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Text = settings.NormalWeapon
+        };
+        weaponPanel.Controls.Add(_normalWeaponText);
+        wy += 26;
+        
+        AddLabel(weaponPanel, "Alternate Weapon:", 10, wy + 2);
+        _alternateWeaponText = new TextBox
+        {
+            Location = new Point(120, wy),
+            Width = 140,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Text = settings.AlternateWeapon
+        };
+        weaponPanel.Controls.Add(_alternateWeaponText);
+        wy += 26;
+        
+        AddLabel(weaponPanel, "Shield:", 10, wy + 2);
+        _shieldText = new TextBox
+        {
+            Location = new Point(120, wy),
+            Width = 140,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Text = settings.Shield
+        };
+        weaponPanel.Controls.Add(_shieldText);
+        wy += 28;
+        
+        _useShieldWithBSCheck = new CheckBox
+        {
+            Text = "Use shield with BS weapon",
+            ForeColor = Color.White,
+            Location = new Point(10, wy),
+            AutoSize = true,
+            Checked = settings.UseShieldWithBSWeapon
+        };
+        weaponPanel.Controls.Add(_useShieldWithBSCheck);
+        wy += 22;
+        
+        _useNormalForAtkSpellsCheck = new CheckBox
+        {
+            Text = "Use normal weapon for atk spells",
+            ForeColor = Color.White,
+            Location = new Point(10, wy),
+            AutoSize = true,
+            Checked = settings.UseNormalWeaponForAtkSpells
+        };
+        weaponPanel.Controls.Add(_useNormalForAtkSpellsCheck);
+        
+        tab.Controls.Add(weaponPanel);
+        
+        // ── Options Panel ──
+        var optionsPanel = new Panel
+        {
+            Location = new Point(290, 10),
+            Size = new Size(260, 205),
+            BackColor = Color.FromArgb(40, 40, 40)
+        };
+        
+        int oy = 8;
+        AddLabel(optionsPanel, "── Options ──", 10, oy);
+        oy += 22;
+        
+        _doBackstabCheck = new CheckBox
+        {
+            Text = "Do BS Attack",
+            ForeColor = Color.White,
+            Location = new Point(10, oy),
+            AutoSize = true,
+            Checked = settings.DoBackstabAttack
+        };
+        optionsPanel.Controls.Add(_doBackstabCheck);
+        oy += 30;
+        
+        AddLabel(optionsPanel, "Max Monsters:", 10, oy + 2);
+        _maxMonstersNum = new NumericUpDown
+        {
+            Location = new Point(110, oy),
+            Width = 50,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Minimum = 0,
+            Maximum = 99,
+            Value = settings.MaxMonsters
+        };
+        optionsPanel.Controls.Add(_maxMonstersNum);
+        oy += 30;
+        
+        AddLabel(optionsPanel, "Run Distance:", 10, oy + 2);
+        _runDistanceNum = new NumericUpDown
+        {
+            Location = new Point(110, oy),
+            Width = 50,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Minimum = 0,
+            Maximum = 20,
+            Value = settings.RunDistance
+        };
+        optionsPanel.Controls.Add(_runDistanceNum);
+        
+        tab.Controls.Add(optionsPanel);
+        
+        // ── Spell Combat Panel ──
+        var spellPanel = new Panel
+        {
+            Location = new Point(10, 225),
+            Size = new Size(540, 130),
+            BackColor = Color.FromArgb(40, 40, 40)
+        };
+        
+        int sy = 8;
+        AddLabel(spellPanel, "── Spell Combat ──", 10, sy);
+        sy += 22;
+        
+        // Header row
+        AddLabel(spellPanel, "Spell", 115, sy);
+        AddLabel(spellPanel, "Min Enemies", 175, sy);
+        AddLabel(spellPanel, "Max Cast", 275, sy);
+        AddLabel(spellPanel, "Req Mana %", 365, sy);
+        sy += 20;
+        
+        int maxMana = _buffManager.MaxMana;
+        
+        // Multi-Attack row
+        AddLabel(spellPanel, "Multi-Attack:", 10, sy + 2);
+        _multiAttackSpellText = new TextBox
+        {
+            Location = new Point(100, sy),
+            Width = 50,
+            MaxLength = 4,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Text = settings.MultiAttackSpell
+        };
+        spellPanel.Controls.Add(_multiAttackSpellText);
+        
+        _multiAttackMinEnemiesNum = new NumericUpDown
+        {
+            Location = new Point(185, sy),
+            Width = 50,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Minimum = 1,
+            Maximum = 20,
+            Value = settings.MultiAttackMinEnemies
+        };
+        spellPanel.Controls.Add(_multiAttackMinEnemiesNum);
+        
+        _multiAttackMaxCastNum = new NumericUpDown
+        {
+            Location = new Point(280, sy),
+            Width = 50,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Minimum = 1,
+            Maximum = 99,
+            Value = settings.MultiAttackMaxCast
+        };
+        spellPanel.Controls.Add(_multiAttackMaxCastNum);
+        
+        _multiAttackReqManaNum = new NumericUpDown
+        {
+            Location = new Point(375, sy),
+            Width = 50,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Minimum = 0,
+            Maximum = 100,
+            Value = settings.MultiAttackReqManaPercent
+        };
+        _multiAttackReqManaNum.ValueChanged += (s, e) => UpdateManaLabels();
+        spellPanel.Controls.Add(_multiAttackReqManaNum);
+        
+        _multiAttackManaLabel = new Label
+        {
+            Text = $"({settings.MultiAttackReqManaPercent * maxMana / 100}/{maxMana})",
+            ForeColor = Color.Gray,
+            Location = new Point(430, sy + 2),
+            AutoSize = true
+        };
+        spellPanel.Controls.Add(_multiAttackManaLabel);
+        sy += 28;
+        
+        // Pre-Attack row
+        AddLabel(spellPanel, "Pre-Attack:", 10, sy + 2);
+        _preAttackSpellText = new TextBox
+        {
+            Location = new Point(100, sy),
+            Width = 50,
+            MaxLength = 4,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Text = settings.PreAttackSpell
+        };
+        spellPanel.Controls.Add(_preAttackSpellText);
+        
+        AddLabel(spellPanel, "n/a", 200, sy + 2);
+        
+        _preAttackMaxCastNum = new NumericUpDown
+        {
+            Location = new Point(280, sy),
+            Width = 50,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Minimum = 1,
+            Maximum = 99,
+            Value = settings.PreAttackMaxCast
+        };
+        spellPanel.Controls.Add(_preAttackMaxCastNum);
+        
+        _preAttackReqManaNum = new NumericUpDown
+        {
+            Location = new Point(375, sy),
+            Width = 50,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Minimum = 0,
+            Maximum = 100,
+            Value = settings.PreAttackReqManaPercent
+        };
+        _preAttackReqManaNum.ValueChanged += (s, e) => UpdateManaLabels();
+        spellPanel.Controls.Add(_preAttackReqManaNum);
+        
+        _preAttackManaLabel = new Label
+        {
+            Text = $"({settings.PreAttackReqManaPercent * maxMana / 100}/{maxMana})",
+            ForeColor = Color.Gray,
+            Location = new Point(430, sy + 2),
+            AutoSize = true
+        };
+        spellPanel.Controls.Add(_preAttackManaLabel);
+        sy += 28;
+        
+        // Attack Spell row
+        AddLabel(spellPanel, "Attack Spell:", 10, sy + 2);
+        _attackSpellText = new TextBox
+        {
+            Location = new Point(100, sy),
+            Width = 50,
+            MaxLength = 4,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Text = settings.AttackSpell
+        };
+        spellPanel.Controls.Add(_attackSpellText);
+        
+        AddLabel(spellPanel, "n/a", 200, sy + 2);
+        
+        _attackMaxCastNum = new NumericUpDown
+        {
+            Location = new Point(280, sy),
+            Width = 50,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Minimum = 1,
+            Maximum = 99,
+            Value = settings.AttackMaxCast
+        };
+        spellPanel.Controls.Add(_attackMaxCastNum);
+        
+        _attackReqManaNum = new NumericUpDown
+        {
+            Location = new Point(375, sy),
+            Width = 50,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Minimum = 0,
+            Maximum = 100,
+            Value = settings.AttackReqManaPercent
+        };
+        _attackReqManaNum.ValueChanged += (s, e) => UpdateManaLabels();
+        spellPanel.Controls.Add(_attackReqManaNum);
+        
+        _attackManaLabel = new Label
+        {
+            Text = $"({settings.AttackReqManaPercent * maxMana / 100}/{maxMana})",
+            ForeColor = Color.Gray,
+            Location = new Point(430, sy + 2),
+            AutoSize = true
+        };
+        spellPanel.Controls.Add(_attackManaLabel);
+        
+        tab.Controls.Add(spellPanel);
+        
+        return tab;
+    }
+    
+    private void UpdateManaLabels()
+    {
+        int maxMana = _buffManager.MaxMana;
+        _multiAttackManaLabel.Text = $"({(int)_multiAttackReqManaNum.Value * maxMana / 100}/{maxMana})";
+        _preAttackManaLabel.Text = $"({(int)_preAttackReqManaNum.Value * maxMana / 100}/{maxMana})";
+        _attackManaLabel.Text = $"({(int)_attackReqManaNum.Value * maxMana / 100}/{maxMana})";
+    }
+    
+    private void SaveCombatSettings()
+    {
+        if (string.IsNullOrEmpty(_currentCharacter))
+            return;
+        
+        var settings = new CombatSettings
+        {
+            CharacterName = _currentCharacter,
+            
+            // Weapon Combat
+            AttackCommand = _attackCommandText.Text.Trim(),
+            BackstabWeapon = _backstabWeaponText.Text.Trim(),
+            NormalWeapon = _normalWeaponText.Text.Trim(),
+            AlternateWeapon = _alternateWeaponText.Text.Trim(),
+            Shield = _shieldText.Text.Trim(),
+            UseShieldWithBSWeapon = _useShieldWithBSCheck.Checked,
+            UseNormalWeaponForAtkSpells = _useNormalForAtkSpellsCheck.Checked,
+            
+            // Spell Combat - Multi-Attack
+            MultiAttackSpell = _multiAttackSpellText.Text.Trim().ToUpper(),
+            MultiAttackMinEnemies = (int)_multiAttackMinEnemiesNum.Value,
+            MultiAttackMaxCast = (int)_multiAttackMaxCastNum.Value,
+            MultiAttackReqManaPercent = (int)_multiAttackReqManaNum.Value,
+            
+            // Spell Combat - Pre-Attack
+            PreAttackSpell = _preAttackSpellText.Text.Trim().ToUpper(),
+            PreAttackMaxCast = (int)_preAttackMaxCastNum.Value,
+            PreAttackReqManaPercent = (int)_preAttackReqManaNum.Value,
+            
+            // Spell Combat - Attack
+            AttackSpell = _attackSpellText.Text.Trim().ToUpper(),
+            AttackMaxCast = (int)_attackMaxCastNum.Value,
+            AttackReqManaPercent = (int)_attackReqManaNum.Value,
+            
+            // Options
+            DoBackstabAttack = _doBackstabCheck.Checked,
+            MaxMonsters = (int)_maxMonstersNum.Value,
+            RunDistance = (int)_runDistanceNum.Value
+        };
+        
+        _combatManager.SaveSettings(settings);
+    }
+    
+    private void AddLabel(Panel panel, string text, int x, int y)
+    {
+        var label = new Label
+        {
+            Text = text,
+            ForeColor = Color.White,
+            Location = new Point(x, y),
+            AutoSize = true
+        };
+        panel.Controls.Add(label);
     }
     
     private TabPage CreateGeneralTab()
@@ -134,49 +576,20 @@ public class SettingsDialog : Form
         
         y += 140;
         
-        // Mana Reserve section
-        var manaReserveLabel = new Label
+        var infoLabel = new Label
         {
-            Text = "Mana Reserve % (buffs only):",
+            Text = "Cast priority determines the order in which the proxy\n" +
+                   "will attempt to cast spells when multiple actions are needed.\n\n" +
+                   "Priority Types:\n" +
+                   "  Heals - Self and party healing spells\n" +
+                   "  Cures - Cure ailments (poison, paralysis, etc.)\n" +
+                   "  Buffs - Buff spells with auto-recast enabled",
             Location = new Point(20, y),
-            AutoSize = true,
-            ForeColor = Color.White,
-            Font = new Font("Segoe UI", 9, FontStyle.Bold)
-        };
-        tab.Controls.Add(manaReserveLabel);
-        y += 25;
-        
-        _manaReserveNumeric = new NumericUpDown
-        {
-            Location = new Point(20, y),
-            Size = new Size(80, 25),
-            Minimum = 0,
-            Maximum = 100,
-            Value = _buffManager.ManaReservePercent,
-            BackColor = Color.FromArgb(60, 60, 60),
-            ForeColor = Color.White
-        };
-        _manaReserveNumeric.ValueChanged += (s, e) => _buffManager.ManaReservePercent = (int)_manaReserveNumeric.Value;
-        tab.Controls.Add(_manaReserveNumeric);
-        
-        var percentLabel = new Label
-        {
-            Text = "%",
-            Location = new Point(105, y + 3),
-            AutoSize = true,
-            ForeColor = Color.White
-        };
-        tab.Controls.Add(percentLabel);
-        
-        var manaReserveHint = new Label
-        {
-            Text = "Buffs will not cast if mana drops below this percentage.\nHeals and cures are not affected by this setting.",
-            Location = new Point(20, y + 30),
             AutoSize = true,
             ForeColor = Color.FromArgb(150, 150, 150),
-            Font = new Font("Segoe UI", 8)
+            Font = new Font("Segoe UI", 9)
         };
-        tab.Controls.Add(manaReserveHint);
+        tab.Controls.Add(infoLabel);
         
         return tab;
     }
@@ -317,21 +730,87 @@ public class SettingsDialog : Form
         
         y += 50;
         
-        var infoLabel = new Label
+        // Buff State Settings section
+        var stateLabel = new Label
         {
-            Text = "Configure buff spells for auto-casting.\n\n" +
-                   "Define buff spells with:\n" +
-                   "- Cast command and success message\n" +
-                   "- Duration and mana cost\n" +
-                   "- Target type (self, melee party, caster party, all party)\n\n" +
-                   "Buffs will automatically recast when they expire,\n" +
-                   "respecting the mana reserve setting.",
+            Text = "Buff Casting Conditions:",
             Location = new Point(20, y),
-            Size = new Size(500, 150),
-            ForeColor = Color.FromArgb(180, 180, 180),
-            Font = new Font("Segoe UI", 9)
+            AutoSize = true,
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 9, FontStyle.Bold)
         };
-        tab.Controls.Add(infoLabel);
+        tab.Controls.Add(stateLabel);
+        y += 25;
+        
+        var buffWhileRestingCheckBox = new CheckBox
+        {
+            Text = "Buff while resting",
+            Location = new Point(20, y),
+            AutoSize = true,
+            ForeColor = Color.White,
+            Checked = _buffManager.BuffWhileResting
+        };
+        buffWhileRestingCheckBox.CheckedChanged += (s, e) => _buffManager.BuffWhileResting = buffWhileRestingCheckBox.Checked;
+        tab.Controls.Add(buffWhileRestingCheckBox);
+        y += 28;
+        
+        var buffWhileInCombatCheckBox = new CheckBox
+        {
+            Text = "Buff while in combat",
+            Location = new Point(20, y),
+            AutoSize = true,
+            ForeColor = Color.White,
+            Checked = _buffManager.BuffWhileInCombat
+        };
+        buffWhileInCombatCheckBox.CheckedChanged += (s, e) => _buffManager.BuffWhileInCombat = buffWhileInCombatCheckBox.Checked;
+        tab.Controls.Add(buffWhileInCombatCheckBox);
+        y += 40;
+        
+        // Mana Reserve section
+        var manaReserveLabel = new Label
+        {
+            Text = "Mana Reserve %:",
+            Location = new Point(20, y),
+            AutoSize = true,
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 9, FontStyle.Bold)
+        };
+        tab.Controls.Add(manaReserveLabel);
+        y += 25;
+        
+        _manaReserveNumeric = new NumericUpDown
+        {
+            Location = new Point(20, y),
+            Size = new Size(80, 25),
+            Minimum = 0,
+            Maximum = 100,
+            Value = _buffManager.ManaReservePercent,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White
+        };
+        _manaReserveNumeric.ValueChanged += (s, e) => _buffManager.ManaReservePercent = (int)_manaReserveNumeric.Value;
+        tab.Controls.Add(_manaReserveNumeric);
+        
+        var percentLabel = new Label
+        {
+            Text = "%",
+            Location = new Point(105, y + 3),
+            AutoSize = true,
+            ForeColor = Color.White
+        };
+        tab.Controls.Add(percentLabel);
+        
+        y += 35;
+        
+        var manaReserveHint = new Label
+        {
+            Text = "Buffs will not cast if mana drops below this percentage.\nHeals and cures are not affected by this setting.",
+            Location = new Point(20, y),
+            AutoSize = true,
+            ForeColor = Color.FromArgb(150, 150, 150),
+            Font = new Font("Segoe UI", 8)
+        };
+        tab.Controls.Add(manaReserveHint);
         
         return tab;
     }
@@ -365,8 +844,18 @@ public class SettingsDialog : Form
             ForeColor = Color.White,
             Checked = _buffManager.ParAutoEnabled
         };
-        _parAutoCheckBox.CheckedChanged += (s, e) => _buffManager.ParAutoEnabled = _parAutoCheckBox.Checked;
         tab.Controls.Add(_parAutoCheckBox);
+        y += 30;
+        
+        _parAfterTickCheckBox = new CheckBox
+        {
+            Text = "Send 'par' after each combat tick (overrides frequency)",
+            Location = new Point(40, y),
+            AutoSize = true,
+            ForeColor = Color.White,
+            Checked = _buffManager.ParAfterCombatTick
+        };
+        tab.Controls.Add(_parAfterTickCheckBox);
         y += 30;
         
         var freqLabel = new Label
@@ -374,19 +863,21 @@ public class SettingsDialog : Form
             Text = "Frequency:",
             Location = new Point(40, y + 3),
             AutoSize = true,
-            ForeColor = Color.White
+            ForeColor = Color.White,
+            Name = "freqLabel"
         };
         tab.Controls.Add(freqLabel);
         
         _parFrequencyNumeric = new NumericUpDown
         {
-            Location = new Point(110, y),
+            Location = new Point(120, y),
             Size = new Size(60, 25),
             Minimum = 5,
             Maximum = 300,
             Value = _buffManager.ParFrequencySeconds,
             BackColor = Color.FromArgb(60, 60, 60),
-            ForeColor = Color.White
+            ForeColor = Color.White,
+            Enabled = !_buffManager.ParAfterCombatTick
         };
         _parFrequencyNumeric.ValueChanged += (s, e) => _buffManager.ParFrequencySeconds = (int)_parFrequencyNumeric.Value;
         tab.Controls.Add(_parFrequencyNumeric);
@@ -394,24 +885,29 @@ public class SettingsDialog : Form
         var secondsLabel = new Label
         {
             Text = "seconds",
-            Location = new Point(175, y + 3),
-            AutoSize = true,
-            ForeColor = Color.White
-        };
-        tab.Controls.Add(secondsLabel);
-        y += 35;
-        
-        _parAfterTickCheckBox = new CheckBox
-        {
-            Text = "Send 'par' after each combat tick",
-            Location = new Point(20, y),
+            Location = new Point(185, y + 3),
             AutoSize = true,
             ForeColor = Color.White,
-            Checked = _buffManager.ParAfterCombatTick
+            Name = "secondsLabel"
         };
-        _parAfterTickCheckBox.CheckedChanged += (s, e) => _buffManager.ParAfterCombatTick = _parAfterTickCheckBox.Checked;
-        tab.Controls.Add(_parAfterTickCheckBox);
-        y += 45;
+        tab.Controls.Add(secondsLabel);
+        y += 40;
+        
+        // Update enabled state based on checkbox
+        _parAutoCheckBox.CheckedChanged += (s, e) => 
+        {
+            _buffManager.ParAutoEnabled = _parAutoCheckBox.Checked;
+            UpdateParFrequencyEnabledState(freqLabel, secondsLabel);
+        };
+        
+        _parAfterTickCheckBox.CheckedChanged += (s, e) => 
+        {
+            _buffManager.ParAfterCombatTick = _parAfterTickCheckBox.Checked;
+            UpdateParFrequencyEnabledState(freqLabel, secondsLabel);
+        };
+        
+        // Initial state
+        UpdateParFrequencyEnabledState(freqLabel, secondsLabel);
         
         // Health request section
         var healthSectionLabel = new Label
@@ -487,9 +983,8 @@ public class SettingsDialog : Form
     {
         return priority switch
         {
-            CastPriorityType.CriticalHeals => "Critical Heals",
+            CastPriorityType.Heals => "Heals",
             CastPriorityType.Cures => "Cures",
-            CastPriorityType.RegularHeals => "Regular Heals",
             CastPriorityType.Buffs => "Buffs",
             _ => priority.ToString()
         };
@@ -499,9 +994,8 @@ public class SettingsDialog : Form
     {
         return name switch
         {
-            "Critical Heals" => CastPriorityType.CriticalHeals,
+            "Heals" => CastPriorityType.Heals,
             "Cures" => CastPriorityType.Cures,
-            "Regular Heals" => CastPriorityType.RegularHeals,
             "Buffs" => CastPriorityType.Buffs,
             _ => CastPriorityType.Buffs
         };
@@ -564,5 +1058,14 @@ public class SettingsDialog : Form
             newOrder.Add(GetPriorityFromDisplayName(item.ToString() ?? ""));
         }
         _buffManager.CureManager.PriorityOrder = newOrder;
+    }
+    
+    private void UpdateParFrequencyEnabledState(Label freqLabel, Label secondsLabel)
+    {
+        // Frequency is disabled when "par after tick" is enabled
+        bool enabled = !_parAfterTickCheckBox.Checked;
+        _parFrequencyNumeric.Enabled = enabled;
+        freqLabel.ForeColor = enabled ? Color.White : Color.FromArgb(100, 100, 100);
+        secondsLabel.ForeColor = enabled ? Color.White : Color.FromArgb(100, 100, 100);
     }
 }

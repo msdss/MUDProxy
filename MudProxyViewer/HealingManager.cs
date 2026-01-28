@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 namespace MudProxyViewer;
 
@@ -13,31 +12,29 @@ public class HealingManager
     private readonly Func<IEnumerable<PartyMember>> _getPartyMembers;
     private readonly Func<int> _getCurrentMana;
     private readonly Func<int> _getMaxMana;
-    private readonly Func<int> _getManaReservePercent;
     private readonly Func<string, bool> _isTargetSelf;
+    private readonly Func<bool> _getIsResting;
+    private readonly Func<bool> _getInCombat;
     
     // Events
     public event Action<string>? OnLogMessage;
-    
-    // Telepath regex: "Boost telepaths: {HP=134/144,KAI=7/15}" or "{HP=134/144,MA=7/15}"
-    private static readonly Regex TelepathRegex = new(
-        @"(\w+) telepaths: \{HP=(\d+)/(\d+),(MA|KAI)=(\d+)/(\d+)\}",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
     
     public HealingManager(
         Func<PlayerInfo> getPlayerInfo,
         Func<IEnumerable<PartyMember>> getPartyMembers,
         Func<int> getCurrentMana,
         Func<int> getMaxMana,
-        Func<int> getManaReservePercent,
-        Func<string, bool> isTargetSelf)
+        Func<string, bool> isTargetSelf,
+        Func<bool> getIsResting,
+        Func<bool> getInCombat)
     {
         _getPlayerInfo = getPlayerInfo;
         _getPartyMembers = getPartyMembers;
         _getCurrentMana = getCurrentMana;
         _getMaxMana = getMaxMana;
-        _getManaReservePercent = getManaReservePercent;
         _isTargetSelf = isTargetSelf;
+        _getIsResting = getIsResting;
+        _getInCombat = getInCombat;
         
         _configFilePath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
@@ -58,15 +55,8 @@ public class HealingManager
         }
     }
     
-    public bool HealsPriorityOverBuffs
-    {
-        get => _config.HealsPriorityOverBuffs;
-        set
-        {
-            _config.HealsPriorityOverBuffs = value;
-            SaveConfiguration();
-        }
-    }
+    public bool HasSelfHealRules => _config.SelfHealRules.Count > 0;
+    public bool HasPartyHealRules => _config.PartyHealRules.Count > 0;
     
     #region Configuration Management
     
@@ -109,6 +99,133 @@ public class HealingManager
         catch (Exception ex)
         {
             OnLogMessage?.Invoke($"Error saving healing configuration: {ex.Message}");
+        }
+    }
+    
+    public string ExportHeals()
+    {
+        var export = new HealExport
+        {
+            ExportVersion = "1.0",
+            ExportedAt = DateTime.Now,
+            HealSpells = _config.HealSpells.Select(s => s.Clone()).ToList(),
+            SelfHealRules = _config.SelfHealRules.Select(r => r.Clone()).ToList(),
+            PartyHealRules = _config.PartyHealRules.Select(r => r.Clone()).ToList(),
+            PartyWideHealRules = _config.PartyWideHealRules.Select(r => r.Clone()).ToList()
+        };
+        
+        // Create a mapping of old spell IDs to new ones
+        var idMapping = new Dictionary<string, string>();
+        foreach (var spell in export.HealSpells)
+        {
+            var oldId = spell.Id;
+            spell.Id = Guid.NewGuid().ToString();
+            idMapping[oldId] = spell.Id;
+        }
+        
+        // Update rule references to use new spell IDs
+        foreach (var rule in export.SelfHealRules.Concat(export.PartyHealRules).Concat(export.PartyWideHealRules))
+        {
+            rule.Id = Guid.NewGuid().ToString();
+            if (idMapping.TryGetValue(rule.HealSpellId, out var newSpellId))
+                rule.HealSpellId = newSpellId;
+        }
+        
+        return JsonSerializer.Serialize(export, new JsonSerializerOptions { WriteIndented = true });
+    }
+    
+    public (int imported, int skipped, string message) ImportHeals(string json, bool replaceExisting)
+    {
+        try
+        {
+            var export = JsonSerializer.Deserialize<HealExport>(json);
+            if (export == null)
+                return (0, 0, "Invalid heal export file format.");
+            
+            int importedSpells = 0;
+            int skippedSpells = 0;
+            var spellIdMapping = new Dictionary<string, string>();
+            
+            // Import spells first
+            foreach (var spell in export.HealSpells ?? new List<HealSpellConfiguration>())
+            {
+                var existing = _config.HealSpells.FirstOrDefault(s => 
+                    s.DisplayName.Equals(spell.DisplayName, StringComparison.OrdinalIgnoreCase));
+                
+                var oldId = spell.Id;
+                
+                if (existing != null)
+                {
+                    if (replaceExisting)
+                    {
+                        spellIdMapping[oldId] = existing.Id;
+                        spell.Id = existing.Id;
+                        var index = _config.HealSpells.IndexOf(existing);
+                        _config.HealSpells[index] = spell;
+                        importedSpells++;
+                    }
+                    else
+                    {
+                        spellIdMapping[oldId] = existing.Id; // Map to existing for rules
+                        skippedSpells++;
+                    }
+                }
+                else
+                {
+                    spell.Id = Guid.NewGuid().ToString();
+                    spellIdMapping[oldId] = spell.Id;
+                    _config.HealSpells.Add(spell);
+                    importedSpells++;
+                }
+            }
+            
+            // Import rules with updated spell references
+            int importedRules = 0;
+            
+            foreach (var rule in export.SelfHealRules ?? new List<HealRule>())
+            {
+                if (spellIdMapping.TryGetValue(rule.HealSpellId, out var newSpellId))
+                {
+                    rule.Id = Guid.NewGuid().ToString();
+                    rule.HealSpellId = newSpellId;
+                    _config.SelfHealRules.Add(rule);
+                    importedRules++;
+                }
+            }
+            
+            foreach (var rule in export.PartyHealRules ?? new List<HealRule>())
+            {
+                if (spellIdMapping.TryGetValue(rule.HealSpellId, out var newSpellId))
+                {
+                    rule.Id = Guid.NewGuid().ToString();
+                    rule.HealSpellId = newSpellId;
+                    _config.PartyHealRules.Add(rule);
+                    importedRules++;
+                }
+            }
+            
+            foreach (var rule in export.PartyWideHealRules ?? new List<HealRule>())
+            {
+                if (spellIdMapping.TryGetValue(rule.HealSpellId, out var newSpellId))
+                {
+                    rule.Id = Guid.NewGuid().ToString();
+                    rule.HealSpellId = newSpellId;
+                    _config.PartyWideHealRules.Add(rule);
+                    importedRules++;
+                }
+            }
+            
+            if (importedSpells > 0 || importedRules > 0)
+            {
+                SaveConfiguration();
+            }
+            
+            return (importedSpells + importedRules, skippedSpells, 
+                $"Imported {importedSpells} spell(s) and {importedRules} rule(s), skipped {skippedSpells} duplicate spell(s).");
+        }
+        catch (Exception ex)
+        {
+            return (0, 0, $"Error importing heals: {ex.Message}");
         }
     }
     
@@ -216,71 +333,14 @@ public class HealingManager
     
     #endregion
     
-    #region Message Processing
-    
-    public void ProcessMessage(string message, List<PartyMember> partyMembers)
-    {
-        // Check for telepath HP updates
-        var telepathMatch = TelepathRegex.Match(message);
-        if (telepathMatch.Success)
-        {
-            var name = telepathMatch.Groups[1].Value;
-            var currentHp = int.Parse(telepathMatch.Groups[2].Value);
-            var maxHp = int.Parse(telepathMatch.Groups[3].Value);
-            var manaType = telepathMatch.Groups[4].Value;
-            var currentMana = int.Parse(telepathMatch.Groups[5].Value);
-            var maxMana = int.Parse(telepathMatch.Groups[6].Value);
-            
-            // Find the party member and update their HP
-            var member = partyMembers.FirstOrDefault(p => 
-                p.Name.Equals(name, StringComparison.OrdinalIgnoreCase) ||
-                p.FullName.StartsWith(name, StringComparison.OrdinalIgnoreCase));
-            
-            if (member != null)
-            {
-                member.CurrentHp = currentHp;
-                member.MaxHp = maxHp;
-                member.CurrentMana = currentMana;
-                member.MaxMana = maxMana;
-                member.LastTelepathUpdate = DateTime.Now;
-                
-                OnLogMessage?.Invoke($"💚 {name} HP updated: {currentHp}/{maxHp} ({member.EffectiveHealthPercent}%)");
-            }
-        }
-    }
-    
-    #endregion
-    
     #region Healing Logic
     
     /// <summary>
-    /// Check if anyone needs critical healing (rules marked as IsCritical).
-    /// </summary>
-    public (string? Command, string Description)? CheckCriticalHealing()
-    {
-        return CheckHealingInternal(criticalOnly: true);
-    }
-    
-    /// <summary>
-    /// Check if anyone needs regular healing (rules NOT marked as IsCritical).
-    /// </summary>
-    public (string? Command, string Description)? CheckRegularHealing()
-    {
-        return CheckHealingInternal(criticalOnly: false);
-    }
-    
-    /// <summary>
-    /// Check if anyone needs healing (any rules).
+    /// Check if anyone needs healing based on current player state.
+    /// Self-healing uses state-based rules (Combat vs Resting).
+    /// Party healing uses simple threshold rules.
     /// </summary>
     public (string? Command, string Description)? CheckHealing()
-    {
-        // Try critical first, then regular
-        var critical = CheckCriticalHealing();
-        if (critical != null) return critical;
-        return CheckRegularHealing();
-    }
-    
-    private (string? Command, string Description)? CheckHealingInternal(bool criticalOnly)
     {
         if (!_config.HealingEnabled) return null;
         
@@ -288,34 +348,46 @@ public class HealingManager
         var partyMembers = _getPartyMembers().ToList();
         var currentMana = _getCurrentMana();
         var maxMana = _getMaxMana();
+        var isResting = _getIsResting();
+        var inCombat = _getInCombat();
         
-        // Note: Mana reserve does NOT apply to heals - we always try to heal if we have enough mana
+        // Determine which self-heal rules to use based on state
+        List<HealRule> applicableSelfRules;
+        if (isResting)
+        {
+            // Resting: only use Resting rules
+            applicableSelfRules = _config.SelfHealRules.Where(r => r.RuleType == HealRuleType.Resting).ToList();
+        }
+        else
+        {
+            // Combat or Idle: use Combat rules
+            applicableSelfRules = _config.SelfHealRules.Where(r => r.RuleType == HealRuleType.Combat).ToList();
+        }
         
-        // Filter rules based on critical/regular
-        var selfRules = _config.SelfHealRules.Where(r => r.IsCritical == criticalOnly).ToList();
-        var partyRules = _config.PartyHealRules.Where(r => r.IsCritical == criticalOnly).ToList();
-        var partyWideRules = _config.PartyWideHealRules.Where(r => r.IsCritical == criticalOnly).ToList();
+        // Party rules are not state-based
+        var partyRules = _config.PartyHealRules;
+        var partyWideRules = _config.PartyWideHealRules;
         
         // First, check party-wide heals (might be more efficient)
-        var partyWideHeal = CheckPartyWideHealsFiltered(playerInfo, partyMembers, currentMana, maxMana, partyWideRules);
+        var partyWideHeal = CheckPartyWideHealsFiltered(playerInfo, partyMembers, currentMana, maxMana, partyWideRules.ToList());
         if (partyWideHeal != null) return partyWideHeal;
         
         // Collect all potential heal targets with their best heal option
         var healCandidates = new List<(string Target, string Command, HealSpellConfiguration Spell, int ThresholdPercent, double HpPercent)>();
         
-        // Check self healing
-        var selfHeal = GetBestHealForTarget(playerInfo.HpPercent, selfRules, currentMana, maxMana);
+        // Check self healing (using state-filtered rules)
+        var selfHeal = GetBestHealForTarget(playerInfo.HpPercent, applicableSelfRules, currentMana, maxMana);
         if (selfHeal != null)
         {
             healCandidates.Add(("", selfHeal.Value.Spell.Command, selfHeal.Value.Spell, selfHeal.Value.ThresholdPercent, playerInfo.HpPercent));
         }
         
-        // Check party member healing
+        // Check party member healing (not state-based)
         foreach (var member in partyMembers)
         {
             if (_isTargetSelf(member.Name)) continue; // Skip self (already handled above)
             
-            var memberHeal = GetBestHealForTarget(member.EffectiveHealthPercent, partyRules, currentMana, maxMana);
+            var memberHeal = GetBestHealForTarget(member.EffectiveHealthPercent, partyRules.ToList(), currentMana, maxMana);
             if (memberHeal != null)
             {
                 var command = $"{memberHeal.Value.Spell.Command} {member.Name}";
@@ -376,46 +448,6 @@ public class HealingManager
         return null;
     }
     
-    private (string Command, string Description)? CheckPartyWideHeals(
-        PlayerInfo playerInfo, 
-        List<PartyMember> partyMembers,
-        int currentMana,
-        int maxMana)
-    {
-        if (_config.PartyWideHealRules.Count == 0) return null;
-        
-        // Get all HP percentages including self
-        var allHpPercents = new List<double> { playerInfo.HpPercent };
-        allHpPercents.AddRange(partyMembers
-            .Where(p => !_isTargetSelf(p.Name))
-            .Select(p => (double)p.EffectiveHealthPercent));
-        
-        if (allHpPercents.Count <= 1) return null; // No party to heal
-        
-        var totalMembers = allHpPercents.Count;
-        
-        // Check each party-wide heal rule (sorted by threshold - lowest first)
-        foreach (var rule in _config.PartyWideHealRules.OrderBy(r => r.HpThresholdPercent))
-        {
-            var spell = GetHealSpell(rule.HealSpellId);
-            if (spell == null) continue;
-            
-            // Check mana cost (no reserve check for heals)
-            if (!CanAffordSpell(spell.ManaCost, currentMana, maxMana)) continue;
-            
-            // Count how many are below threshold
-            var belowThreshold = allHpPercents.Count(hp => hp < rule.HpThresholdPercent);
-            var percentBelow = (belowThreshold * 100) / totalMembers;
-            
-            if (percentBelow >= rule.PartyPercentRequired)
-            {
-                return (spell.Command, $"{spell.DisplayName} (party heal - {belowThreshold}/{totalMembers} below {rule.HpThresholdPercent}%)");
-            }
-        }
-        
-        return null;
-    }
-    
     private (HealSpellConfiguration Spell, int ThresholdPercent)? GetBestHealForTarget(
         double hpPercent,
         List<HealRule> rules,
@@ -446,54 +478,6 @@ public class HealingManager
     {
         if (manaCost <= 0) return true;
         return currentMana >= manaCost;
-    }
-    
-    /// <summary>
-    /// Returns true if anyone needs healing (used to determine heal vs buff priority)
-    /// </summary>
-    public bool AnyoneNeedsHealing()
-    {
-        if (!_config.HealingEnabled) return false;
-        
-        var playerInfo = _getPlayerInfo();
-        var partyMembers = _getPartyMembers().ToList();
-        
-        // Check self
-        foreach (var rule in _config.SelfHealRules)
-        {
-            if (playerInfo.HpPercent < rule.HpThresholdPercent) return true;
-        }
-        
-        // Check party members
-        foreach (var member in partyMembers)
-        {
-            if (_isTargetSelf(member.Name)) continue;
-            
-            foreach (var rule in _config.PartyHealRules)
-            {
-                if (member.EffectiveHealthPercent < rule.HpThresholdPercent) return true;
-            }
-        }
-        
-        // Check party-wide thresholds
-        var allHpPercents = new List<double> { playerInfo.HpPercent };
-        allHpPercents.AddRange(partyMembers
-            .Where(p => !_isTargetSelf(p.Name))
-            .Select(p => (double)p.EffectiveHealthPercent));
-        
-        if (allHpPercents.Count > 1)
-        {
-            var totalMembers = allHpPercents.Count;
-            
-            foreach (var rule in _config.PartyWideHealRules)
-            {
-                var belowThreshold = allHpPercents.Count(hp => hp < rule.HpThresholdPercent);
-                var percentBelow = (belowThreshold * 100) / totalMembers;
-                if (percentBelow >= rule.PartyPercentRequired) return true;
-            }
-        }
-        
-        return false;
     }
     
     #endregion

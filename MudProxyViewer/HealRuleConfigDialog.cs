@@ -5,12 +5,12 @@ public class HealRuleConfigDialog : Form
     private HealRule _rule;
     private bool _isNew;
     private bool _isPartyWideRule;
+    private HealRuleType? _selfRuleType;  // Only set for self-healing rules
     private readonly List<HealSpellConfiguration> _availableSpells;
     
     private ComboBox _spellComboBox = null!;
     private NumericUpDown _thresholdNumeric = null!;
     private NumericUpDown _partyPercentNumeric = null!;
-    private CheckBox _isCriticalCheckBox = null!;
     private Label _partyPercentLabel = null!;
     
     public HealRule Rule => _rule;
@@ -18,12 +18,19 @@ public class HealRuleConfigDialog : Form
     public HealRuleConfigDialog(
         List<HealSpellConfiguration> availableSpells, 
         HealRule? existingRule = null,
-        bool isPartyWideRule = false)
+        bool isPartyWideRule = false,
+        HealRuleType? selfRuleType = null)
     {
         _availableSpells = availableSpells;
         _isNew = existingRule == null;
         _isPartyWideRule = isPartyWideRule;
+        _selfRuleType = selfRuleType;
         _rule = existingRule?.Clone() ?? new HealRule { IsPartyHealRule = isPartyWideRule };
+        
+        if (selfRuleType.HasValue)
+        {
+            _rule.RuleType = selfRuleType.Value;
+        }
         
         InitializeComponent();
         LoadRuleData();
@@ -31,9 +38,23 @@ public class HealRuleConfigDialog : Form
     
     private void InitializeComponent()
     {
-        var title = _isPartyWideRule ? "Party-Wide Heal Rule" : "Heal Rule";
+        string title;
+        if (_selfRuleType.HasValue)
+        {
+            var typeStr = _selfRuleType.Value == HealRuleType.Combat ? "Combat" : "Resting";
+            title = $"{typeStr} Heal Rule";
+        }
+        else if (_isPartyWideRule)
+        {
+            title = "Party-Wide Heal Rule";
+        }
+        else
+        {
+            title = "Heal Rule";
+        }
+        
         this.Text = _isNew ? $"Add {title}" : $"Edit {title}";
-        this.Size = new Size(420, _isPartyWideRule ? 230 : 195);
+        this.Size = new Size(420, _isPartyWideRule ? 220 : 180);
         this.FormBorderStyle = FormBorderStyle.FixedDialog;
         this.MaximizeBox = false;
         this.MinimizeBox = false;
@@ -82,7 +103,7 @@ public class HealRuleConfigDialog : Form
         // Party Percent Required (only for party-wide rules)
         if (_isPartyWideRule)
         {
-            _partyPercentLabel = AddLabel("% of party below threshold:", 15, y);
+            _partyPercentLabel = AddLabel("Party % below threshold:", 15, y);
             _partyPercentNumeric = new NumericUpDown
             {
                 Location = new Point(controlLeft, y),
@@ -98,17 +119,7 @@ public class HealRuleConfigDialog : Form
             y += rowHeight;
         }
         
-        // Is Critical checkbox
-        _isCriticalCheckBox = new CheckBox
-        {
-            Text = "Critical Heal (cast before cures)",
-            Location = new Point(controlLeft, y),
-            AutoSize = true,
-            ForeColor = Color.White,
-            Checked = false
-        };
-        this.Controls.Add(_isCriticalCheckBox);
-        y += rowHeight + 10;
+        y += 10;
         
         // Buttons
         var saveButton = new Button
@@ -179,7 +190,6 @@ public class HealRuleConfigDialog : Form
         }
         
         _thresholdNumeric.Value = Math.Clamp(_rule.HpThresholdPercent, 1, 100);
-        _isCriticalCheckBox.Checked = _rule.IsCritical;
         
         if (_isPartyWideRule && _partyPercentNumeric != null)
         {
@@ -199,8 +209,12 @@ public class HealRuleConfigDialog : Form
         
         _rule.HealSpellId = selectedSpell.Spell.Id;
         _rule.HpThresholdPercent = (int)_thresholdNumeric.Value;
-        _rule.IsCritical = _isCriticalCheckBox.Checked;
         _rule.IsPartyHealRule = _isPartyWideRule;
+        
+        if (_selfRuleType.HasValue)
+        {
+            _rule.RuleType = _selfRuleType.Value;
+        }
         
         if (_isPartyWideRule && _partyPercentNumeric != null)
         {
