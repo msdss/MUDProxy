@@ -7,18 +7,19 @@ namespace MudProxyViewer;
 
 public partial class MainForm : Form
 {
-    // Configuration
-    private string _remoteHost = "217.180.196.241";
-    private int _remotePort = 23;
-    private string _localHost = "127.0.0.1";
-    private int _localPort = 2323;
+    // Configuration - loaded from character profile
+    private string _serverAddress = string.Empty;
+    private int _serverPort = 23;
 
-    // Network components
-    private TcpListener? _listener;
-    private TcpClient? _clientConnection;
+    // Network components - direct telnet connection
     private TcpClient? _serverConnection;
+    private NetworkStream? _serverStream;
     private CancellationTokenSource? _cancellationTokenSource;
-    private bool _isRunning = false;
+    private bool _isConnected = false;
+    
+    // Logon automation state
+    private bool _isInLoginPhase = true;  // True until we see HP bar
+    private HashSet<string> _triggeredLogonSequences = new();  // Track which sequences have fired
 
     // Buff Manager
     private readonly BuffManager _buffManager = new();
@@ -29,14 +30,13 @@ public partial class MainForm : Form
     private RichTextBox _systemLogTextBox = null!;  // System/proxy logs
     private SplitContainer _terminalSplitContainer = null!;  // Vertical split: MUD output / logs
     private Label _statusLabel = null!;
-    private Button _startStopButton = null!;
+    private Button _connectButton = null!;
     private CheckBox _autoScrollCheckBox = null!;
     private CheckBox _autoScrollLogsCheckBox = null!;
     private CheckBox _showTimestampsCheckBox = null!;
-    private CheckBox _stripAnsiCheckBox = null!;
-    private TextBox _remoteHostTextBox = null!;
-    private TextBox _remotePortTextBox = null!;
-    private TextBox _localPortTextBox = null!;
+    private Label _serverAddressLabel = null!;
+    private Label _serverPortLabel = null!;
+    private TextBox _commandInputTextBox = null!;  // Command input for sending to server
 
     // UI Components - Combat Panel
     private Panel _combatPanel = null!;
@@ -53,6 +53,7 @@ public partial class MainForm : Form
     
     // Quick toggle buttons
     private Button _pauseButton = null!;
+    private Button _combatToggleButton = null!;
     private Button _healToggleButton = null!;
     private Button _buffToggleButton = null!;
     private Button _cureToggleButton = null!;
@@ -77,8 +78,8 @@ public partial class MainForm : Form
     private int _maxMana = 0;
     private string _manaType = "MA";
 
-    // Pattern Detection
-    private static readonly Regex AnsiRegex = new(@"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", RegexOptions.Compiled);
+    // Pattern Detection - ANSI regex catches color codes, cursor control, and other escape sequences
+    private static readonly Regex AnsiRegex = new(@"\x1B(?:\[[0-9;]*[A-Za-z]|\[[0-9;]*[mKJHfsu]|[\(\)][AB012]|[>=<]|[78DME])", RegexOptions.Compiled);
     private static readonly Regex HpManaRegex = new(@"\[HP=(\d+)(?:/(\d+))?/(MA|KAI)=(\d+)(?:/(\d+))?\]", RegexOptions.Compiled);
     private static readonly Regex DamageRegex = new(@"for \d+ damage!", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly Regex CombatEngagedRegex = new(@"\*Combat Engaged\*", RegexOptions.Compiled);
@@ -105,16 +106,32 @@ public partial class MainForm : Form
     
     private void MainForm_Shown(object? sender, EventArgs e)
     {
-        if (_buffManager.AutoStartProxy)
+        // Check for auto-load last character
+        if (_buffManager.AutoLoadLastCharacter && !string.IsNullOrEmpty(_buffManager.LastCharacterPath))
         {
-            // Small delay to let the UI fully render, then start proxy
-            Task.Delay(500).ContinueWith(async _ => 
+            if (File.Exists(_buffManager.LastCharacterPath))
             {
-                if (InvokeRequired)
-                    BeginInvoke(async () => await StartProxy());
+                LogMessage($"Auto-loading last character: {Path.GetFileName(_buffManager.LastCharacterPath)}", MessageType.System);
+                var (success, message) = _buffManager.LoadCharacterProfile(_buffManager.LastCharacterPath);
+                if (success)
+                {
+                    RefreshPlayerInfo();
+                    RefreshBuffDisplay();
+                    LogMessage("Character loaded. Click Connect to connect to the server.", MessageType.System);
+                }
                 else
-                    await StartProxy();
-            });
+                {
+                    LogMessage($"Failed to auto-load character: {message}", MessageType.System);
+                }
+            }
+            else
+            {
+                LogMessage($"Last character file not found: {_buffManager.LastCharacterPath}", MessageType.System);
+            }
+        }
+        else
+        {
+            LogMessage("Welcome! Load a character profile (File → Load Character) to configure connection settings.", MessageType.System);
         }
     }
 
@@ -146,13 +163,44 @@ public partial class MainForm : Form
         _buffManager.OnBuffsChanged += () => BeginInvoke(RefreshBuffDisplay);
         _buffManager.OnPartyChanged += () => BeginInvoke(RefreshPartyDisplay);
         _buffManager.OnPlayerInfoChanged += () => BeginInvoke(RefreshPlayerInfo);
+        _buffManager.OnBbsSettingsChanged += () => BeginInvoke(RefreshBbsSettingsDisplay);
         _buffManager.OnLogMessage += (msg) => LogMessage(msg, MessageType.System);
         _buffManager.OnSendCommand += SendCommandToServer;
+        
+        // Initialize CombatManager with dependencies
+        _buffManager.CombatManager.Initialize(
+            _buffManager.PlayerDatabase,
+            _buffManager.MonsterDatabase,
+            () => _inCombat,
+            () => _maxMana > 0 ? (_currentMana * 100 / _maxMana) : 100
+        );
+        _buffManager.CombatManager.OnSendCommand += SendCommandToServer;
+    }
+    
+    /// <summary>
+    /// Update the UI when BBS settings are loaded from a profile
+    /// </summary>
+    private void RefreshBbsSettingsDisplay()
+    {
+        var settings = _buffManager.BbsSettings;
+        _serverAddress = settings.Address;
+        _serverPort = settings.Port;
+        
+        if (!string.IsNullOrEmpty(settings.Address))
+        {
+            _serverAddressLabel.Text = $"{settings.Address}:{settings.Port}";
+            _serverAddressLabel.ForeColor = Color.White;
+        }
+        else
+        {
+            _serverAddressLabel.Text = "No server configured";
+            _serverAddressLabel.ForeColor = Color.Gray;
+        }
     }
     
     private void SendCommandToServer(string command)
     {
-        if (_serverConnection == null || !_serverConnection.Connected)
+        if (_serverStream == null || !_isConnected)
         {
             LogMessage("Cannot send command - not connected to server", MessageType.System);
             return;
@@ -161,8 +209,8 @@ public partial class MainForm : Form
         try
         {
             var data = Encoding.GetEncoding(437).GetBytes(command + "\r\n");
-            _serverConnection.GetStream().Write(data, 0, data.Length);
-            LogMessage($">>> {command}", MessageType.Client);
+            _serverStream.Write(data, 0, data.Length);
+            // Don't log here - server will echo the command back
         }
         catch (Exception ex)
         {
@@ -183,16 +231,40 @@ public partial class MainForm : Form
     
     private void ParCheckTimer_Tick(object? sender, EventArgs e)
     {
-        // Only check when connected
-        if (_isRunning && _serverConnection != null && _serverConnection.Connected)
+        // Only check when connected AND in-game (not during login)
+        if (!_isConnected || _isInLoginPhase) return;
+        if (_serverConnection == null || !_serverConnection.Connected) return;
+        
+        _buffManager.CheckParCommand();
+        _buffManager.CheckHealthRequests();
+    }
+    
+    private void CommandInput_KeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyCode == Keys.Enter)
         {
-            _buffManager.CheckParCommand();
-            _buffManager.CheckHealthRequests();
+            e.Handled = true;
+            e.SuppressKeyPress = true;  // Prevent the "ding" sound
+            
+            var command = _commandInputTextBox.Text;
+            if (!string.IsNullOrEmpty(command))
+            {
+                SendCommandToServer(command);
+                _commandInputTextBox.Clear();
+            }
+            else
+            {
+                // Send empty line (just Enter)
+                SendCommandToServer("");
+            }
         }
     }
     
     private void OutOfCombatRecastTimer_Tick(object? sender, EventArgs e)
     {
+        // Only auto-recast when connected AND in-game (not during login)
+        if (!_isConnected || _isInLoginPhase) return;
+        
         // Only auto-recast when NOT in combat
         // During combat, recasts happen after ticks via RecordTick()
         if (_inCombat) return;
@@ -292,6 +364,19 @@ public partial class MainForm : Form
         menuStrip.Renderer = new DarkMenuRenderer();
 
         var fileMenu = new ToolStripMenuItem("File") { ForeColor = Color.White };
+        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Load Character...", null, LoadCharacter_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Save Character", null, SaveCharacter_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Save Character As...", null, SaveCharacterAs_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        fileMenu.DropDownItems.Add(new ToolStripSeparator());
+        var autoLoadMenuItem = new ToolStripMenuItem("Auto-Load Last Character", null, ToggleAutoLoad_Click) 
+        { 
+            ForeColor = Color.White, 
+            BackColor = Color.FromArgb(45, 45, 45),
+            CheckOnClick = true,
+            Checked = _buffManager.AutoLoadLastCharacter
+        };
+        fileMenu.DropDownItems.Add(autoLoadMenuItem);
+        fileMenu.DropDownItems.Add(new ToolStripSeparator());
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("Save Log...", null, SaveLog_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("Clear Log", null, ClearLog_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         fileMenu.DropDownItems.Add(new ToolStripSeparator());
@@ -299,15 +384,6 @@ public partial class MainForm : Form
 
         var optionsMenu = new ToolStripMenuItem("Options") { ForeColor = Color.White };
         optionsMenu.DropDownItems.Add(new ToolStripMenuItem("Settings...", null, OpenSettings_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
-        optionsMenu.DropDownItems.Add(new ToolStripSeparator());
-        var autoStartMenuItem = new ToolStripMenuItem("Auto-Start Proxy", null, ToggleAutoStart_Click) 
-        { 
-            ForeColor = Color.White, 
-            BackColor = Color.FromArgb(45, 45, 45),
-            CheckOnClick = true,
-            Checked = _buffManager.AutoStartProxy
-        };
-        optionsMenu.DropDownItems.Add(autoStartMenuItem);
         optionsMenu.DropDownItems.Add(new ToolStripSeparator());
         
         // Export submenu
@@ -345,26 +421,34 @@ public partial class MainForm : Form
             Padding = new Padding(10, 5, 10, 5)
         };
 
-        var remoteHostLabel = new Label { Text = "MUD Server:", ForeColor = Color.White, AutoSize = true, Location = new Point(10, 10) };
-        _remoteHostTextBox = new TextBox { Text = _remoteHost, Width = 120, Location = new Point(85, 7), BackColor = Color.FromArgb(60, 60, 60), ForeColor = Color.White };
-
-        var remotePortLabel = new Label { Text = "Port:", ForeColor = Color.White, AutoSize = true, Location = new Point(215, 10) };
-        _remotePortTextBox = new TextBox { Text = _remotePort.ToString(), Width = 50, Location = new Point(250, 7), BackColor = Color.FromArgb(60, 60, 60), ForeColor = Color.White };
-
-        var localPortLabel = new Label { Text = "Local Proxy Port:", ForeColor = Color.White, AutoSize = true, Location = new Point(320, 10) };
-        _localPortTextBox = new TextBox { Text = _localPort.ToString(), Width = 50, Location = new Point(420, 7), BackColor = Color.FromArgb(60, 60, 60), ForeColor = Color.White };
-
-        _startStopButton = new Button
+        _connectButton = new Button
         {
-            Text = "Start Proxy",
+            Text = "Connect",
             Width = 100,
             Height = 28,
-            Location = new Point(490, 5),
+            Location = new Point(10, 5),
             BackColor = Color.FromArgb(0, 120, 0),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat
         };
-        _startStopButton.Click += StartStopButton_Click;
+        _connectButton.Click += ConnectButton_Click;
+
+        _serverAddressLabel = new Label 
+        { 
+            Text = "No profile loaded", 
+            ForeColor = Color.Gray, 
+            AutoSize = true, 
+            Location = new Point(120, 10) 
+        };
+        
+        _serverPortLabel = new Label 
+        { 
+            Text = "", 
+            ForeColor = Color.Gray, 
+            AutoSize = true, 
+            Location = new Point(120, 10) 
+        };
+        _serverPortLabel.Visible = false;  // Hidden until profile loaded
 
         // Pause all commands button
         _pauseButton = new Button
@@ -372,7 +456,7 @@ public partial class MainForm : Form
             Text = "||",
             Width = 35,
             Height = 28,
-            Location = new Point(595, 5),
+            Location = new Point(350, 5),
             BackColor = Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
@@ -381,13 +465,27 @@ public partial class MainForm : Form
         _pauseButton.FlatAppearance.BorderColor = Color.FromArgb(80, 80, 80);
         _pauseButton.Click += PauseButton_Click;
 
+        // Combat toggle button
+        _combatToggleButton = new Button
+        {
+            Text = "Combat",
+            Width = 55,
+            Height = 28,
+            Location = new Point(390, 5),
+            BackColor = _buffManager.CombatManager.CombatEnabled ? Color.FromArgb(70, 130, 180) : Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        _combatToggleButton.FlatAppearance.BorderColor = Color.FromArgb(80, 80, 80);
+        _combatToggleButton.Click += CombatToggleButton_Click;
+
         // Quick toggle buttons for Heal/Buff/Cure
         _healToggleButton = new Button
         {
             Text = "Heal",
             Width = 55,
             Height = 28,
-            Location = new Point(635, 5),
+            Location = new Point(450, 5),
             BackColor = _buffManager.HealingManager.HealingEnabled ? Color.FromArgb(70, 130, 180) : Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat
@@ -400,7 +498,7 @@ public partial class MainForm : Form
             Text = "Buff",
             Width = 55,
             Height = 28,
-            Location = new Point(695, 5),
+            Location = new Point(510, 5),
             BackColor = _buffManager.AutoRecastEnabled ? Color.FromArgb(70, 130, 180) : Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat
@@ -413,7 +511,7 @@ public partial class MainForm : Form
             Text = "Cure",
             Width = 55,
             Height = 28,
-            Location = new Point(755, 5),
+            Location = new Point(570, 5),
             BackColor = _buffManager.CureManager.CuringEnabled ? Color.FromArgb(70, 130, 180) : Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat
@@ -424,15 +522,12 @@ public partial class MainForm : Form
         _autoScrollCheckBox = new CheckBox { Text = "Auto-scroll MUD", Checked = true, ForeColor = Color.White, AutoSize = true, Location = new Point(10, 35) };
         _autoScrollLogsCheckBox = new CheckBox { Text = "Auto-scroll Logs", Checked = true, ForeColor = Color.White, AutoSize = true, Location = new Point(130, 35) };
         _showTimestampsCheckBox = new CheckBox { Text = "Timestamps", Checked = true, ForeColor = Color.White, AutoSize = true, Location = new Point(260, 35) };
-        _stripAnsiCheckBox = new CheckBox { Text = "Strip ANSI", Checked = true, ForeColor = Color.White, AutoSize = true, Location = new Point(360, 35) };
 
         settingsPanel.Controls.AddRange(new Control[] {
-            remoteHostLabel, _remoteHostTextBox,
-            remotePortLabel, _remotePortTextBox,
-            localPortLabel, _localPortTextBox,
-            _startStopButton,
-            _pauseButton, _healToggleButton, _buffToggleButton, _cureToggleButton,
-            _autoScrollCheckBox, _autoScrollLogsCheckBox, _showTimestampsCheckBox, _stripAnsiCheckBox
+            _connectButton,
+            _serverAddressLabel,
+            _pauseButton, _combatToggleButton, _healToggleButton, _buffToggleButton, _cureToggleButton,
+            _autoScrollCheckBox, _autoScrollLogsCheckBox, _showTimestampsCheckBox
         });
 
         // Combat info panel (right side - resizable via splitter)
@@ -658,7 +753,22 @@ public partial class MainForm : Form
             ReadOnly = true,
             BorderStyle = BorderStyle.None
         };
+        
+        // Command input text box (bottom of MUD output panel)
+        _commandInputTextBox = new TextBox
+        {
+            Dock = DockStyle.Bottom,
+            Height = 25,
+            BackColor = Color.FromArgb(30, 30, 30),
+            ForeColor = Color.FromArgb(0, 255, 0),
+            Font = new Font("Consolas", 10),
+            BorderStyle = BorderStyle.FixedSingle
+        };
+        _commandInputTextBox.KeyDown += CommandInput_KeyDown;
+        
+        // Add to panel (order matters for docking - bottom first)
         _terminalSplitContainer.Panel1.Controls.Add(_mudOutputTextBox);
+        _terminalSplitContainer.Panel1.Controls.Add(_commandInputTextBox);
         
         // System log header
         var logHeaderPanel = new Panel
@@ -1048,6 +1158,13 @@ public partial class MainForm : Form
         UpdateToggleButtonStates();
     }
     
+    private void CombatToggleButton_Click(object? sender, EventArgs e)
+    {
+        _buffManager.CombatManager.CombatEnabled = !_buffManager.CombatManager.CombatEnabled;
+        UpdateToggleButtonStates();
+        LogMessage($"Auto-combat {(_buffManager.CombatManager.CombatEnabled ? "ENABLED" : "DISABLED")}", MessageType.System);
+    }
+    
     private void HealToggleButton_Click(object? sender, EventArgs e)
     {
         _buffManager.HealingManager.HealingEnabled = !_buffManager.HealingManager.HealingEnabled;
@@ -1094,6 +1211,7 @@ public partial class MainForm : Form
             _pauseButton.Text = "||";  // Pause icon to indicate "click to pause"
         }
         
+        _combatToggleButton.BackColor = _buffManager.CombatManager.CombatEnabled ? enabledColor : disabledColor;
         _healToggleButton.BackColor = _buffManager.HealingManager.HealingEnabled ? enabledColor : disabledColor;
         _buffToggleButton.BackColor = _buffManager.AutoRecastEnabled ? enabledColor : disabledColor;
         _cureToggleButton.BackColor = _buffManager.CureManager.CuringEnabled ? enabledColor : disabledColor;
@@ -1143,15 +1261,6 @@ public partial class MainForm : Form
     {
         _buffManager.CureManager.ClearAllAilments();
         LogMessage("All active ailments cleared.", MessageType.System);
-    }
-    
-    private void ToggleAutoStart_Click(object? sender, EventArgs e)
-    {
-        if (sender is ToolStripMenuItem item)
-        {
-            _buffManager.AutoStartProxy = item.Checked;
-            LogMessage($"Auto-start proxy on launch: {(item.Checked ? "ENABLED" : "DISABLED")}", MessageType.System);
-        }
     }
     
     #region Export/Import
@@ -1543,6 +1652,9 @@ public partial class MainForm : Form
         // Unblock casting since a new tick just happened
         _buffManager.OnCombatTick();
         
+        // Check if we should send an attack spell on this tick (mana may have regenerated)
+        _buffManager.CombatManager.OnCombatTick();
+        
         // Check for auto-recast after each tick (this is the mid-round window)
         // Small delay to let the tick fully process before recasting
         Task.Delay(100).ContinueWith(_ => _buffManager.CheckAutoRecast());
@@ -1553,6 +1665,9 @@ public partial class MainForm : Form
         // Pass to buff manager for processing
         var wasPaused = _buffManager.ShouldPauseCommands;
         _buffManager.ProcessMessage(text);
+        
+        // Pass to combat manager for room parsing
+        _buffManager.CombatManager.ProcessMessage(text);
         
         // Update pause button if state changed (e.g., training screen detected/exited)
         if (wasPaused != _buffManager.ShouldPauseCommands)
@@ -1565,14 +1680,29 @@ public partial class MainForm : Form
 
         // Combat state changes
         if (CombatEngagedRegex.IsMatch(text))
+        {
             SetCombatState(true);
+            _buffManager.CombatManager.OnCombatEngaged();
+        }
         else if (CombatOffRegex.IsMatch(text))
+        {
             SetCombatState(false);
+            _buffManager.CombatManager.OnCombatEnded();
+        }
 
         // HP/Mana updates
         var hpMatch = HpManaRegex.Match(text);
         if (hpMatch.Success)
+        {
             UpdatePlayerStats(hpMatch);
+            
+            // HP bar means we're in-game - login phase complete
+            if (_isInLoginPhase)
+            {
+                _isInLoginPhase = false;
+                LogMessage("✅ Login complete - entered game", MessageType.System);
+            }
+        }
 
         // Damage detection for tick timing
         if (DamageRegex.IsMatch(text))
@@ -1684,168 +1814,461 @@ public partial class MainForm : Form
         );
     }
 
-    private async void StartStopButton_Click(object? sender, EventArgs e)
+    private async void ConnectButton_Click(object? sender, EventArgs e)
     {
-        if (!_isRunning)
-            await StartProxy();
+        if (!_isConnected)
+            await Connect();
         else
-            StopProxy();
+            Disconnect();
     }
 
-    private async Task StartProxy()
+    private async Task Connect()
     {
-        if (!IPAddress.TryParse(_remoteHostTextBox.Text, out _) && string.IsNullOrWhiteSpace(_remoteHostTextBox.Text))
+        // Check if we have BBS settings
+        if (string.IsNullOrEmpty(_serverAddress))
         {
-            MessageBox.Show("Please enter a valid server address.", "Invalid Settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show("Please load a character profile with BBS settings first.\n\nUse File → Load Character to load a profile.", 
+                "No Profile Loaded", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
-
-        if (!int.TryParse(_remotePortTextBox.Text, out int remotePort) || remotePort < 1 || remotePort > 65535)
-        {
-            MessageBox.Show("Please enter a valid remote port (1-65535).", "Invalid Settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        if (!int.TryParse(_localPortTextBox.Text, out int localPort) || localPort < 1 || localPort > 65535)
-        {
-            MessageBox.Show("Please enter a valid local port (1-65535).", "Invalid Settings", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        _remoteHost = _remoteHostTextBox.Text;
-        _remotePort = remotePort;
-        _localPort = localPort;
 
         _cancellationTokenSource = new CancellationTokenSource();
 
         try
         {
-            _listener = new TcpListener(IPAddress.Parse(_localHost), _localPort);
-            _listener.Start();
+            _serverConnection = new TcpClient();
+            
+            UpdateStatus("Connecting...", Color.Yellow);
+            LogMessage($"Connecting to {_serverAddress}:{_serverPort}...", MessageType.System);
+            
+            await _serverConnection.ConnectAsync(_serverAddress, _serverPort, _cancellationTokenSource.Token);
+            _serverStream = _serverConnection.GetStream();
+            
+            _isConnected = true;
+            _isInLoginPhase = true;
+            _triggeredLogonSequences.Clear();
+            
+            UpdateConnectionUI(true);
+            LogMessage($"Connected to {_serverAddress}:{_serverPort}", MessageType.System);
+            UpdateStatus("Connected", Color.LimeGreen);
+            
+            // Reset combat state on new connection
+            _buffManager.CombatManager.ResetState();
 
-            _isRunning = true;
-            UpdateUI(true);
-            LogMessage($"Proxy started on {_localHost}:{_localPort}", MessageType.System);
-            LogMessage($"Configure MegaMUD to connect to: {_localHost} port {_localPort}", MessageType.System);
-            LogMessage("Waiting for MegaMUD to connect...", MessageType.System);
-            LogMessage("💡 Tip: Type 'stat' in game to auto-detect your character!", MessageType.System);
-            UpdateStatus("Waiting for connection...", Color.Yellow);
-
-            await AcceptConnectionsAsync(_cancellationTokenSource.Token);
+            // Start reading from server
+            await ReadServerDataAsync(_cancellationTokenSource.Token);
         }
-        catch (SocketException ex)
+        catch (OperationCanceledException)
         {
-            LogMessage($"Failed to start proxy: {ex.Message}", MessageType.System);
-            MessageBox.Show($"Failed to start proxy on port {_localPort}.\n\n{ex.Message}\n\nTry a different port.",
-                "Startup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            StopProxy();
+            // Normal cancellation
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"Connection failed: {ex.Message}", MessageType.System);
+            MessageBox.Show($"Failed to connect to {_serverAddress}:{_serverPort}.\n\n{ex.Message}",
+                "Connection Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            Disconnect();
         }
     }
 
-    private void StopProxy()
+    private void Disconnect()
     {
-        _isRunning = false;
+        _isConnected = false;
         _cancellationTokenSource?.Cancel();
 
-        try { _clientConnection?.Close(); } catch { }
+        try { _serverStream?.Close(); } catch { }
         try { _serverConnection?.Close(); } catch { }
-        try { _listener?.Stop(); } catch { }
 
-        _clientConnection = null;
+        _serverStream = null;
         _serverConnection = null;
-        _listener = null;
 
-        UpdateUI(false);
-        LogMessage("Proxy stopped.", MessageType.System);
-        UpdateStatus("Stopped", Color.Gray);
+        UpdateConnectionUI(false);
+        LogMessage("Disconnected.", MessageType.System);
+        UpdateStatus("Disconnected", Color.Gray);
     }
 
-    private void UpdateUI(bool running)
+    private void UpdateConnectionUI(bool connected)
     {
-        _startStopButton.Text = running ? "Stop Proxy" : "Start Proxy";
-        _startStopButton.BackColor = running ? Color.FromArgb(180, 0, 0) : Color.FromArgb(0, 120, 0);
-        _remoteHostTextBox.Enabled = !running;
-        _remotePortTextBox.Enabled = !running;
-        _localPortTextBox.Enabled = !running;
+        _connectButton.Text = connected ? "Disconnect" : "Connect";
+        _connectButton.BackColor = connected ? Color.FromArgb(180, 0, 0) : Color.FromArgb(0, 120, 0);
     }
 
-    private async Task AcceptConnectionsAsync(CancellationToken cancellationToken)
-    {
-        while (!cancellationToken.IsCancellationRequested && _listener != null)
-        {
-            try
-            {
-                _clientConnection = await _listener.AcceptTcpClientAsync(cancellationToken);
-                LogMessage("MegaMUD connected!", MessageType.System);
-                UpdateStatus("Connecting to MUD server...", Color.Yellow);
-
-                _serverConnection = new TcpClient();
-                await _serverConnection.ConnectAsync(_remoteHost, _remotePort, cancellationToken);
-                LogMessage($"Connected to MUD server at {_remoteHost}:{_remotePort}", MessageType.System);
-                UpdateStatus("Connected - Proxying traffic", Color.LimeGreen);
-
-                var clientToServer = ForwardDataAsync(_clientConnection, _serverConnection, "CLIENT", cancellationToken);
-                var serverToClient = ForwardDataAsync(_serverConnection, _clientConnection, "SERVER", cancellationToken);
-
-                await Task.WhenAny(clientToServer, serverToClient);
-
-                LogMessage("Connection closed.", MessageType.System);
-                UpdateStatus("Disconnected - Waiting for new connection...", Color.Yellow);
-
-                try { _clientConnection?.Close(); } catch { }
-                try { _serverConnection?.Close(); } catch { }
-            }
-            catch (OperationCanceledException) { break; }
-            catch (Exception ex)
-            {
-                if (_isRunning)
-                {
-                    LogMessage($"Connection error: {ex.Message}", MessageType.System);
-                    UpdateStatus("Error - Waiting for new connection...", Color.Red);
-                }
-            }
-        }
-    }
-
-    private async Task ForwardDataAsync(TcpClient source, TcpClient destination, string direction, CancellationToken cancellationToken)
+    private async Task ReadServerDataAsync(CancellationToken cancellationToken)
     {
         var buffer = new byte[8192];
-        var sourceStream = source.GetStream();
-        var destStream = destination.GetStream();
 
         try
         {
-            while (!cancellationToken.IsCancellationRequested)
+            while (!cancellationToken.IsCancellationRequested && _serverStream != null)
             {
-                int bytesRead = await sourceStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
+                int bytesRead = await _serverStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
                 if (bytesRead == 0) break;
 
-                await destStream.WriteAsync(buffer, 0, bytesRead, cancellationToken);
-
-                string text = Encoding.GetEncoding(437).GetString(buffer, 0, bytesRead);
-
-                if (_stripAnsiCheckBox.Checked)
-                    text = StripAnsi(text);
-
-                if (direction == "SERVER")
-                    ProcessServerMessage(text);
-
-                text = text.Trim();
-                if (!string.IsNullOrEmpty(text))
+                // Process telnet IAC commands and get clean data
+                var (cleanData, iacResponses) = ProcessTelnetData(buffer, bytesRead);
+                
+                // Send any IAC responses back to server
+                foreach (var response in iacResponses)
                 {
-                    var msgType = direction == "SERVER" ? MessageType.Server : MessageType.Client;
-                    LogMessage(text, msgType);
+                    await SendRawDataAsync(response);
+                }
+
+                if (cleanData.Length > 0)
+                {
+                    string text = Encoding.GetEncoding(437).GetString(cleanData);
+                    
+                    // Process for game logic (uses stripped version internally)
+                    string strippedText = StripAnsi(text);
+                    ProcessServerMessage(strippedText);
+                    
+                    // Check for logon automation triggers
+                    if (_isInLoginPhase)
+                    {
+                        CheckLogonAutomation(strippedText);
+                    }
+
+                    // Display with ANSI colors
+                    if (!string.IsNullOrEmpty(text.Trim()))
+                    {
+                        LogMessageWithAnsi(text, MessageType.Server);
+                    }
                 }
             }
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal cancellation
         }
         catch (Exception ex)
         {
             if (!cancellationToken.IsCancellationRequested)
-                LogMessage($"Forward error ({direction}): {ex.Message}", MessageType.System);
+                LogMessage($"Read error: {ex.Message}", MessageType.System);
+        }
+    }
+
+    /// <summary>
+    /// Process telnet IAC (Interpret As Command) sequences
+    /// Returns clean data with IAC commands stripped, plus any responses to send
+    /// </summary>
+    private (byte[] cleanData, List<byte[]> responses) ProcessTelnetData(byte[] buffer, int length)
+    {
+        const byte IAC = 255;  // Interpret As Command
+        const byte WILL = 251;
+        const byte WONT = 252;
+        const byte DO = 253;
+        const byte DONT = 254;
+        const byte SB = 250;   // Subnegotiation Begin
+        const byte SE = 240;   // Subnegotiation End
+
+        var cleanData = new List<byte>();
+        var responses = new List<byte[]>();
+        int i = 0;
+
+        while (i < length)
+        {
+            if (buffer[i] == IAC && i + 1 < length)
+            {
+                byte command = buffer[i + 1];
+
+                if (command == IAC)
+                {
+                    // Escaped IAC (255 255) = literal 255
+                    cleanData.Add(IAC);
+                    i += 2;
+                }
+                else if ((command == WILL || command == WONT || command == DO || command == DONT) && i + 2 < length)
+                {
+                    byte option = buffer[i + 2];
+                    
+                    // Respond to negotiations - generally refuse everything for simplicity
+                    if (command == WILL)
+                    {
+                        // Server offers to do something - we say DONT
+                        responses.Add(new byte[] { IAC, DONT, option });
+                    }
+                    else if (command == DO)
+                    {
+                        // Server asks us to do something - we say WONT
+                        responses.Add(new byte[] { IAC, WONT, option });
+                    }
+                    // WONT and DONT are acknowledgments, no response needed
+                    
+                    i += 3;
+                }
+                else if (command == SB)
+                {
+                    // Subnegotiation - skip until SE
+                    i += 2;
+                    while (i < length)
+                    {
+                        if (buffer[i] == IAC && i + 1 < length && buffer[i + 1] == SE)
+                        {
+                            i += 2;
+                            break;
+                        }
+                        i++;
+                    }
+                }
+                else
+                {
+                    // Unknown command, skip IAC and command byte
+                    i += 2;
+                }
+            }
+            else
+            {
+                cleanData.Add(buffer[i]);
+                i++;
+            }
+        }
+
+        return (cleanData.ToArray(), responses);
+    }
+
+    /// <summary>
+    /// Check incoming text for logon automation triggers
+    /// </summary>
+    private void CheckLogonAutomation(string text)
+    {
+        var sequences = _buffManager.BbsSettings.LogonSequences;
+        
+        foreach (var seq in sequences)
+        {
+            // Skip if already triggered this session
+            if (_triggeredLogonSequences.Contains(seq.TriggerMessage))
+                continue;
+                
+            // Check for exact match (case-insensitive, anywhere in text)
+            if (text.Contains(seq.TriggerMessage, StringComparison.OrdinalIgnoreCase))
+            {
+                _triggeredLogonSequences.Add(seq.TriggerMessage);
+                LogMessage($"🔑 Logon trigger matched: \"{seq.TriggerMessage}\"", MessageType.System);
+                
+                // Send the response with a small delay
+                Task.Run(async () =>
+                {
+                    await Task.Delay(100);  // Small delay for more natural feel
+                    await SendCommandAsync(seq.Response);
+                });
+            }
+        }
+    }
+
+    /// <summary>
+    /// Send raw bytes to server
+    /// </summary>
+    private async Task SendRawDataAsync(byte[] data)
+    {
+        if (_serverStream == null || !_isConnected) return;
+        
+        try
+        {
+            await _serverStream.WriteAsync(data, 0, data.Length);
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"Send error: {ex.Message}", MessageType.System);
+        }
+    }
+
+    /// <summary>
+    /// Send a command to the server (adds carriage return/line feed)
+    /// </summary>
+    public async Task SendCommandAsync(string command)
+    {
+        if (_serverStream == null || !_isConnected)
+        {
+            LogMessage("Cannot send command - not connected", MessageType.System);
+            return;
+        }
+        
+        try
+        {
+            var data = Encoding.GetEncoding(437).GetBytes(command + "\r\n");
+            await _serverStream.WriteAsync(data, 0, data.Length);
+            // Don't log here - server will echo the command back
+        }
+        catch (Exception ex)
+        {
+            LogMessage($"Send error: {ex.Message}", MessageType.System);
         }
     }
 
     private string StripAnsi(string text) => AnsiRegex.Replace(text, string.Empty);
+
+    /// <summary>
+    /// Log a message with ANSI color code interpretation
+    /// </summary>
+    private void LogMessageWithAnsi(string message, MessageType type)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => LogMessageWithAnsi(message, type));
+            return;
+        }
+
+        RichTextBox targetTextBox = type == MessageType.System ? _systemLogTextBox : _mudOutputTextBox;
+        CheckBox autoScrollCheckBox = type == MessageType.System ? _autoScrollLogsCheckBox : _autoScrollCheckBox;
+
+        // Trim log if needed
+        _logMessageCount++;
+        if (_logMessageCount % 100 == 0)
+        {
+            TrimLogIfNeeded(targetTextBox);
+        }
+
+        // Only add timestamps to system log, not MUD output
+        if (type == MessageType.System && _showTimestampsCheckBox.Checked)
+        {
+            targetTextBox.SelectionStart = targetTextBox.TextLength;
+            targetTextBox.SelectionColor = Color.Gray;
+            targetTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] ");
+        }
+
+        // Parse and render ANSI codes
+        int pos = 0;
+        Color currentColor = Color.FromArgb(192, 192, 192);  // Default gray
+        bool isBold = false;
+
+        while (pos < message.Length)
+        {
+            // Look for ANSI escape sequence
+            int escPos = message.IndexOf('\x1B', pos);
+            
+            if (escPos == -1)
+            {
+                // No more escape sequences, output rest of string
+                string remaining = message.Substring(pos);
+                if (!string.IsNullOrEmpty(remaining))
+                {
+                    targetTextBox.SelectionStart = targetTextBox.TextLength;
+                    targetTextBox.SelectionColor = isBold ? BrightenColor(currentColor) : currentColor;
+                    targetTextBox.AppendText(remaining);
+                }
+                break;
+            }
+
+            // Output text before escape sequence
+            if (escPos > pos)
+            {
+                string textBefore = message.Substring(pos, escPos - pos);
+                targetTextBox.SelectionStart = targetTextBox.TextLength;
+                targetTextBox.SelectionColor = isBold ? BrightenColor(currentColor) : currentColor;
+                targetTextBox.AppendText(textBefore);
+            }
+
+            // Parse escape sequence - skip ESC character
+            int seqEnd = escPos + 1;
+            
+            if (seqEnd < message.Length)
+            {
+                char nextChar = message[seqEnd];
+                
+                if (nextChar == '[')
+                {
+                    // CSI (Control Sequence Introducer) - ESC[
+                    seqEnd++;
+                    int codeStart = seqEnd;
+                    
+                    // Read parameters (digits and semicolons)
+                    while (seqEnd < message.Length && (char.IsDigit(message[seqEnd]) || message[seqEnd] == ';' || message[seqEnd] == '?'))
+                        seqEnd++;
+                    
+                    // Read the final character that determines the command
+                    if (seqEnd < message.Length)
+                    {
+                        char cmdChar = message[seqEnd];
+                        seqEnd++; // Skip command character
+                        
+                        if (cmdChar == 'm')
+                        {
+                            // SGR (Select Graphic Rendition) - colors
+                            string codes = message.Substring(codeStart, seqEnd - codeStart - 1);
+                            foreach (var code in codes.Split(';'))
+                            {
+                                if (int.TryParse(code, out int codeNum))
+                                {
+                                    switch (codeNum)
+                                    {
+                                        case 0: currentColor = Color.FromArgb(192, 192, 192); isBold = false; break;
+                                        case 1: isBold = true; break;
+                                        case 30: currentColor = Color.FromArgb(0, 0, 0); break;
+                                        case 31: currentColor = Color.FromArgb(170, 0, 0); break;
+                                        case 32: currentColor = Color.FromArgb(0, 170, 0); break;
+                                        case 33: currentColor = Color.FromArgb(170, 85, 0); break;
+                                        case 34: currentColor = Color.FromArgb(0, 0, 170); break;
+                                        case 35: currentColor = Color.FromArgb(170, 0, 170); break;
+                                        case 36: currentColor = Color.FromArgb(0, 170, 170); break;
+                                        case 37: currentColor = Color.FromArgb(192, 192, 192); break;
+                                    }
+                                }
+                            }
+                        }
+                        // All other CSI sequences (K, J, H, A, B, C, D, etc.) are silently ignored
+                        // They're cursor/display control commands not applicable to RichTextBox
+                    }
+                }
+                else if (nextChar == '(' || nextChar == ')')
+                {
+                    // Character set selection - ESC( or ESC) followed by one character
+                    seqEnd++;
+                    if (seqEnd < message.Length) seqEnd++; // Skip the charset identifier
+                }
+                else if (nextChar >= '0' && nextChar <= '9')
+                {
+                    // Some other escape with digit
+                    seqEnd++;
+                }
+                else if (nextChar == '=' || nextChar == '>' || nextChar == '<')
+                {
+                    // Keypad mode
+                    seqEnd++;
+                }
+                else if (nextChar == 'M' || nextChar == 'D' || nextChar == 'E' || nextChar == '7' || nextChar == '8')
+                {
+                    // Single character escapes (reverse index, index, next line, save/restore cursor)
+                    seqEnd++;
+                }
+                else
+                {
+                    // Unknown escape - skip just the ESC
+                    // seqEnd is already at escPos + 1
+                }
+            }
+            
+            pos = seqEnd;
+        }
+
+        // Add newline
+        targetTextBox.AppendText(Environment.NewLine);
+
+        // Auto-scroll
+        if (autoScrollCheckBox.Checked)
+        {
+            targetTextBox.SelectionStart = targetTextBox.TextLength;
+            targetTextBox.ScrollToCaret();
+        }
+    }
+
+    /// <summary>
+    /// Brighten a color for bold/bright ANSI codes
+    /// </summary>
+    private Color BrightenColor(Color color)
+    {
+        // Standard bright versions
+        if (color == Color.FromArgb(0, 0, 0)) return Color.FromArgb(85, 85, 85);           // Bright black (gray)
+        if (color == Color.FromArgb(170, 0, 0)) return Color.FromArgb(255, 85, 85);        // Bright red
+        if (color == Color.FromArgb(0, 170, 0)) return Color.FromArgb(85, 255, 85);        // Bright green
+        if (color == Color.FromArgb(170, 85, 0)) return Color.FromArgb(255, 255, 85);      // Bright yellow
+        if (color == Color.FromArgb(0, 0, 170)) return Color.FromArgb(85, 85, 255);        // Bright blue
+        if (color == Color.FromArgb(170, 0, 170)) return Color.FromArgb(255, 85, 255);     // Bright magenta
+        if (color == Color.FromArgb(0, 170, 170)) return Color.FromArgb(85, 255, 255);     // Bright cyan
+        if (color == Color.FromArgb(192, 192, 192)) return Color.FromArgb(255, 255, 255);  // Bright white
+        return color;
+    }
 
     private void LogMessage(string message, MessageType type)
     {
@@ -1883,6 +2306,13 @@ public partial class MainForm : Form
         string prefix = type == MessageType.Client ? ">>> " : "";
         string timestamp = _showTimestampsCheckBox.Checked ? $"[{DateTime.Now:HH:mm:ss}] " : "";
 
+        // Trim log if it's getting too long (check every 100 messages for performance)
+        _logMessageCount++;
+        if (_logMessageCount % 100 == 0)
+        {
+            TrimLogIfNeeded(targetTextBox);
+        }
+
         targetTextBox.SelectionStart = targetTextBox.TextLength;
         targetTextBox.SelectionLength = 0;
 
@@ -1895,11 +2325,50 @@ public partial class MainForm : Form
         targetTextBox.SelectionColor = color;
         targetTextBox.AppendText(prefix + message + Environment.NewLine);
 
-        // Simple auto-scroll: if checkbox is checked, scroll to bottom
+        // Auto-scroll: if checkbox is checked, scroll to bottom
         if (autoScrollCheckBox.Checked)
         {
             targetTextBox.SelectionStart = targetTextBox.TextLength;
             targetTextBox.ScrollToCaret();
+        }
+    }
+
+    private int _logMessageCount = 0;
+
+    private void TrimLogIfNeeded(RichTextBox textBox)
+    {
+        // Use TextLength as a proxy for size - much faster than counting lines
+        // Approximate: if text is over 500KB, trim it down
+        const int MAX_TEXT_LENGTH = 500000;  // ~500KB
+        const int TRIM_TO_LENGTH = 300000;   // ~300KB
+        
+        if (textBox.TextLength > MAX_TEXT_LENGTH)
+        {
+            try
+            {
+                textBox.SuspendLayout();
+                
+                // Calculate how much to remove
+                int removeLength = textBox.TextLength - TRIM_TO_LENGTH;
+                
+                // Find a newline near the remove point to avoid cutting mid-line
+                int actualRemovePoint = textBox.Text.IndexOf('\n', removeLength);
+                if (actualRemovePoint == -1)
+                    actualRemovePoint = removeLength;
+                else
+                    actualRemovePoint++;
+                
+                textBox.Select(0, actualRemovePoint);
+                
+                // Temporarily disable ReadOnly to prevent system beep
+                textBox.ReadOnly = false;
+                textBox.SelectedText = "";
+                textBox.ReadOnly = true;
+            }
+            finally
+            {
+                textBox.ResumeLayout();
+            }
         }
     }
 
@@ -1912,6 +2381,99 @@ public partial class MainForm : Form
         }
         _statusLabel.Text = $"Status: {message}";
         _statusLabel.ForeColor = color;
+    }
+
+    private void LoadCharacter_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Filter = "Character Profile (*.json)|*.json|All Files (*.*)|*.*",
+            DefaultExt = "json",
+            InitialDirectory = _buffManager.CharacterProfilesPath,
+            Title = "Load Character Profile"
+        };
+
+        if (dialog.ShowDialog() == DialogResult.OK)
+        {
+            var (success, message) = _buffManager.LoadCharacterProfile(dialog.FileName);
+            if (success)
+            {
+                MessageBox.Show(message, "Character Loaded", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                UpdateTitle();
+            }
+            else
+            {
+                MessageBox.Show(message, "Load Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+    }
+    
+    private void ToggleAutoLoad_Click(object? sender, EventArgs e)
+    {
+        if (sender is ToolStripMenuItem item)
+        {
+            _buffManager.AutoLoadLastCharacter = item.Checked;
+            LogMessage($"Auto-load last character: {(item.Checked ? "ENABLED" : "DISABLED")}", MessageType.System);
+        }
+    }
+
+    private void SaveCharacter_Click(object? sender, EventArgs e)
+    {
+        // If we have a current profile path, save to it; otherwise prompt for location
+        if (!string.IsNullOrEmpty(_buffManager.CurrentProfilePath))
+        {
+            var (success, message) = _buffManager.SaveCharacterProfile(_buffManager.CurrentProfilePath);
+            if (!success)
+            {
+                MessageBox.Show(message, "Save Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            UpdateTitle();
+        }
+        else
+        {
+            // No current profile, use Save As
+            SaveCharacterAs_Click(sender, e);
+        }
+    }
+
+    private void SaveCharacterAs_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new SaveFileDialog
+        {
+            Filter = "Character Profile (*.json)|*.json|All Files (*.*)|*.*",
+            DefaultExt = "json",
+            InitialDirectory = _buffManager.CharacterProfilesPath,
+            FileName = _buffManager.GetDefaultProfileFilename(),
+            Title = "Save Character Profile"
+        };
+
+        if (dialog.ShowDialog() == DialogResult.OK)
+        {
+            var (success, message) = _buffManager.SaveCharacterProfile(dialog.FileName);
+            if (success)
+            {
+                MessageBox.Show(message, "Character Saved", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                UpdateTitle();
+            }
+            else
+            {
+                MessageBox.Show(message, "Save Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+    }
+
+    private void UpdateTitle()
+    {
+        var title = "MUD Proxy Viewer";
+        if (!string.IsNullOrEmpty(_buffManager.PlayerInfo.Name))
+        {
+            title += $" - {_buffManager.PlayerInfo.Name}";
+        }
+        if (!string.IsNullOrEmpty(_buffManager.CurrentProfilePath))
+        {
+            title += $" [{Path.GetFileName(_buffManager.CurrentProfilePath)}]";
+        }
+        this.Text = title;
     }
 
     private void SaveLog_Click(object? sender, EventArgs e)
@@ -1957,8 +2519,7 @@ public partial class MainForm : Form
             "• Type 'stat' in game to detect your character\n" +
             "• Type 'par' to update party list\n" +
             "• Use Buffs menu to configure your buffs\n" +
-            "• Use Healing/Cures menus for auto-healing\n\n" +
-            "Created with ❤️ for the MajorMUD community",
+            "• Use Healing/Cures menus for auto-healing\n\n",
             "About MUD Proxy Viewer",
             MessageBoxButtons.OK,
             MessageBoxIcon.Information
@@ -1975,7 +2536,7 @@ public partial class MainForm : Form
         _outOfCombatRecastTimer?.Dispose();
         _parCheckTimer?.Stop();
         _parCheckTimer?.Dispose();
-        StopProxy();
+        Disconnect();
     }
 }
 

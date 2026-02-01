@@ -43,6 +43,14 @@ public class SettingsDialog : Form
     private NumericUpDown _maxMonstersNum = null!;
     private NumericUpDown _runDistanceNum = null!;
     
+    // BBS tab controls
+    private TextBox _bbsAddressText = null!;
+    private NumericUpDown _bbsPortNum = null!;
+    private ListView _logonSequencesList = null!;
+    private TextBox _logoffCommandText = null!;
+    private TextBox _relogCommandText = null!;
+    private NumericUpDown _pvpLevelNum = null!;
+    
     public SettingsDialog(BuffManager buffManager, CombatManager combatManager, string currentCharacter = "")
     {
         _buffManager = buffManager;
@@ -76,30 +84,75 @@ public class SettingsDialog : Form
         var curesTab = CreateCuresTab();
         var buffsTab = CreateBuffsTab();
         var partyTab = CreatePartyTab();
+        var bbsTab = CreateBbsTab();
         
-        _tabControl.TabPages.AddRange(new TabPage[] { generalTab, combatTab, healingTab, curesTab, buffsTab, partyTab });
+        _tabControl.TabPages.AddRange(new TabPage[] { generalTab, combatTab, healingTab, curesTab, buffsTab, partyTab, bbsTab });
         this.Controls.Add(_tabControl);
         
-        // Close button
-        var closeButton = new Button
+        // Save button
+        var saveButton = new Button
         {
-            Text = "Close",
+            Text = "Save",
+            Size = new Size(80, 30),
+            Location = new Point(405, 420),
+            BackColor = Color.FromArgb(0, 100, 0),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            DialogResult = DialogResult.OK
+        };
+        saveButton.Click += SaveButton_Click;
+        this.Controls.Add(saveButton);
+        this.AcceptButton = saveButton;
+        
+        // Cancel button
+        var cancelButton = new Button
+        {
+            Text = "Cancel",
             Size = new Size(80, 30),
             Location = new Point(495, 420),
             BackColor = Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
-            DialogResult = DialogResult.OK
+            DialogResult = DialogResult.Cancel
         };
-        closeButton.Click += CloseButton_Click;
-        this.Controls.Add(closeButton);
-        this.AcceptButton = closeButton;
+        this.Controls.Add(cancelButton);
+        this.CancelButton = cancelButton;
     }
     
-    private void CloseButton_Click(object? sender, EventArgs e)
+    private void SaveButton_Click(object? sender, EventArgs e)
     {
-        // Save combat settings on close
+        // Save all settings to BuffManager
         SaveCombatSettings();
+        SaveBbsSettings();
+        
+        // Save to character profile file
+        var profilePath = _buffManager.CurrentProfilePath;
+        if (string.IsNullOrEmpty(profilePath))
+        {
+            // No profile loaded - prompt user to save
+            using var dialog = new SaveFileDialog
+            {
+                Filter = "Character Profile (*.json)|*.json",
+                DefaultExt = "json",
+                FileName = _buffManager.GetDefaultProfileFilename(),
+                InitialDirectory = _buffManager.CharacterProfilesPath
+            };
+            
+            if (dialog.ShowDialog() == DialogResult.OK)
+            {
+                profilePath = dialog.FileName;
+            }
+            else
+            {
+                return; // User cancelled, don't close dialog
+            }
+        }
+        
+        var (success, message) = _buffManager.SaveCharacterProfile(profilePath);
+        if (!success)
+        {
+            MessageBox.Show(message, "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
     
     private TabPage CreateCombatTab()
@@ -328,6 +381,7 @@ public class SettingsDialog : Form
             Value = settings.MultiAttackReqManaPercent
         };
         _multiAttackReqManaNum.ValueChanged += (s, e) => UpdateManaLabels();
+        _multiAttackReqManaNum.TextChanged += (s, e) => UpdateManaLabels();
         spellPanel.Controls.Add(_multiAttackReqManaNum);
         
         _multiAttackManaLabel = new Label
@@ -378,6 +432,7 @@ public class SettingsDialog : Form
             Value = settings.PreAttackReqManaPercent
         };
         _preAttackReqManaNum.ValueChanged += (s, e) => UpdateManaLabels();
+        _preAttackReqManaNum.TextChanged += (s, e) => UpdateManaLabels();
         spellPanel.Controls.Add(_preAttackReqManaNum);
         
         _preAttackManaLabel = new Label
@@ -428,6 +483,7 @@ public class SettingsDialog : Form
             Value = settings.AttackReqManaPercent
         };
         _attackReqManaNum.ValueChanged += (s, e) => UpdateManaLabels();
+        _attackReqManaNum.TextChanged += (s, e) => UpdateManaLabels();
         spellPanel.Controls.Add(_attackReqManaNum);
         
         _attackManaLabel = new Label
@@ -471,18 +527,18 @@ public class SettingsDialog : Form
             UseNormalWeaponForAtkSpells = _useNormalForAtkSpellsCheck.Checked,
             
             // Spell Combat - Multi-Attack
-            MultiAttackSpell = _multiAttackSpellText.Text.Trim().ToUpper(),
+            MultiAttackSpell = _multiAttackSpellText.Text.Trim(),
             MultiAttackMinEnemies = (int)_multiAttackMinEnemiesNum.Value,
             MultiAttackMaxCast = (int)_multiAttackMaxCastNum.Value,
             MultiAttackReqManaPercent = (int)_multiAttackReqManaNum.Value,
             
             // Spell Combat - Pre-Attack
-            PreAttackSpell = _preAttackSpellText.Text.Trim().ToUpper(),
+            PreAttackSpell = _preAttackSpellText.Text.Trim(),
             PreAttackMaxCast = (int)_preAttackMaxCastNum.Value,
             PreAttackReqManaPercent = (int)_preAttackReqManaNum.Value,
             
             // Spell Combat - Attack
-            AttackSpell = _attackSpellText.Text.Trim().ToUpper(),
+            AttackSpell = _attackSpellText.Text.Trim(),
             AttackMaxCast = (int)_attackMaxCastNum.Value,
             AttackReqManaPercent = (int)_attackReqManaNum.Value,
             
@@ -1067,5 +1123,378 @@ public class SettingsDialog : Form
         _parFrequencyNumeric.Enabled = enabled;
         freqLabel.ForeColor = enabled ? Color.White : Color.FromArgb(100, 100, 100);
         secondsLabel.ForeColor = enabled ? Color.White : Color.FromArgb(100, 100, 100);
+    }
+    
+    #region BBS Tab
+    
+    private TabPage CreateBbsTab()
+    {
+        var tab = new TabPage("BBS")
+        {
+            BackColor = Color.FromArgb(45, 45, 45)
+        };
+        
+        var settings = _buffManager.BbsSettings;
+        
+        // ── Telnet Section ──
+        var telnetPanel = new Panel
+        {
+            Location = new Point(10, 10),
+            Size = new Size(260, 80),
+            BackColor = Color.FromArgb(40, 40, 40)
+        };
+        
+        int ty = 8;
+        AddLabel(telnetPanel, "── Telnet ──", 10, ty);
+        ty += 22;
+        
+        AddLabel(telnetPanel, "Address:", 10, ty + 2);
+        _bbsAddressText = new TextBox
+        {
+            Location = new Point(70, ty),
+            Width = 140,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Text = settings.Address
+        };
+        telnetPanel.Controls.Add(_bbsAddressText);
+        ty += 26;
+        
+        AddLabel(telnetPanel, "Port:", 10, ty + 2);
+        _bbsPortNum = new NumericUpDown
+        {
+            Location = new Point(70, ty),
+            Width = 70,
+            Minimum = 1,
+            Maximum = 65535,
+            Value = settings.Port > 0 ? settings.Port : 23,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White
+        };
+        telnetPanel.Controls.Add(_bbsPortNum);
+        
+        tab.Controls.Add(telnetPanel);
+        
+        // ── Logon Automation Section ──
+        var logonPanel = new Panel
+        {
+            Location = new Point(10, 95),
+            Size = new Size(535, 200),
+            BackColor = Color.FromArgb(40, 40, 40)
+        };
+        
+        AddLabel(logonPanel, "── Logon Automation ──", 10, 8);
+        
+        _logonSequencesList = new ListView
+        {
+            Location = new Point(10, 30),
+            Size = new Size(430, 130),
+            View = View.Details,
+            FullRowSelect = true,
+            GridLines = true,
+            BackColor = Color.FromArgb(50, 50, 50),
+            ForeColor = Color.White
+        };
+        _logonSequencesList.Columns.Add("Trigger Message", 200);
+        _logonSequencesList.Columns.Add("Response", 200);
+        
+        // Load existing sequences
+        foreach (var seq in settings.LogonSequences)
+        {
+            var item = new ListViewItem(seq.TriggerMessage);
+            item.SubItems.Add(seq.Response);
+            _logonSequencesList.Items.Add(item);
+        }
+        
+        logonPanel.Controls.Add(_logonSequencesList);
+        
+        // Buttons for logon sequences
+        var addLogonBtn = new Button
+        {
+            Text = "Add",
+            Location = new Point(450, 30),
+            Size = new Size(75, 25),
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        addLogonBtn.Click += AddLogonSequence_Click;
+        logonPanel.Controls.Add(addLogonBtn);
+        
+        var editLogonBtn = new Button
+        {
+            Text = "Edit",
+            Location = new Point(450, 60),
+            Size = new Size(75, 25),
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        editLogonBtn.Click += EditLogonSequence_Click;
+        logonPanel.Controls.Add(editLogonBtn);
+        
+        var removeLogonBtn = new Button
+        {
+            Text = "Remove",
+            Location = new Point(450, 90),
+            Size = new Size(75, 25),
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        removeLogonBtn.Click += RemoveLogonSequence_Click;
+        logonPanel.Controls.Add(removeLogonBtn);
+        
+        var moveUpBtn = new Button
+        {
+            Text = "▲",
+            Location = new Point(450, 125),
+            Size = new Size(35, 25),
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        moveUpBtn.Click += MoveLogonUp_Click;
+        logonPanel.Controls.Add(moveUpBtn);
+        
+        var moveDownBtn = new Button
+        {
+            Text = "▼",
+            Location = new Point(490, 125),
+            Size = new Size(35, 25),
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        moveDownBtn.Click += MoveLogonDown_Click;
+        logonPanel.Controls.Add(moveDownBtn);
+        
+        // Info label
+        AddLabel(logonPanel, "Sequences are matched in order during login (before HP bar appears)", 10, 165);
+        
+        tab.Controls.Add(logonPanel);
+        
+        // ── Commands Section ──
+        var commandsPanel = new Panel
+        {
+            Location = new Point(280, 10),
+            Size = new Size(265, 80),
+            BackColor = Color.FromArgb(40, 40, 40)
+        };
+        
+        int cy = 8;
+        AddLabel(commandsPanel, "── Commands ──", 10, cy);
+        cy += 22;
+        
+        AddLabel(commandsPanel, "Logoff:", 10, cy + 2);
+        _logoffCommandText = new TextBox
+        {
+            Location = new Point(80, cy),
+            Width = 80,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Text = settings.LogoffCommand
+        };
+        commandsPanel.Controls.Add(_logoffCommandText);
+        
+        AddLabel(commandsPanel, "Relog:", 170, cy + 2);
+        _relogCommandText = new TextBox
+        {
+            Location = new Point(210, cy),
+            Width = 45,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Text = settings.RelogCommand
+        };
+        commandsPanel.Controls.Add(_relogCommandText);
+        cy += 26;
+        
+        AddLabel(commandsPanel, "PVP Level:", 10, cy + 2);
+        _pvpLevelNum = new NumericUpDown
+        {
+            Location = new Point(80, cy),
+            Width = 60,
+            Minimum = 0,
+            Maximum = 1000,
+            Value = settings.PvpLevel,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White
+        };
+        commandsPanel.Controls.Add(_pvpLevelNum);
+        
+        tab.Controls.Add(commandsPanel);
+        
+        return tab;
+    }
+    
+    private void AddLogonSequence_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new LogonSequenceDialog();
+        if (dialog.ShowDialog() == DialogResult.OK)
+        {
+            var item = new ListViewItem(dialog.TriggerMessage);
+            item.SubItems.Add(dialog.Response);
+            _logonSequencesList.Items.Add(item);
+        }
+    }
+    
+    private void EditLogonSequence_Click(object? sender, EventArgs e)
+    {
+        if (_logonSequencesList.SelectedItems.Count == 0) return;
+        
+        var selectedItem = _logonSequencesList.SelectedItems[0];
+        using var dialog = new LogonSequenceDialog(
+            selectedItem.Text, 
+            selectedItem.SubItems[1].Text);
+        
+        if (dialog.ShowDialog() == DialogResult.OK)
+        {
+            selectedItem.Text = dialog.TriggerMessage;
+            selectedItem.SubItems[1].Text = dialog.Response;
+        }
+    }
+    
+    private void RemoveLogonSequence_Click(object? sender, EventArgs e)
+    {
+        if (_logonSequencesList.SelectedItems.Count == 0) return;
+        _logonSequencesList.Items.Remove(_logonSequencesList.SelectedItems[0]);
+    }
+    
+    private void MoveLogonUp_Click(object? sender, EventArgs e)
+    {
+        if (_logonSequencesList.SelectedItems.Count == 0) return;
+        int index = _logonSequencesList.SelectedIndices[0];
+        if (index <= 0) return;
+        
+        var item = _logonSequencesList.Items[index];
+        _logonSequencesList.Items.RemoveAt(index);
+        _logonSequencesList.Items.Insert(index - 1, item);
+        item.Selected = true;
+    }
+    
+    private void MoveLogonDown_Click(object? sender, EventArgs e)
+    {
+        if (_logonSequencesList.SelectedItems.Count == 0) return;
+        int index = _logonSequencesList.SelectedIndices[0];
+        if (index >= _logonSequencesList.Items.Count - 1) return;
+        
+        var item = _logonSequencesList.Items[index];
+        _logonSequencesList.Items.RemoveAt(index);
+        _logonSequencesList.Items.Insert(index + 1, item);
+        item.Selected = true;
+    }
+    
+    private void SaveBbsSettings()
+    {
+        var settings = new BbsSettings
+        {
+            Address = _bbsAddressText.Text.Trim(),
+            Port = (int)_bbsPortNum.Value,
+            LogoffCommand = _logoffCommandText.Text.Trim(),
+            RelogCommand = _relogCommandText.Text.Trim(),
+            PvpLevel = (int)_pvpLevelNum.Value
+        };
+        
+        // Collect logon sequences from list
+        settings.LogonSequences.Clear();
+        foreach (ListViewItem item in _logonSequencesList.Items)
+        {
+            settings.LogonSequences.Add(new LogonSequence(
+                item.Text,
+                item.SubItems[1].Text
+            ));
+        }
+        
+        _buffManager.UpdateBbsSettings(settings);
+    }
+    
+    #endregion
+}
+
+/// <summary>
+/// Dialog for adding/editing a logon sequence
+/// </summary>
+public class LogonSequenceDialog : Form
+{
+    private TextBox _triggerTextBox = null!;
+    private TextBox _responseTextBox = null!;
+    
+    public string TriggerMessage => _triggerTextBox.Text;
+    public string Response => _responseTextBox.Text;
+    
+    public LogonSequenceDialog(string trigger = "", string response = "")
+    {
+        this.Text = string.IsNullOrEmpty(trigger) ? "Add Logon Sequence" : "Edit Logon Sequence";
+        this.Size = new Size(400, 180);
+        this.FormBorderStyle = FormBorderStyle.FixedDialog;
+        this.StartPosition = FormStartPosition.CenterParent;
+        this.MaximizeBox = false;
+        this.MinimizeBox = false;
+        this.BackColor = Color.FromArgb(45, 45, 45);
+        
+        var triggerLabel = new Label
+        {
+            Text = "Trigger Message:",
+            Location = new Point(10, 15),
+            AutoSize = true,
+            ForeColor = Color.White
+        };
+        this.Controls.Add(triggerLabel);
+        
+        _triggerTextBox = new TextBox
+        {
+            Location = new Point(10, 35),
+            Width = 365,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Text = trigger
+        };
+        this.Controls.Add(_triggerTextBox);
+        
+        var responseLabel = new Label
+        {
+            Text = "Response (sent when trigger matches):",
+            Location = new Point(10, 65),
+            AutoSize = true,
+            ForeColor = Color.White
+        };
+        this.Controls.Add(responseLabel);
+        
+        _responseTextBox = new TextBox
+        {
+            Location = new Point(10, 85),
+            Width = 365,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            Text = response
+        };
+        this.Controls.Add(_responseTextBox);
+        
+        var okButton = new Button
+        {
+            Text = "OK",
+            DialogResult = DialogResult.OK,
+            Location = new Point(220, 115),
+            Size = new Size(75, 25),
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        this.Controls.Add(okButton);
+        
+        var cancelButton = new Button
+        {
+            Text = "Cancel",
+            DialogResult = DialogResult.Cancel,
+            Location = new Point(300, 115),
+            Size = new Size(75, 25),
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        this.Controls.Add(cancelButton);
+        
+        this.AcceptButton = okButton;
+        this.CancelButton = cancelButton;
     }
 }

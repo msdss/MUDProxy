@@ -12,6 +12,8 @@ public class BuffManager
     
     private readonly string _configFilePath;
     private readonly string _settingsFilePath;
+    private readonly string _characterProfilesPath;
+    private string _currentProfilePath = string.Empty;
     private readonly HealingManager _healingManager;
     private readonly CureManager _cureManager;
     private readonly PlayerDatabaseManager _playerDatabaseManager;
@@ -43,6 +45,12 @@ public class BuffManager
     
     // App settings (persisted)
     private bool _autoStartProxy = false;
+    private bool _combatAutoEnabled = false;
+    private bool _autoLoadLastCharacter = false;
+    private string _lastCharacterPath = string.Empty;
+    
+    // BBS/Telnet settings (loaded from character profile)
+    private BbsSettings _bbsSettings = new();
     
     // Par frequency settings (persisted)
     private bool _parAutoEnabled = false;
@@ -149,6 +157,32 @@ public class BuffManager
         set { _autoStartProxy = value; SaveSettings(); }
     }
     
+    public bool AutoLoadLastCharacter
+    {
+        get => _autoLoadLastCharacter;
+        set { _autoLoadLastCharacter = value; SaveSettings(); }
+    }
+    
+    public string LastCharacterPath
+    {
+        get => _lastCharacterPath;
+        set { _lastCharacterPath = value; SaveSettings(); }
+    }
+    
+    public bool CombatAutoEnabled
+    {
+        get => _combatAutoEnabled;
+        set 
+        { 
+            if (_combatAutoEnabled != value)
+            {
+                _combatAutoEnabled = value;
+                _combatManager.CombatEnabled = value;
+                SaveSettings(); 
+            }
+        }
+    }
+    
     public bool IsResting => _isResting;
     public bool InCombat => _inCombat;
     public bool InTrainingScreen => _inTrainingScreen;
@@ -197,6 +231,10 @@ public class BuffManager
     public int MaxMana => _maxMana;
     public int CurrentHpPercent => _maxHp > 0 ? (_currentHp * 100 / _maxHp) : 100;
     
+    // BBS Settings (loaded from character profile)
+    public BbsSettings BbsSettings => _bbsSettings;
+    public event Action? OnBbsSettingsChanged;
+    
     public BuffManager()
     {
         var appDataPath = Path.Combine(
@@ -205,6 +243,13 @@ public class BuffManager
             
         _configFilePath = Path.Combine(appDataPath, "buffs.json");
         _settingsFilePath = Path.Combine(appDataPath, "settings.json");
+        _characterProfilesPath = Path.Combine(appDataPath, "Characters");
+        
+        // Ensure Characters directory exists
+        if (!Directory.Exists(_characterProfilesPath))
+        {
+            Directory.CreateDirectory(_characterProfilesPath);
+        }
         
         _healingManager = new HealingManager(
             () => _playerInfo,
@@ -235,6 +280,11 @@ public class BuffManager
         
         _combatManager = new CombatManager();
         _combatManager.OnLogMessage += msg => OnLogMessage?.Invoke(msg);
+        _combatManager.OnCombatEnabledChanged += () => 
+        { 
+            _combatAutoEnabled = _combatManager.CombatEnabled; 
+            SaveSettings(); 
+        };
         
         LoadConfigurations();
         LoadSettings();
@@ -405,6 +455,10 @@ public class BuffManager
                     _buffWhileResting = settings.BuffWhileResting;
                     _buffWhileInCombat = settings.BuffWhileInCombat;
                     _autoStartProxy = settings.AutoStartProxy;
+                    _combatAutoEnabled = settings.CombatAutoEnabled;
+                    _autoLoadLastCharacter = settings.AutoLoadLastCharacter;
+                    _lastCharacterPath = settings.LastCharacterPath;
+                    _combatManager.SetCombatEnabledFromSettings(_combatAutoEnabled);
                 }
             }
         }
@@ -434,7 +488,10 @@ public class BuffManager
                 ManaReservePercent = _manaReservePercent,
                 BuffWhileResting = _buffWhileResting,
                 BuffWhileInCombat = _buffWhileInCombat,
-                AutoStartProxy = _autoStartProxy
+                AutoStartProxy = _autoStartProxy,
+                CombatAutoEnabled = _combatAutoEnabled,
+                AutoLoadLastCharacter = _autoLoadLastCharacter,
+                LastCharacterPath = _lastCharacterPath
             };
             
             var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions 
@@ -782,6 +839,7 @@ public class BuffManager
         }
         
         OnLogMessage?.Invoke($"📊 Player detected: {_playerInfo.Name} ({_playerInfo.Class} {_playerInfo.Level})");
+        _combatManager.CurrentCharacter = _playerInfo.Name;
         OnPlayerInfoChanged?.Invoke();
     }
     
@@ -1385,6 +1443,215 @@ public class BuffManager
             BuffTargetType.AllParty => GetAllPartyMembers(),
             _ => Enumerable.Empty<PartyMember>()
         };
+    }
+    
+    #endregion
+    
+    #region Character Profile Management
+    
+    public string CharacterProfilesPath => _characterProfilesPath;
+    public string CurrentProfilePath => _currentProfilePath;
+    public bool HasUnsavedChanges { get; private set; } = false;
+    
+    /// <summary>
+    /// Get the default filename for a character profile
+    /// </summary>
+    public string GetDefaultProfileFilename()
+    {
+        if (!string.IsNullOrEmpty(_playerInfo.Name))
+        {
+            // Sanitize the name for use as a filename
+            var safeName = string.Join("_", _playerInfo.Name.Split(Path.GetInvalidFileNameChars()));
+            return $"{safeName}.json";
+        }
+        return "character.json";
+    }
+    
+    /// <summary>
+    /// Update BBS/Telnet settings
+    /// </summary>
+    public void UpdateBbsSettings(BbsSettings settings)
+    {
+        _bbsSettings = settings.Clone();
+        HasUnsavedChanges = true;
+        OnBbsSettingsChanged?.Invoke();
+        OnLogMessage?.Invoke("📡 BBS settings updated");
+    }
+    
+    /// <summary>
+    /// Save the current character profile to a file
+    /// </summary>
+    public (bool success, string message) SaveCharacterProfile(string filePath)
+    {
+        try
+        {
+            var profile = new CharacterProfile
+            {
+                ProfileVersion = "1.0",
+                SavedAt = DateTime.Now,
+                
+                // Character Info
+                CharacterName = _playerInfo.Name,
+                CharacterClass = _playerInfo.Class,
+                CharacterLevel = _playerInfo.Level,
+                
+                // BBS/Telnet Settings
+                BbsSettings = _bbsSettings.Clone(),
+                
+                // Combat Settings
+                CombatSettings = _combatManager.GetCurrentSettings(),
+                
+                // Buff Configurations
+                Buffs = _buffConfigurations.Select(b => b.Clone()).ToList(),
+                
+                // Heal Configurations
+                HealSpells = _healingManager.Configuration.HealSpells.Select(h => h.Clone()).ToList(),
+                SelfHealRules = _healingManager.Configuration.SelfHealRules.Select(r => r.Clone()).ToList(),
+                PartyHealRules = _healingManager.Configuration.PartyHealRules.Select(r => r.Clone()).ToList(),
+                PartyWideHealRules = _healingManager.Configuration.PartyWideHealRules.Select(r => r.Clone()).ToList(),
+                
+                // Cure Configurations
+                Ailments = _cureManager.Configuration.Ailments.Select(a => a.Clone()).ToList(),
+                CureSpells = _cureManager.Configuration.CureSpells.Select(c => c.Clone()).ToList(),
+                
+                // Monster Overrides
+                MonsterOverrides = _monsterDatabaseManager.GetAllOverrides().ToList(),
+                
+                // Player Database
+                Players = _playerDatabaseManager.Players.ToList()
+            };
+            
+            var directory = Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+            
+            var json = JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(filePath, json);
+            
+            _currentProfilePath = filePath;
+            HasUnsavedChanges = false;
+            
+            OnLogMessage?.Invoke($"💾 Character profile saved: {Path.GetFileName(filePath)}");
+            return (true, $"Character profile saved successfully.");
+        }
+        catch (Exception ex)
+        {
+            OnLogMessage?.Invoke($"Error saving character profile: {ex.Message}");
+            return (false, $"Error saving character profile: {ex.Message}");
+        }
+    }
+    
+    /// <summary>
+    /// Load a character profile from a file
+    /// </summary>
+    public (bool success, string message) LoadCharacterProfile(string filePath)
+    {
+        try
+        {
+            if (!File.Exists(filePath))
+            {
+                return (false, "Character profile file not found.");
+            }
+            
+            var json = File.ReadAllText(filePath);
+            var profile = JsonSerializer.Deserialize<CharacterProfile>(json);
+            
+            if (profile == null)
+            {
+                return (false, "Invalid character profile format.");
+            }
+            
+            // Load Combat Settings
+            if (profile.CombatSettings != null)
+            {
+                _combatManager.SaveSettings(profile.CombatSettings);
+                if (!string.IsNullOrEmpty(profile.CharacterName))
+                {
+                    _combatManager.CurrentCharacter = profile.CharacterName;
+                }
+            }
+            
+            // Load BBS/Telnet Settings
+            if (profile.BbsSettings != null)
+            {
+                _bbsSettings = profile.BbsSettings.Clone();
+                OnBbsSettingsChanged?.Invoke();
+            }
+            
+            // Load Buff Configurations
+            if (profile.Buffs != null && profile.Buffs.Count > 0)
+            {
+                _buffConfigurations.Clear();
+                _buffConfigurations.AddRange(profile.Buffs);
+                SaveConfigurations();
+                OnBuffsChanged?.Invoke();
+            }
+            
+            // Load Heal Configurations - use the configuration object directly
+            if (profile.HealSpells != null && profile.HealSpells.Count > 0)
+            {
+                var healConfig = new HealingConfiguration
+                {
+                    HealingEnabled = _healingManager.HealingEnabled,
+                    HealSpells = profile.HealSpells,
+                    SelfHealRules = profile.SelfHealRules ?? new List<HealRule>(),
+                    PartyHealRules = profile.PartyHealRules ?? new List<HealRule>(),
+                    PartyWideHealRules = profile.PartyWideHealRules ?? new List<HealRule>()
+                };
+                _healingManager.ReplaceConfiguration(healConfig);
+            }
+            
+            // Load Cure Configurations - use the configuration object directly
+            if (profile.Ailments != null && profile.Ailments.Count > 0)
+            {
+                var cureConfig = new CureConfiguration
+                {
+                    CuringEnabled = _cureManager.CuringEnabled,
+                    Ailments = profile.Ailments,
+                    CureSpells = profile.CureSpells ?? new List<CureSpellConfiguration>(),
+                    PriorityOrder = _cureManager.PriorityOrder
+                };
+                _cureManager.ReplaceConfiguration(cureConfig);
+            }
+            
+            // Load Monster Overrides
+            if (profile.MonsterOverrides != null && profile.MonsterOverrides.Count > 0)
+            {
+                _monsterDatabaseManager.ReplaceOverrides(profile.MonsterOverrides);
+            }
+            
+            // Load Player Database
+            if (profile.Players != null && profile.Players.Count > 0)
+            {
+                _playerDatabaseManager.ReplaceDatabase(profile.Players);
+            }
+            
+            // Update player info if provided
+            if (!string.IsNullOrEmpty(profile.CharacterName))
+            {
+                _playerInfo.Name = profile.CharacterName;
+                _playerInfo.Class = profile.CharacterClass;
+                _playerInfo.Level = profile.CharacterLevel;
+                OnPlayerInfoChanged?.Invoke();
+            }
+            
+            _currentProfilePath = filePath;
+            HasUnsavedChanges = false;
+            
+            // Remember this as the last loaded character
+            _lastCharacterPath = filePath;
+            SaveSettings();
+            
+            OnLogMessage?.Invoke($"📂 Character profile loaded: {Path.GetFileName(filePath)}");
+            return (true, $"Character profile '{profile.CharacterName}' loaded successfully.");
+        }
+        catch (Exception ex)
+        {
+            OnLogMessage?.Invoke($"Error loading character profile: {ex.Message}");
+            return (false, $"Error loading character profile: {ex.Message}");
+        }
     }
     
     #endregion

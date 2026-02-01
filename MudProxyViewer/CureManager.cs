@@ -149,6 +149,15 @@ public class CureManager
         }
     }
     
+    /// <summary>
+    /// Replace the entire configuration (used when loading character profiles)
+    /// </summary>
+    public void ReplaceConfiguration(CureConfiguration config)
+    {
+        _config = config;
+        SaveConfiguration();
+    }
+    
     public string ExportCures()
     {
         var export = new CureExport

@@ -307,7 +307,106 @@ public class ProxySettings
     public int ManaReservePercent { get; set; } = 20;
     public bool BuffWhileResting { get; set; } = true;  // Allow buffing while resting
     public bool BuffWhileInCombat { get; set; } = true;  // Allow buffing while in combat
-    public bool AutoStartProxy { get; set; } = false;  // Auto-start proxy on app launch
+    public bool AutoStartProxy { get; set; } = false;  // Legacy - no longer used
+    public bool CombatAutoEnabled { get; set; } = false;  // Combat toggle state
+    public bool AutoLoadLastCharacter { get; set; } = false;  // Auto-load last character on startup
+    public string LastCharacterPath { get; set; } = string.Empty;  // Path to last loaded character
+}
+
+/// <summary>
+/// A single logon automation sequence entry (trigger message and response)
+/// </summary>
+public class LogonSequence
+{
+    public string TriggerMessage { get; set; } = string.Empty;
+    public string Response { get; set; } = string.Empty;
+    
+    public LogonSequence() { }
+    
+    public LogonSequence(string trigger, string response)
+    {
+        TriggerMessage = trigger;
+        Response = response;
+    }
+    
+    public LogonSequence Clone()
+    {
+        return new LogonSequence
+        {
+            TriggerMessage = this.TriggerMessage,
+            Response = this.Response
+        };
+    }
+}
+
+/// <summary>
+/// BBS/Telnet connection settings for a character profile
+/// </summary>
+public class BbsSettings
+{
+    // Connection
+    public string Address { get; set; } = string.Empty;
+    public int Port { get; set; } = 23;
+    
+    // Logon automation - only active during login phase
+    public List<LogonSequence> LogonSequences { get; set; } = new();
+    
+    // Commands
+    public string LogoffCommand { get; set; } = string.Empty;
+    public string RelogCommand { get; set; } = string.Empty;
+    public int PvpLevel { get; set; } = 0;
+    
+    public BbsSettings Clone()
+    {
+        return new BbsSettings
+        {
+            Address = this.Address,
+            Port = this.Port,
+            LogonSequences = this.LogonSequences.Select(s => s.Clone()).ToList(),
+            LogoffCommand = this.LogoffCommand,
+            RelogCommand = this.RelogCommand,
+            PvpLevel = this.PvpLevel
+        };
+    }
+}
+
+/// <summary>
+/// Character profile containing all character-specific settings
+/// </summary>
+public class CharacterProfile
+{
+    public string ProfileVersion { get; set; } = "1.0";
+    public DateTime SavedAt { get; set; } = DateTime.Now;
+    
+    // Character identification
+    public string CharacterName { get; set; } = string.Empty;
+    public string CharacterClass { get; set; } = string.Empty;
+    public int CharacterLevel { get; set; } = 0;
+    
+    // BBS/Telnet settings
+    public BbsSettings BbsSettings { get; set; } = new();
+    
+    // Combat settings
+    public CombatSettings CombatSettings { get; set; } = new();
+    
+    // Buff configurations
+    public List<BuffConfiguration> Buffs { get; set; } = new();
+    
+    // Heal configurations
+    public List<HealSpellConfiguration> HealSpells { get; set; } = new();
+    public List<HealRule> SelfHealRules { get; set; } = new();
+    public List<HealRule> PartyHealRules { get; set; } = new();
+    public List<HealRule> PartyWideHealRules { get; set; } = new();
+    
+    // Cure configurations
+    public List<AilmentConfiguration> Ailments { get; set; } = new();
+    public List<CureSpellConfiguration> CureSpells { get; set; } = new();
+    
+    // Monster overrides (attack priorities, relationships, etc.)
+    public List<MonsterOverride> MonsterOverrides { get; set; } = new();
+    
+    // Player database (friends, enemies, etc.)
+    public List<PlayerData> Players { get; set; } = new();
 }
 
 // Export/Import classes

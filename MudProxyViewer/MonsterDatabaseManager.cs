@@ -122,6 +122,25 @@ public class MonsterDatabaseManager
         }
     }
     
+    /// <summary>
+    /// Get all monster overrides (for saving to character profile)
+    /// </summary>
+    public IReadOnlyList<MonsterOverride> GetAllOverrides()
+    {
+        return _overrides.Overrides.AsReadOnly();
+    }
+    
+    /// <summary>
+    /// Replace all overrides (for loading from character profile)
+    /// </summary>
+    public void ReplaceOverrides(List<MonsterOverride> overrides)
+    {
+        _overrides.Overrides.Clear();
+        _overrides.Overrides.AddRange(overrides);
+        SaveOverrides();
+        OnLogMessage?.Invoke($"📂 Loaded {overrides.Count} monster override(s) from profile");
+    }
+    
     public MonsterOverride GetOverride(int monsterNumber)
     {
         var existing = _overrides.Overrides.FirstOrDefault(o => o.MonsterNumber == monsterNumber);
@@ -411,6 +430,25 @@ public class MonsterDatabaseManager
     public MonsterData? GetMonsterByNumber(int number)
     {
         return _monsters.FirstOrDefault(m => m.Number == number);
+    }
+    
+    /// <summary>
+    /// Find a monster whose name is contained within the given text.
+    /// Used for matching monsters with flavor text prefixes like "fat cave worm" -> "cave worm"
+    /// </summary>
+    public MonsterData? FindMonsterByPartialName(string text)
+    {
+        // First try exact match
+        var exact = GetMonsterByName(text);
+        if (exact != null)
+            return exact;
+        
+        // Then look for monsters whose name is contained in the text
+        // Sort by name length descending to prefer longer/more specific matches
+        return _monsters
+            .Where(m => text.Contains(m.Name, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(m => m.Name.Length)
+            .FirstOrDefault();
     }
     
     #endregion

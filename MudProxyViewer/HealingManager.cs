@@ -102,6 +102,15 @@ public class HealingManager
         }
     }
     
+    /// <summary>
+    /// Replace the entire configuration (used when loading character profiles)
+    /// </summary>
+    public void ReplaceConfiguration(HealingConfiguration config)
+    {
+        _config = config;
+        SaveConfiguration();
+    }
+    
     public string ExportHeals()
     {
         var export = new HealExport

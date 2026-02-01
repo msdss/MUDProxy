@@ -78,6 +78,18 @@ public class PlayerDatabaseManager
         }
     }
     
+    /// <summary>
+    /// Replace the entire database (for loading from character profile)
+    /// </summary>
+    public void ReplaceDatabase(List<PlayerData> players)
+    {
+        _database.Players.Clear();
+        _database.Players.AddRange(players);
+        SaveDatabase();
+        OnDatabaseChanged?.Invoke();
+        OnLogMessage?.Invoke($"📂 Loaded {players.Count} player(s) from profile");
+    }
+    
     #endregion
     
     #region Player CRUD
