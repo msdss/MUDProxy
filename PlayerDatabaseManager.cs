@@ -1,16 +1,20 @@
-using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace MudProxyViewer;
 
+/// <summary>
+/// Manages player data in-memory. Data is persisted via CharacterProfile, not a global file.
+/// When a character profile is loaded, call LoadFromProfile().
+/// When saving a character profile, call GetPlayersForProfile() to get the current list.
+/// </summary>
 public class PlayerDatabaseManager
 {
-    private PlayerDatabase _database = new();
-    private readonly string _databaseFilePath;
+    private readonly List<PlayerData> _players = new();
     
     // Events
     public event Action? OnDatabaseChanged;
     public event Action<string>? OnLogMessage;
+    public event Action? OnDataChanged;  // Fires when data changes that should trigger a profile save
     
     // Regex to parse "who" command output
     // Format: "   Alignment FirstName LastName      -  Title of Gang V"
@@ -23,71 +27,43 @@ public class PlayerDatabaseManager
     
     public PlayerDatabaseManager()
     {
-        _databaseFilePath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "MudProxyViewer",
-            "playerdb.json");
-        
-        LoadDatabase();
+        // No file loading - data comes from character profile via LoadFromProfile()
     }
     
-    public IReadOnlyList<PlayerData> Players => _database.Players.AsReadOnly();
-    public int PlayerCount => _database.Players.Count;
+    public IReadOnlyList<PlayerData> Players => _players.AsReadOnly();
+    public int PlayerCount => _players.Count;
     
-    #region Database Operations
+    #region Profile Integration
     
-    private void LoadDatabase()
+    /// <summary>
+    /// Load players from a character profile. Call this when loading a character.
+    /// </summary>
+    public void LoadFromProfile(List<PlayerData> players)
     {
-        try
+        _players.Clear();
+        if (players != null)
         {
-            if (File.Exists(_databaseFilePath))
-            {
-                var json = File.ReadAllText(_databaseFilePath);
-                var database = JsonSerializer.Deserialize<PlayerDatabase>(json);
-                if (database != null)
-                {
-                    _database = database;
-                }
-            }
+            _players.AddRange(players);
         }
-        catch (Exception ex)
-        {
-            OnLogMessage?.Invoke($"Error loading player database: {ex.Message}");
-        }
-    }
-    
-    public void SaveDatabase()
-    {
-        try
-        {
-            var directory = Path.GetDirectoryName(_databaseFilePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-            
-            var json = JsonSerializer.Serialize(_database, new JsonSerializerOptions 
-            { 
-                WriteIndented = true 
-            });
-            File.WriteAllText(_databaseFilePath, json);
-        }
-        catch (Exception ex)
-        {
-            OnLogMessage?.Invoke($"Error saving player database: {ex.Message}");
-        }
+        OnDatabaseChanged?.Invoke();
+        OnLogMessage?.Invoke($"📂 Loaded {_players.Count} player(s) from profile");
     }
     
     /// <summary>
-    /// Replace the entire database (for loading from character profile)
+    /// Get the current player list for saving to a character profile.
     /// </summary>
-    public void ReplaceDatabase(List<PlayerData> players)
+    public List<PlayerData> GetPlayersForProfile()
     {
-        _database.Players.Clear();
-        _database.Players.AddRange(players);
-        SaveDatabase();
+        return _players.ToList();
+    }
+    
+    /// <summary>
+    /// Clear all players (call when no character is loaded or creating new profile)
+    /// </summary>
+    public void Clear()
+    {
+        _players.Clear();
         OnDatabaseChanged?.Invoke();
-        OnLogMessage?.Invoke($"📂 Loaded {players.Count} player(s) from profile");
     }
     
     #endregion
@@ -96,7 +72,7 @@ public class PlayerDatabaseManager
     
     public PlayerData? GetPlayer(string firstName)
     {
-        return _database.Players.FirstOrDefault(p => 
+        return _players.FirstOrDefault(p => 
             p.FirstName.Equals(firstName, StringComparison.OrdinalIgnoreCase));
     }
     
@@ -111,7 +87,6 @@ public class PlayerDatabaseManager
                 existing.LastName = lastName;
             existing.LastSeen = DateTime.Now;
             
-            SaveDatabase();
             OnDatabaseChanged?.Invoke();
             return existing;
         }
@@ -125,9 +100,9 @@ public class PlayerDatabaseManager
                 LastSeen = DateTime.Now
             };
             
-            _database.Players.Add(player);
-            SaveDatabase();
+            _players.Add(player);
             OnDatabaseChanged?.Invoke();
+            OnDataChanged?.Invoke();  // Trigger profile save
             
             OnLogMessage?.Invoke($"📝 New player added to database: {player.FullName}");
             return player;
@@ -139,26 +114,22 @@ public class PlayerDatabaseManager
         var existing = GetPlayer(player.FirstName);
         if (existing != null)
         {
-            var index = _database.Players.IndexOf(existing);
-            _database.Players[index] = player;
-            SaveDatabase();
+            var index = _players.IndexOf(existing);
+            _players[index] = player;
             OnDatabaseChanged?.Invoke();
+            OnDataChanged?.Invoke();  // Trigger profile save
         }
     }
     
     public void RemovePlayer(string firstName)
     {
-        _database.Players.RemoveAll(p => 
+        var removed = _players.RemoveAll(p => 
             p.FirstName.Equals(firstName, StringComparison.OrdinalIgnoreCase));
-        SaveDatabase();
         OnDatabaseChanged?.Invoke();
-    }
-    
-    public void ClearDatabase()
-    {
-        _database.Players.Clear();
-        SaveDatabase();
-        OnDatabaseChanged?.Invoke();
+        if (removed > 0)
+        {
+            OnDataChanged?.Invoke();  // Trigger profile save
+        }
     }
     
     #endregion
@@ -207,11 +178,34 @@ public class PlayerDatabaseManager
     public IEnumerable<PlayerData> SearchPlayers(string searchTerm)
     {
         if (string.IsNullOrWhiteSpace(searchTerm))
-            return _database.Players;
+            return _players;
         
-        return _database.Players.Where(p =>
+        return _players.Where(p =>
             p.FirstName.Contains(searchTerm, StringComparison.OrdinalIgnoreCase) ||
             p.LastName.Contains(searchTerm, StringComparison.OrdinalIgnoreCase));
+    }
+    
+    #endregion
+    
+    #region Legacy Support
+    
+    /// <summary>
+    /// Legacy method - replaced by LoadFromProfile(). Kept for compatibility.
+    /// </summary>
+    [Obsolete("Use LoadFromProfile() instead")]
+    public void ReplaceDatabase(List<PlayerData> players)
+    {
+        LoadFromProfile(players);
+    }
+    
+    /// <summary>
+    /// Legacy method - no longer writes to file. Data is saved via character profile.
+    /// </summary>
+    [Obsolete("Data is now saved via character profile, not a global file")]
+    public void SaveDatabase()
+    {
+        // No-op - data is saved when character profile is saved
+        // Kept for compatibility with any code that calls this
     }
     
     #endregion

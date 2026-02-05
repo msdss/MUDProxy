@@ -1,13 +1,15 @@
 using System.Text;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace MudProxyViewer;
 
+/// <summary>
+/// Manages combat automation. Combat settings are stored per-character in the CharacterProfile.
+/// No global file is used - data is loaded via LoadFromProfile() and retrieved via GetCurrentSettings().
+/// </summary>
 public class CombatManager
 {
-    private CombatSettingsDatabase _database = new();
-    private readonly string _settingsFilePath;
+    private CombatSettings _settings = new();
     private string _currentCharacter = string.Empty;
     
     // Dependencies injected via Initialize
@@ -41,16 +43,11 @@ public class CombatManager
     public event Action<string>? OnLogMessage;
     public event Action<string>? OnSendCommand;
     public event Action? OnCombatEnabledChanged; // Event for BuffManager to save settings
+    public event Action<List<string>>? OnPlayersDetected; // Event when players are seen in room
     
     public CombatManager()
     {
-        var appDataPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "MudProxyViewer");
-            
-        _settingsFilePath = Path.Combine(appDataPath, "combat_settings.json");
-        
-        LoadSettings();
+        // No file loading - data comes from character profile via LoadFromProfile()
     }
     
     /// <summary>
@@ -107,7 +104,8 @@ public class CombatManager
         {
             var wasEmpty = string.IsNullOrEmpty(_currentCharacter);
             _currentCharacter = value;
-            OnLogMessage?.Invoke($"⚔️ Combat settings loaded for: {value}");
+            _settings.CharacterName = value;
+            OnLogMessage?.Invoke($"⚔️ Combat settings active for: {value}");
             
             // If character was just set (wasn't set before) and we have enemies in the room,
             // try to initiate combat now
@@ -130,90 +128,54 @@ public class CombatManager
     
     public IReadOnlyList<string> CurrentRoomEnemies => _currentRoomEnemies.AsReadOnly();
     
-    #region Settings Management
+    #region Profile Integration
     
-    public CombatSettings GetSettings(string characterName)
+    /// <summary>
+    /// Load combat settings from a character profile
+    /// </summary>
+    public void LoadFromProfile(CombatSettings? settings)
     {
-        var settings = _database.Characters.FirstOrDefault(c => 
-            c.CharacterName.Equals(characterName, StringComparison.OrdinalIgnoreCase));
-        
-        if (settings == null)
+        if (settings != null)
         {
-            settings = new CombatSettings { CharacterName = characterName };
-            _database.Characters.Add(settings);
-        }
-        
-        return settings;
-    }
-    
-    public CombatSettings GetCurrentSettings()
-    {
-        if (string.IsNullOrEmpty(_currentCharacter))
-            return new CombatSettings();
-        
-        return GetSettings(_currentCharacter);
-    }
-    
-    public void SaveSettings(CombatSettings settings)
-    {
-        var existing = _database.Characters.FirstOrDefault(c => 
-            c.CharacterName.Equals(settings.CharacterName, StringComparison.OrdinalIgnoreCase));
-        
-        if (existing != null)
-        {
-            var index = _database.Characters.IndexOf(existing);
-            _database.Characters[index] = settings;
+            _settings = settings;
+            _currentCharacter = settings.CharacterName;
+            OnLogMessage?.Invoke($"📂 Loaded combat settings for: {settings.CharacterName}");
         }
         else
         {
-            _database.Characters.Add(settings);
-        }
-        
-        SaveToFile();
-    }
-    
-    private void LoadSettings()
-    {
-        try
-        {
-            if (File.Exists(_settingsFilePath))
-            {
-                var json = File.ReadAllText(_settingsFilePath);
-                var database = JsonSerializer.Deserialize<CombatSettingsDatabase>(json);
-                if (database != null)
-                {
-                    _database = database;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            OnLogMessage?.Invoke($"Error loading combat settings: {ex.Message}");
+            _settings = new CombatSettings();
+            OnLogMessage?.Invoke("📂 No combat settings in profile, using defaults");
         }
     }
     
-    private void SaveToFile()
+    /// <summary>
+    /// Get current settings for saving to character profile
+    /// </summary>
+    public CombatSettings GetCurrentSettings()
     {
-        try
+        _settings.CharacterName = _currentCharacter;
+        return _settings;
+    }
+    
+    /// <summary>
+    /// Save/update settings (called from settings dialog)
+    /// </summary>
+    public void SaveSettings(CombatSettings settings)
+    {
+        _settings = settings;
+        if (!string.IsNullOrEmpty(settings.CharacterName))
         {
-            var directory = Path.GetDirectoryName(_settingsFilePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-            
-            var json = JsonSerializer.Serialize(_database, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(_settingsFilePath, json);
-        }
-        catch (Exception ex)
-        {
-            OnLogMessage?.Invoke($"Error saving combat settings: {ex.Message}");
+            _currentCharacter = settings.CharacterName;
         }
     }
     
-    public IReadOnlyList<string> GetAllCharacterNames()
+    /// <summary>
+    /// Clear settings (when no character is loaded)
+    /// </summary>
+    public void Clear()
     {
-        return _database.Characters.Select(c => c.CharacterName).ToList().AsReadOnly();
+        _settings = new CombatSettings();
+        _currentCharacter = string.Empty;
     }
     
     #endregion
@@ -226,206 +188,246 @@ public class CombatManager
     /// </summary>
     public void ProcessMessage(string message)
     {
-        if (!_combatEnabled || _playerDatabase == null || _monsterDatabase == null)
+        if (!_combatEnabled)
             return;
         
-        // Check if we're in the middle of capturing an "Also here:" line
+        // Handle multi-chunk "Also here:" lines
+        // MUD may send: "Also here: monster1, monster2, monster3,\r\nmonster4, monster5."
+        // across multiple TCP chunks
+        
+        // Check if we're continuing to capture an "Also here:" line
         if (_capturingAlsoHere)
         {
             _alsoHereBuffer.Append(message);
             
-            // Check if we have a complete "Also here:" line now (ends with period)
-            var bufferedText = _alsoHereBuffer.ToString();
-            var alsoHereMatch = AlsoHereRegex.Match(bufferedText);
-            
-            if (alsoHereMatch.Success)
+            // Check if we have a complete line (ends with period)
+            var bufferedContent = _alsoHereBuffer.ToString();
+            if (bufferedContent.Contains('.'))
             {
-                // Found complete match - process it
+                // We have a complete line
                 _capturingAlsoHere = false;
-                _alsoHereBuffer.Clear();
-                ProcessAlsoHereMatch(alsoHereMatch.Groups[1].Value);
-            }
-            else if (bufferedText.Contains("Obvious exits:") || bufferedText.Length > 2000)
-            {
-                // Safety: if we see "Obvious exits:" or buffer too large, stop capturing
-                // This prevents infinite buffering if something goes wrong
-                OnLogMessage?.Invoke($"⚠️ Also here buffer abandoned (len={bufferedText.Length})");
-                _capturingAlsoHere = false;
+                var match = AlsoHereRegex.Match(bufferedContent);
+                if (match.Success)
+                {
+                    ProcessAlsoHere(match.Groups[1].Value);
+                }
                 _alsoHereBuffer.Clear();
             }
             return;
         }
         
-        // Look for start of "Also here:" line
+        // Check for "Also here:" start
         if (message.Contains("Also here:"))
         {
-            // Try to match complete "Also here:" in this chunk
-            var alsoHereMatch = AlsoHereRegex.Match(message);
-            if (alsoHereMatch.Success)
+            // Check if this is a complete line (contains the ending period)
+            var match = AlsoHereRegex.Match(message);
+            if (match.Success)
             {
-                // Complete match in single chunk
-                ProcessAlsoHereMatch(alsoHereMatch.Groups[1].Value);
+                ProcessAlsoHere(match.Groups[1].Value);
             }
             else
             {
-                // Partial match - start buffering
+                // Incomplete line - start capturing
                 _capturingAlsoHere = true;
                 _alsoHereBuffer.Clear();
                 _alsoHereBuffer.Append(message);
-                OnLogMessage?.Invoke($"🔍 Buffering multi-chunk 'Also here:' line...");
+            }
+        }
+        
+        // Check for enemy killed
+        if (message.Contains(" is DEAD!"))
+        {
+            OnLogMessage?.Invoke($"💀 Enemy killed");
+            // Try to attack next enemy
+            TryInitiateCombat();
+        }
+        
+        // Check for room change (clear enemies)
+        if (message.Contains("Obvious exits:") || message.Contains("You can't go that way"))
+        {
+            // Only clear if we actually moved or tried to move
+            if (!_capturingAlsoHere)  // Don't clear if we're still capturing Also here
+            {
+                _currentRoomEnemies.Clear();
+                _lastProcessedAlsoHere = string.Empty;
             }
         }
     }
     
     /// <summary>
-    /// Process a complete "Also here:" match
+    /// Process the "Also here:" line content
     /// </summary>
-    private void ProcessAlsoHereMatch(string alsoHereContent)
+    private void ProcessAlsoHere(string alsoHereContent)
     {
-        // Normalize whitespace (remove newlines from wrapped text)
-        alsoHereContent = Regex.Replace(alsoHereContent, @"\s+", " ").Trim();
-        
-        // Prevent duplicate processing of the same room content
-        if (alsoHereContent.Equals(_lastProcessedAlsoHere, StringComparison.OrdinalIgnoreCase))
+        // Avoid processing the same content twice in quick succession
+        if (alsoHereContent == _lastProcessedAlsoHere)
         {
-            OnLogMessage?.Invoke($"🔍 Skipping duplicate 'Also here:' content");
             return;
         }
-        
         _lastProcessedAlsoHere = alsoHereContent;
-        OnLogMessage?.Invoke($"🔍 Processing: Also here: {alsoHereContent}");
-        ParseAlsoHereLine(alsoHereContent);
-    }
-    
-    /// <summary>
-    /// Parse the "Also here:" line to identify players and monsters
-    /// </summary>
-    private void ParseAlsoHereLine(string contents)
-    {
-        if (_playerDatabase == null || _monsterDatabase == null)
-        {
-            OnLogMessage?.Invoke("⚠️ ParseAlsoHereLine: Database not initialized");
-            return;
-        }
         
+        // Clear previous room enemies
         _currentRoomEnemies.Clear();
         
-        // Split by comma, trim each entry
-        var entities = contents.Split(',')
+        // Track players detected in room for auto-invite
+        var playersInRoom = new List<string>();
+        
+        // Parse entities in the room
+        var entities = alsoHereContent.Split(',')
             .Select(e => e.Trim())
             .Where(e => !string.IsNullOrEmpty(e))
             .ToList();
         
-        OnLogMessage?.Invoke($"🔍 DEBUG: Parsing {entities.Count} entities: {string.Join(", ", entities)}");
-        
-        var enemies = new List<(string Name, AttackPriority Priority)>();
+        OnLogMessage?.Invoke($"👁️ Room scan: {entities.Count} entities found");
         
         foreach (var entity in entities)
         {
-            // Check if this is a known player (by first name)
-            var firstName = entity.Split(' ')[0];
-            var player = _playerDatabase.GetPlayer(firstName);
-            
-            if (player != null)
+            // Check if this is a player (has class/level in parentheses or is in player database)
+            if (IsPlayer(entity))
             {
-                // This is a player, skip
-                OnLogMessage?.Invoke($"🔍 DEBUG: '{entity}' is a player (matched '{firstName}'), skipping");
+                OnLogMessage?.Invoke($"   👤 Player: {entity}");
+                playersInRoom.Add(entity);
                 continue;
             }
             
-            // Check if this is a known monster (exact match first)
-            var monster = _monsterDatabase.GetMonsterByName(entity);
-            if (monster != null)
+            // Check if this is a monster we should attack
+            if (ShouldAttack(entity))
             {
-                var monsterOverride = _monsterDatabase.GetOverride(monster.Number);
-                OnLogMessage?.Invoke($"🔍 DEBUG: '{entity}' matched monster #{monster.Number}, relationship={monsterOverride.Relationship}");
-                
-                // Only attack enemies
-                if (monsterOverride.Relationship == MonsterRelationship.Enemy)
-                {
-                    enemies.Add((entity, monsterOverride.Priority));
-                }
+                _currentRoomEnemies.Add(entity);
+                OnLogMessage?.Invoke($"   🎯 Enemy: {entity}");
             }
             else
             {
-                // Unknown entity - check if it might be a monster with flavor text
-                // Try to find a monster whose name is contained in this entity
-                var matchedMonster = _monsterDatabase.FindMonsterByPartialName(entity);
-                if (matchedMonster != null)
-                {
-                    var monsterOverride = _monsterDatabase.GetOverride(matchedMonster.Number);
-                    OnLogMessage?.Invoke($"🔍 DEBUG: '{entity}' partial matched monster '{matchedMonster.Name}' #{matchedMonster.Number}, relationship={monsterOverride.Relationship}");
-                    
-                    if (monsterOverride.Relationship == MonsterRelationship.Enemy)
-                    {
-                        // Use the full name we saw (with flavor text) for the attack command
-                        enemies.Add((entity, monsterOverride.Priority));
-                    }
-                }
-                else
-                {
-                    OnLogMessage?.Invoke($"🔍 DEBUG: '{entity}' - no match found (not a player or known monster)");
-                }
+                OnLogMessage?.Invoke($"   ⚪ Neutral/Friendly: {entity}");
             }
         }
         
-        // Sort enemies by priority (First > High > Normal > Low > Last)
-        // For same priority, maintain original order (left to right)
-        var sortedEnemies = enemies
-            .Select((e, index) => (e.Name, e.Priority, Index: index))
-            .OrderBy(e => e.Priority)
-            .ThenBy(e => e.Index)
-            .Select(e => e.Name)
-            .ToList();
+        // Fire event for players detected (for auto-invite feature)
+        if (playersInRoom.Count > 0)
+        {
+            OnPlayersDetected?.Invoke(playersInRoom);
+        }
         
-        _currentRoomEnemies = sortedEnemies;
+        // Sort enemies by priority if monster database is available
+        if (_monsterDatabase != null)
+        {
+            SortEnemiesByPriority();
+        }
         
+        // Try to initiate combat if we found enemies
         if (_currentRoomEnemies.Count > 0)
         {
-            OnLogMessage?.Invoke($"🎯 Enemies detected: {string.Join(", ", _currentRoomEnemies)}");
-            
-            // Auto-attack if not already in combat
+            OnLogMessage?.Invoke($"⚔️ {_currentRoomEnemies.Count} enemies to attack");
             TryInitiateCombat();
-        }
-        else
-        {
-            OnLogMessage?.Invoke($"🔍 DEBUG: No enemies found in room");
         }
     }
     
     /// <summary>
-    /// Called when *Combat Off* is detected - try to attack next enemy
+    /// Check if an entity is a player
     /// </summary>
-    public void OnCombatEnded()
+    private bool IsPlayer(string entity)
+    {
+        // Players typically have format: "Name (Class Level)" or just "Name"
+        // Example: "Azii (Priest 25)" or "Bob"
+        
+        // Check for class/level pattern
+        if (entity.Contains('(') && entity.Contains(')'))
+        {
+            // Likely a player with class/level displayed
+            return true;
+        }
+        
+        // Check player database
+        if (_playerDatabase != null)
+        {
+            var firstName = entity.Split(' ')[0];
+            var player = _playerDatabase.GetPlayer(firstName);
+            if (player != null)
+            {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    /// <summary>
+    /// Check if we should attack this entity
+    /// </summary>
+    private bool ShouldAttack(string entity)
+    {
+        if (_monsterDatabase == null)
+        {
+            // Without monster database, attack anything that's not a player
+            return true;
+        }
+        
+        // Find the monster in the database
+        var monster = _monsterDatabase.FindMonsterByPartialName(entity);
+        if (monster == null)
+        {
+            // Unknown entity - assume hostile
+            OnLogMessage?.Invoke($"   ⚠️ Unknown entity (not in DB): {entity}");
+            return true;
+        }
+        
+        // Check the override for this monster
+        var monsterOverride = _monsterDatabase.GetOverride(monster.Number);
+        
+        // Don't attack if marked as not hostile
+        if (monsterOverride.NotHostile)
+        {
+            return false;
+        }
+        
+        // Attack enemies, not friends or neutrals
+        return monsterOverride.Relationship == MonsterRelationship.Enemy;
+    }
+    
+    /// <summary>
+    /// Sort enemies by attack priority from monster database
+    /// </summary>
+    private void SortEnemiesByPriority()
+    {
+        if (_monsterDatabase == null)
+            return;
+        
+        _currentRoomEnemies = _currentRoomEnemies
+            .OrderBy(e =>
+            {
+                var monster = _monsterDatabase.FindMonsterByPartialName(e);
+                if (monster == null)
+                    return (int)AttackPriority.Normal;
+                
+                var monsterOverride = _monsterDatabase.GetOverride(monster.Number);
+                return (int)monsterOverride.Priority;
+            })
+            .ToList();
+    }
+    
+    #endregion
+    
+    #region Combat Actions
+    
+    /// <summary>
+    /// Attempt to start combat with the highest priority enemy
+    /// </summary>
+    private void TryInitiateCombat()
     {
         if (!_combatEnabled)
             return;
         
-        // Current target is dead, clear target tracking and pending flag
-        _currentTarget = string.Empty;
-        _attackSpellCastCount = 0;
-        _attackPending = false;
-        _usedMeleeThisRound = false;
-        _lastProcessedAlsoHere = string.Empty; // Clear so we can process the refreshed room
-        
-        // Send enter to refresh room contents and detect remaining enemies
-        // The response will trigger ProcessMessage -> ParseAlsoHereLine -> TryInitiateCombat
-        OnLogMessage?.Invoke("🔄 Combat ended, checking for remaining enemies...");
-        OnSendCommand?.Invoke("");
-    }
-    
-    /// <summary>
-    /// Attempt to initiate combat with the highest priority enemy
-    /// </summary>
-    private void TryInitiateCombat()
-    {
-        if (!_combatEnabled || _isInCombat == null)
-            return;
-        
         // Don't attack if already in combat
-        if (_isInCombat())
+        if (_isInCombat != null && _isInCombat())
         {
-            OnLogMessage?.Invoke("⚠️ Already in combat, not re-engaging");
+            OnLogMessage?.Invoke("⚠️ Already in combat, waiting for tick");
+            return;
+        }
+        
+        // Don't attack if no character is set (we don't know what settings to use)
+        if (string.IsNullOrEmpty(_currentCharacter))
+        {
+            OnLogMessage?.Invoke("⚠️ No character loaded, cannot initiate combat");
             return;
         }
         
@@ -589,6 +591,27 @@ public class CombatManager
     }
     
     /// <summary>
+    /// Called when *Combat Off* is detected - try to attack next enemy
+    /// </summary>
+    public void OnCombatEnded()
+    {
+        if (!_combatEnabled)
+            return;
+        
+        // Current target is dead, clear target tracking and pending flag
+        _currentTarget = string.Empty;
+        _attackSpellCastCount = 0;
+        _attackPending = false;
+        _usedMeleeThisRound = false;
+        _lastProcessedAlsoHere = string.Empty; // Clear so we can process the refreshed room
+        
+        // Send enter to refresh room contents and detect remaining enemies
+        // The response will trigger ProcessMessage -> ParseAlsoHereLine -> TryInitiateCombat
+        OnLogMessage?.Invoke("🔄 Combat ended, checking for remaining enemies...");
+        OnSendCommand?.Invoke("");
+    }
+    
+    /// <summary>
     /// Called on each combat tick to potentially send another attack spell
     /// if we're in combat and have regained enough mana after previously falling back to melee
     /// </summary>
@@ -649,6 +672,32 @@ public class CombatManager
         _alsoHereBuffer.Clear();
         // Don't clear _currentCharacter - it will be set again when stat output is received
         OnLogMessage?.Invoke("🔄 Combat state reset");
+    }
+    
+    #endregion
+    
+    #region Legacy Support
+    
+    /// <summary>
+    /// Legacy method - returns settings for current character
+    /// </summary>
+    [Obsolete("Use GetCurrentSettings() instead")]
+    public CombatSettings GetSettings(string characterName)
+    {
+        if (_settings.CharacterName.Equals(characterName, StringComparison.OrdinalIgnoreCase))
+        {
+            return _settings;
+        }
+        return new CombatSettings { CharacterName = characterName };
+    }
+    
+    /// <summary>
+    /// Legacy method - no longer returns multiple characters
+    /// </summary>
+    [Obsolete("Combat settings are now per-character profile")]
+    public IReadOnlyList<string> GetAllCharacterNames()
+    {
+        return new List<string> { _currentCharacter }.AsReadOnly();
     }
     
     #endregion

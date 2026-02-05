@@ -129,10 +129,162 @@ public class PlayerInfo
     public int CurrentMana { get; set; }
     public int MaxMana { get; set; }
     
+    // Experience tracking
+    public long TotalExperience { get; set; }
+    public long ExperienceNeededForNextLevel { get; set; }
+    public long TotalExperienceForNextLevel { get; set; }
+    public int LevelProgressPercent { get; set; }
+    
     public bool IsMelee => PartyMember.MeleeClasses.Contains(Class, StringComparer.OrdinalIgnoreCase);
     public bool IsCaster => PartyMember.CasterClasses.Contains(Class, StringComparer.OrdinalIgnoreCase);
     
     public double HpPercent => MaxHp > 0 ? (CurrentHp * 100.0 / MaxHp) : 100;
+}
+
+/// <summary>
+/// Tracks experience gains over time to calculate rate
+/// </summary>
+public class ExperienceTracker
+{
+    private readonly List<(DateTime time, long expGained)> _expGains = new();
+    private readonly object _lock = new();
+    private DateTime _sessionStart;
+    private long _sessionExpGained;
+    
+    public ExperienceTracker()
+    {
+        Reset();
+    }
+    
+    public void Reset()
+    {
+        lock (_lock)
+        {
+            _expGains.Clear();
+            _sessionStart = DateTime.Now;
+            _sessionExpGained = 0;
+        }
+    }
+    
+    public void AddExpGain(long amount)
+    {
+        lock (_lock)
+        {
+            _expGains.Add((DateTime.Now, amount));
+            _sessionExpGained += amount;
+            
+            // Keep only last hour of data
+            var cutoff = DateTime.Now.AddHours(-1);
+            _expGains.RemoveAll(e => e.time < cutoff);
+        }
+    }
+    
+    public long SessionExpGained
+    {
+        get { lock (_lock) { return _sessionExpGained; } }
+    }
+    
+    public TimeSpan SessionDuration => DateTime.Now - _sessionStart;
+    
+    /// <summary>
+    /// Calculate experience per hour based on recent gains
+    /// </summary>
+    public long GetExpPerHour()
+    {
+        lock (_lock)
+        {
+            if (_expGains.Count == 0)
+                return 0;
+            
+            // Use the last hour of data, or session duration if less than an hour
+            var now = DateTime.Now;
+            var cutoff = now.AddHours(-1);
+            var recentGains = _expGains.Where(e => e.time >= cutoff).ToList();
+            
+            if (recentGains.Count == 0)
+                return 0;
+            
+            var totalExp = recentGains.Sum(e => e.expGained);
+            var timeSpan = now - recentGains.First().time;
+            
+            if (timeSpan.TotalHours < 0.01) // Less than 36 seconds
+            {
+                // Not enough time to calculate rate, use session data if available
+                if (SessionDuration.TotalHours >= 0.01)
+                {
+                    return (long)(_sessionExpGained / SessionDuration.TotalHours);
+                }
+                return 0;
+            }
+            
+            return (long)(totalExp / timeSpan.TotalHours);
+        }
+    }
+    
+    /// <summary>
+    /// Estimate time to reach a certain amount of experience
+    /// </summary>
+    public TimeSpan? EstimateTimeToExp(long expNeeded)
+    {
+        var expPerHour = GetExpPerHour();
+        if (expPerHour <= 0 || expNeeded <= 0)
+            return null;
+        
+        var hours = (double)expNeeded / expPerHour;
+        return TimeSpan.FromHours(hours);
+    }
+    
+    /// <summary>
+    /// Format time span as human-readable string, or "Now!" if already leveled
+    /// </summary>
+    public static string FormatTimeSpan(TimeSpan? time, bool alreadyLeveled = false)
+    {
+        if (alreadyLeveled)
+            return "Now!";
+        
+        if (time == null)
+            return "N/A";
+        
+        var ts = time.Value;
+        
+        if (ts.TotalDays >= 1)
+            return $"{(int)ts.TotalDays}d {ts.Hours}h {ts.Minutes}m";
+        else if (ts.TotalHours >= 1)
+            return $"{(int)ts.TotalHours}h {ts.Minutes}m";
+        else if (ts.TotalMinutes >= 1)
+            return $"{(int)ts.TotalMinutes}m";
+        else
+            return "<1m";
+    }
+    
+    /// <summary>
+    /// Format large numbers with commas
+    /// </summary>
+    public static string FormatNumber(long number)
+    {
+        return number.ToString("N0");
+    }
+    
+    /// <summary>
+    /// Format large numbers with abbreviations (K, M, B)
+    /// Examples: 1500 -> "1.5K", 1500000 -> "1.5M", 1500000000 -> "1.5B"
+    /// </summary>
+    public static string FormatNumberAbbreviated(long number)
+    {
+        if (number < 0)
+            return "-" + FormatNumberAbbreviated(-number);
+        
+        if (number >= 1_000_000_000)
+            return $"{number / 1_000_000_000.0:0.#}B";
+        
+        if (number >= 1_000_000)
+            return $"{number / 1_000_000.0:0.#}M";
+        
+        if (number >= 1_000)
+            return $"{number / 1_000.0:0.#}K";
+        
+        return number.ToString();
+    }
 }
 
 public enum HealTargetType
@@ -311,6 +463,9 @@ public class ProxySettings
     public bool CombatAutoEnabled { get; set; } = false;  // Combat toggle state
     public bool AutoLoadLastCharacter { get; set; } = false;  // Auto-load last character on startup
     public string LastCharacterPath { get; set; } = string.Empty;  // Path to last loaded character
+    
+    // UI Settings (merged from ui_settings.json)
+    public bool DisplaySystemLog { get; set; } = true;  // Show/hide system log panel
 }
 
 /// <summary>
@@ -443,12 +598,77 @@ public enum PlayerRelationship
     Enemy
 }
 
+/// <summary>
+/// Remote permissions for a player - controls what remote actions they can perform on this client
+/// </summary>
+public class RemotePermissions
+{
+    /// <summary>Query this client's experience points</summary>
+    public bool QueryExperience { get; set; } = false;
+    
+    /// <summary>Query this client's health and status</summary>
+    public bool QueryHealth { get; set; } = false;
+    
+    /// <summary>Query this client's current location</summary>
+    public bool QueryLocation { get; set; } = false;
+    
+    /// <summary>Query this client's inventory</summary>
+    public bool QueryInventory { get; set; } = false;
+    
+    /// <summary>Request a party invite from this client</summary>
+    public bool RequestInvite { get; set; } = false;
+    
+    /// <summary>Move this client's character (walk commands)</summary>
+    public bool MovePlayer { get; set; } = false;
+    
+    /// <summary>Execute arbitrary commands on this client</summary>
+    public bool ExecuteCommands { get; set; } = false;
+    
+    /// <summary>Hangup or disconnect this client</summary>
+    public bool HangupDisconnect { get; set; } = false;
+    
+    /// <summary>Alter this client's settings</summary>
+    public bool AlterSettings { get; set; } = false;
+    
+    /// <summary>Divert/redirect conversations to/from this client</summary>
+    public bool DivertConversations { get; set; } = false;
+    
+    /// <summary>
+    /// Create a deep copy of this permissions object
+    /// </summary>
+    public RemotePermissions Clone()
+    {
+        return new RemotePermissions
+        {
+            QueryExperience = this.QueryExperience,
+            QueryHealth = this.QueryHealth,
+            QueryLocation = this.QueryLocation,
+            QueryInventory = this.QueryInventory,
+            RequestInvite = this.RequestInvite,
+            MovePlayer = this.MovePlayer,
+            ExecuteCommands = this.ExecuteCommands,
+            HangupDisconnect = this.HangupDisconnect,
+            AlterSettings = this.AlterSettings,
+            DivertConversations = this.DivertConversations
+        };
+    }
+}
+
 public class PlayerData
 {
     public string FirstName { get; set; } = string.Empty;  // Unique identifier, never changes
     public string LastName { get; set; } = string.Empty;   // From game, may be empty
     public PlayerRelationship Relationship { get; set; } = PlayerRelationship.Neutral;
     public DateTime LastSeen { get; set; } = DateTime.Now;
+    
+    /// <summary>Remote permissions - what actions this player is allowed to perform on this client</summary>
+    public RemotePermissions AllowedRemotes { get; set; } = new();
+    
+    /// <summary>Auto-invite this player to party when seen in room</summary>
+    public bool InviteToPartyIfSeen { get; set; } = false;
+    
+    /// <summary>Auto-join this player's party when invited</summary>
+    public bool JoinPartyIfInvited { get; set; } = false;
     
     public string FullName => string.IsNullOrEmpty(LastName) ? FirstName : $"{FirstName} {LastName}";
 }

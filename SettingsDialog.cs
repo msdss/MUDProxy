@@ -162,7 +162,7 @@ public class SettingsDialog : Form
             BackColor = Color.FromArgb(45, 45, 45)
         };
         
-        var settings = _combatManager.GetSettings(_currentCharacter);
+        var settings = _combatManager.GetCurrentSettings();
         
         // ── Weapon Combat Panel ──
         var weaponPanel = new Panel

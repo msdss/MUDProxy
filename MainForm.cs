@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 
 namespace MudProxyViewer;
 
@@ -25,7 +27,6 @@ public partial class MainForm : Form
     // Terminal input/output state - user types directly after HP prompt like MegaMUD
     private readonly StringBuilder _userInputBuffer = new();      // What user is currently typing
     private readonly StringBuilder _serverOutputBuffer = new();   // Buffered server data while user types
-    private int _inputStartPosition = 0;                          // Where user input begins in the textbox
     private bool IsUserTyping => _userInputBuffer.Length > 0;     // True if user has typed something
     
     // Virtual terminal buffer - proper VT100/ANSI emulation
@@ -38,18 +39,21 @@ public partial class MainForm : Form
     private readonly BuffManager _buffManager = new();
 
     // UI Components - Main
-    private RichTextBox _logTextBox = null!;  // Keep for compatibility, will point to _mudOutputTextBox
-    private RichTextBox _mudOutputTextBox = null!;  // MUD server output
+    private TerminalControl _terminalControl = null!;  // MUD server output - custom VT100 terminal
     private RichTextBox _systemLogTextBox = null!;  // System/proxy logs
     private SplitContainer _terminalSplitContainer = null!;  // Vertical split: MUD output / logs
     private Label _statusLabel = null!;
+    private Label _expStatusLabel = null!;  // Experience status on right side
     private Button _connectButton = null!;
     private CheckBox _autoScrollCheckBox = null!;
     private CheckBox _autoScrollLogsCheckBox = null!;
     private CheckBox _showTimestampsCheckBox = null!;
     private Label _serverAddressLabel = null!;
     private Label _serverPortLabel = null!;
-    // Command input is now handled directly in _mudOutputTextBox (like MegaMUD)
+    // Command input is handled directly in _terminalControl (like MegaMUD)
+    
+    // UI Settings (persisted separately from character settings)
+    private bool _displaySystemLog = true;  // Show/hide system log panel (synced with BuffManager)
 
     // UI Components - Combat Panel
     private Panel _combatPanel = null!;
@@ -109,9 +113,23 @@ public partial class MainForm : Form
     {
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
         
+        // Load UI settings before creating components
+        LoadUiSettings();
+        
+        // Initialize virtual terminal BEFORE creating UI components
+        // (TerminalControl needs the screen buffer in InitializeComponent)
+        _screenBuffer = new ScreenBuffer(80, 24);
+        _ansiParser = new AnsiVtParser(_screenBuffer);
+        
         InitializeComponent();
         InitializeTimers();
         InitializeBuffManagerEvents();
+        
+        // Apply UI settings after components are created
+        ApplySystemLogVisibility();
+        
+        // Start pre-loading game data cache in background
+        GameDataCache.Instance.StartPreload();
         
         // Auto-start proxy if enabled
         this.Shown += MainForm_Shown;
@@ -150,11 +168,10 @@ public partial class MainForm : Form
 
     private void InitializeTimers()
     {
-        // Initialize virtual terminal (80x24 standard)
-        _screenBuffer = new ScreenBuffer(80, 24);
-        _ansiParser = new AnsiVtParser(_screenBuffer);
+        // Note: _screenBuffer and _ansiParser are now created in constructor
+        // before InitializeComponent (TerminalControl needs the buffer)
         
-        // Render timer - updates RichTextBox from screen buffer
+        // Render timer - updates terminal from screen buffer
         _renderTimer = new System.Windows.Forms.Timer();
         _renderTimer.Interval = 100; // 10 FPS - balance between responsiveness and flicker
         _renderTimer.Tick += RenderTimer_Tick;
@@ -198,6 +215,17 @@ public partial class MainForm : Form
         _buffManager.OnBbsSettingsChanged += () => BeginInvoke(RefreshBbsSettingsDisplay);
         _buffManager.OnLogMessage += (msg) => LogMessage(msg, MessageType.System);
         _buffManager.OnSendCommand += SendCommandToServer;
+        _buffManager.OnHangupRequested += () => BeginInvoke(HandleRemoteHangup);
+        _buffManager.OnRelogRequested += () => BeginInvoke(HandleRemoteRelog);
+        _buffManager.OnAutomationStateChanged += () => BeginInvoke(RefreshAutomationButtons);
+        _buffManager.OnTrainingScreenChanged += (inTraining) => BeginInvoke(() => 
+        {
+            _terminalControl.PassThroughMode = inTraining;
+            if (inTraining)
+            {
+                _terminalControl.ClearInput();  // Clear any buffered input
+            }
+        });
         
         // Initialize CombatManager with dependencies
         _buffManager.CombatManager.Initialize(
@@ -259,6 +287,12 @@ public partial class MainForm : Form
     {
         _buffManager.RemoveExpiredBuffs();
         RefreshBuffTimers();
+        
+        // Update exp status bar periodically (rate changes over time)
+        if (_isConnected && !_isInLoginPhase)
+        {
+            UpdateExpStatusBar();
+        }
     }
     
     private void ParCheckTimer_Tick(object? sender, EventArgs e)
@@ -272,118 +306,78 @@ public partial class MainForm : Form
     }
     
     /// <summary>
-    /// Handle keyboard input in the MUD terminal - user types directly after the prompt
+    /// Handle command entered in the terminal control
     /// </summary>
-    private void MudOutput_KeyDown(object? sender, KeyEventArgs e)
+    private void TerminalControl_CommandEntered(string command)
     {
-        // Always allow Ctrl+C for copy
-        if (e.Control && e.KeyCode == Keys.C)
+        // Send command to server
+        SendCommandToServer(command);
+        
+        // Flush any buffered server output
+        FlushServerBuffer();
+    }
+    
+    /// <summary>
+    /// Handle raw key data from terminal (pass-through mode for training screen)
+    /// </summary>
+    private void TerminalControl_RawKeyData(byte[] data)
+    {
+        if (!_isConnected || _serverStream == null)
             return;
         
-        // Handle Enter - send command
-        if (e.KeyCode == Keys.Enter)
+        try
         {
-            e.Handled = true;
-            e.SuppressKeyPress = true;
-            
-            string command = _userInputBuffer.ToString();
-            _userInputBuffer.Clear();
-            
-            // Send command (even if empty - sends just Enter)
-            SendCommandToServer(command);
-            
-            // Flush any buffered server output
-            FlushServerBuffer();
-            return;
+            _serverStream.Write(data, 0, data.Length);
+            _serverStream.Flush();
         }
-        
-        // Handle Backspace
-        if (e.KeyCode == Keys.Back)
+        catch (Exception ex)
         {
-            e.Handled = true;
-            e.SuppressKeyPress = true;
-            
-            if (_userInputBuffer.Length > 0)
-            {
-                _userInputBuffer.Remove(_userInputBuffer.Length - 1, 1);
-                
-                // Remove last character from display
-                if (_mudOutputTextBox.TextLength > _inputStartPosition)
-                {
-                    _mudOutputTextBox.ReadOnly = false;
-                    _mudOutputTextBox.Select(_mudOutputTextBox.TextLength - 1, 1);
-                    _mudOutputTextBox.SelectedText = "";
-                    _mudOutputTextBox.ReadOnly = true;
-                }
-            }
-            return;
-        }
-        
-        // Handle Escape - clear current input
-        if (e.KeyCode == Keys.Escape)
-        {
-            e.Handled = true;
-            e.SuppressKeyPress = true;
-            
-            if (_userInputBuffer.Length > 0)
-            {
-                // Remove all user input from display
-                if (_mudOutputTextBox.TextLength > _inputStartPosition)
-                {
-                    _mudOutputTextBox.ReadOnly = false;
-                    _mudOutputTextBox.Select(_inputStartPosition, _mudOutputTextBox.TextLength - _inputStartPosition);
-                    _mudOutputTextBox.SelectedText = "";
-                    _mudOutputTextBox.ReadOnly = true;
-                }
-                _userInputBuffer.Clear();
-            }
-            return;
-        }
-        
-        // Block other control keys and navigation
-        if (e.Control || e.Alt || 
-            e.KeyCode == Keys.Left || e.KeyCode == Keys.Right ||
-            e.KeyCode == Keys.Up || e.KeyCode == Keys.Down ||
-            e.KeyCode == Keys.Home || e.KeyCode == Keys.End ||
-            e.KeyCode == Keys.PageUp || e.KeyCode == Keys.PageDown ||
-            e.KeyCode == Keys.Delete || e.KeyCode == Keys.Insert)
-        {
-            e.Handled = true;
-            e.SuppressKeyPress = true;
-            return;
+            LogMessage($"Error sending key data: {ex.Message}", MessageType.System);
         }
     }
     
     /// <summary>
-    /// Handle character input - this is where typed characters are captured
+    /// Handle terminal size change
     /// </summary>
-    private void MudOutput_KeyPress(object? sender, KeyPressEventArgs e)
+    private void TerminalControl_SizeChanged(int cols, int rows)
     {
-        // Ignore control characters (except we need to handle normal typing)
-        if (char.IsControl(e.KeyChar) && e.KeyChar != '\r' && e.KeyChar != '\b')
+        // Send NAWS (window size) to server if connected
+        if (_isConnected && _serverStream != null)
         {
-            e.Handled = true;
-            return;
+            _ = SendNawsAsync(cols, rows);
         }
+    }
+    
+    /// <summary>
+    /// Send NAWS (window size) to server asynchronously
+    /// </summary>
+    private async Task SendNawsAsync(int cols, int rows)
+    {
+        const byte IAC = 255;
+        const byte SB = 250;
+        const byte SE = 240;
+        const byte NAWS = 31;
         
-        // Ignore Enter and Backspace (handled in KeyDown)
-        if (e.KeyChar == '\r' || e.KeyChar == '\b')
+        byte[] naws = new byte[9];
+        naws[0] = IAC;
+        naws[1] = SB;
+        naws[2] = NAWS;
+        naws[3] = (byte)((cols >> 8) & 0xFF);
+        naws[4] = (byte)(cols & 0xFF);
+        naws[5] = (byte)((rows >> 8) & 0xFF);
+        naws[6] = (byte)(rows & 0xFF);
+        naws[7] = IAC;
+        naws[8] = SE;
+        
+        try
         {
-            e.Handled = true;
-            return;
+            await SendRawDataAsync(naws);
+            LogMessage($"📡 Sent window size: {cols}x{rows}", MessageType.System);
         }
-        
-        // Add character to input buffer
-        _userInputBuffer.Append(e.KeyChar);
-        
-        // Display the character
-        _mudOutputTextBox.ReadOnly = false;
-        _mudOutputTextBox.AppendText(e.KeyChar.ToString());
-        _mudOutputTextBox.ReadOnly = true;
-        _mudOutputTextBox.SelectionStart = _mudOutputTextBox.TextLength;
-        _mudOutputTextBox.ScrollToCaret();
-        
-        e.Handled = true;
+        catch
+        {
+            // Ignore send errors
+        }
     }
     
     /// <summary>
@@ -515,6 +509,19 @@ public partial class MainForm : Form
             Checked = _buffManager.AutoLoadLastCharacter
         };
         fileMenu.DropDownItems.Add(autoLoadMenuItem);
+        
+        var displaySystemLogMenuItem = new ToolStripMenuItem("Display System Log", null, ToggleDisplaySystemLog_Click) 
+        { 
+            ForeColor = Color.White, 
+            BackColor = Color.FromArgb(45, 45, 45),
+            CheckOnClick = true,
+            Checked = _displaySystemLog
+        };
+        fileMenu.DropDownItems.Add(displaySystemLogMenuItem);
+        
+        fileMenu.DropDownItems.Add(new ToolStripSeparator());
+        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Import Game Database...", null, ImportGameDatabase_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        
         fileMenu.DropDownItems.Add(new ToolStripSeparator());
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("Save Log...", null, SaveLog_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("Clear Log", null, ClearLog_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
@@ -541,8 +548,17 @@ public partial class MainForm : Form
 
         // Game Data menu
         var gameDataMenu = new ToolStripMenuItem("Game Data") { ForeColor = Color.White };
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Races / Classes...", null, OpenRacesClasses_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Items...", null, OpenGameDataItems_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Spells...", null, OpenGameDataSpells_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Monsters...", null, OpenGameDataMonsters_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Rooms...", null, OpenGameDataRooms_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Shops...", null, OpenGameDataShops_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Lairs...", null, OpenGameDataLairs_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Text Blocks...", null, OpenGameDataTextBlocks_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        gameDataMenu.DropDownItems.Add(new ToolStripSeparator());
         gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Player DB...", null, OpenPlayerDB_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
-        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Monster DB...", null, OpenMonsterDB_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Monster DB (Deprecated)...", null, OpenMonsterDB_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
 
         var helpMenu = new ToolStripMenuItem("Help") { ForeColor = Color.White };
         helpMenu.DropDownItems.Add(new ToolStripMenuItem("About", null, About_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
@@ -869,6 +885,22 @@ public partial class MainForm : Form
             Location = new Point(10, 5)
         };
         statusPanel.Controls.Add(_statusLabel);
+        
+        _expStatusLabel = new Label
+        {
+            Text = "",
+            ForeColor = Color.LightGreen,
+            AutoSize = true,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            TextAlign = ContentAlignment.MiddleRight
+        };
+        statusPanel.Controls.Add(_expStatusLabel);
+        
+        // Position exp label on resize
+        statusPanel.Resize += (s, e) =>
+        {
+            _expStatusLabel.Location = new Point(statusPanel.Width - _expStatusLabel.Width - 10, 5);
+        };
 
         // Split container for MUD output and system logs
         _terminalSplitContainer = new SplitContainer
@@ -882,24 +914,24 @@ public partial class MainForm : Form
             Panel2MinSize = 60
         };
         
-        // MUD output text box (top panel)
-        _mudOutputTextBox = new RichTextBox
+        // MUD output terminal (top panel) - custom VT100 terminal control
+        _terminalControl = new TerminalControl
         {
             Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(12, 12, 12),
-            ForeColor = Color.FromArgb(0, 255, 0),
-            Font = new Font("Consolas", 10),
-            ReadOnly = true,
-            BorderStyle = BorderStyle.None,
-            HideSelection = false  // Keep selection visible when not focused
+            BackColor = Color.Black,  // Pure black like MegaMUD
+            Font = new Font("Consolas", 10)
         };
         
-        // Set up keyboard handling for direct input (like MegaMUD)
-        _mudOutputTextBox.KeyDown += MudOutput_KeyDown;
-        _mudOutputTextBox.KeyPress += MudOutput_KeyPress;
+        // Connect terminal to screen buffer
+        _terminalControl.SetScreenBuffer(_screenBuffer);
+        
+        // Handle commands entered in terminal
+        _terminalControl.OnCommandEntered += TerminalControl_CommandEntered;
+        _terminalControl.OnTerminalSizeChanged += TerminalControl_SizeChanged;
+        _terminalControl.OnRawKeyData += TerminalControl_RawKeyData;
         
         // Add to panel
-        _terminalSplitContainer.Panel1.Controls.Add(_mudOutputTextBox);
+        _terminalSplitContainer.Panel1.Controls.Add(_terminalControl);
         
         // System log header
         var logHeaderPanel = new Panel
@@ -922,7 +954,7 @@ public partial class MainForm : Form
         _systemLogTextBox = new RichTextBox
         {
             Dock = DockStyle.Fill,
-            BackColor = Color.FromArgb(20, 20, 20),
+            BackColor = Color.Black,  // Pure black like MegaMUD
             ForeColor = Color.FromArgb(255, 204, 0),
             Font = new Font("Consolas", 9),
             ReadOnly = true,
@@ -930,9 +962,6 @@ public partial class MainForm : Form
         };
         _terminalSplitContainer.Panel2.Controls.Add(_systemLogTextBox);
         _terminalSplitContainer.Panel2.Controls.Add(logHeaderPanel);
-        
-        // Keep _logTextBox pointing to MUD output for backward compatibility
-        _logTextBox = _mudOutputTextBox;
 
         // Add a splitter for resizing the combat panel
         var combatSplitter = new Splitter
@@ -1026,6 +1055,39 @@ public partial class MainForm : Form
                 info.MaxMana
             );
         }
+        
+        // Update exp status bar
+        UpdateExpStatusBar();
+    }
+    
+    private void UpdateExpStatusBar()
+    {
+        var info = _buffManager.PlayerInfo;
+        var tracker = _buffManager.ExperienceTracker;
+        
+        if (info.Level <= 0)
+        {
+            _expStatusLabel.Text = "";
+            return;
+        }
+        
+        var sessionExp = tracker.SessionExpGained;
+        var expNeeded = info.ExperienceNeededForNextLevel;
+        var expPerHour = tracker.GetExpPerHour();
+        var alreadyLeveled = expNeeded <= 0;
+        var timeToLevel = ExperienceTracker.FormatTimeSpan(
+            tracker.EstimateTimeToExp(expNeeded), 
+            alreadyLeveled);
+        
+        _expStatusLabel.Text = $"Level: {info.Level} / " +
+            $"Made: {ExperienceTracker.FormatNumberAbbreviated(sessionExp)} / " +
+            $"Needed: {ExperienceTracker.FormatNumberAbbreviated(expNeeded)} / " +
+            $"Rate: {ExperienceTracker.FormatNumberAbbreviated(expPerHour)}/hr / " +
+            $"Will level in: {timeToLevel}";
+        
+        // Reposition after text change
+        _expStatusLabel.Location = new Point(
+            _expStatusLabel.Parent!.Width - _expStatusLabel.Width - 10, 5);
     }
 
     private void RefreshBuffDisplay()
@@ -1347,6 +1409,14 @@ public partial class MainForm : Form
         _buffToggleButton.BackColor = _buffManager.AutoRecastEnabled ? enabledColor : disabledColor;
         _cureToggleButton.BackColor = _buffManager.CureManager.CuringEnabled ? enabledColor : disabledColor;
     }
+    
+    /// <summary>
+    /// Refresh automation button states (called when remote commands change automation)
+    /// </summary>
+    private void RefreshAutomationButtons()
+    {
+        UpdateToggleButtonStates();
+    }
 
     private void ClearActiveBuffs_Click(object? sender, EventArgs e)
     {
@@ -1603,6 +1673,102 @@ public partial class MainForm : Form
     private void OpenMonsterDB_Click(object? sender, EventArgs e)
     {
         using var dialog = new MonsterDatabaseDialog(_buffManager.MonsterDatabase);
+        dialog.ShowDialog(this);
+    }
+    
+    private void ImportGameDatabase_Click(object? sender, EventArgs e)
+    {
+        // Check if ACE is installed first
+        if (!MdbImporter.IsAceInstalled())
+        {
+            using var aceDialog = new AceNotInstalledDialog();
+            aceDialog.ShowDialog(this);
+            return;
+        }
+        
+        // Open file picker
+        using var openDialog = new OpenFileDialog
+        {
+            Title = "Select your game database",
+            Filter = "Access Database (*.mdb)|*.mdb",
+            CheckFileExists = true
+        };
+        
+        if (openDialog.ShowDialog(this) != DialogResult.OK)
+            return;
+        
+        // Show import dialog with progress
+        using var importDialog = new MdbImportDialog(openDialog.FileName);
+        var result = importDialog.ShowDialog(this);
+        
+        if (result == DialogResult.OK)
+        {
+            LogMessage("Game database imported successfully!", MessageType.System);
+            
+            // Clear and reload the cache with new data
+            GameDataCache.Instance.ClearCache();
+            GameDataCache.Instance.StartPreload();
+        }
+    }
+    
+    private void OpenRacesClasses_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new RacesClassesDialog();
+        dialog.ShowDialog(this);
+    }
+    
+    private void OpenGameDataItems_Click(object? sender, EventArgs e)
+    {
+        OpenGameDataViewer("Items");
+    }
+    
+    private void OpenGameDataSpells_Click(object? sender, EventArgs e)
+    {
+        OpenGameDataViewer("Spells");
+    }
+    
+    private void OpenGameDataMonsters_Click(object? sender, EventArgs e)
+    {
+        OpenGameDataViewer("Monsters");
+    }
+    
+    private void OpenGameDataRooms_Click(object? sender, EventArgs e)
+    {
+        OpenGameDataViewer("Rooms");
+    }
+    
+    private void OpenGameDataShops_Click(object? sender, EventArgs e)
+    {
+        OpenGameDataViewer("Shops");
+    }
+    
+    private void OpenGameDataLairs_Click(object? sender, EventArgs e)
+    {
+        OpenGameDataViewer("Lairs");
+    }
+    
+    private void OpenGameDataTextBlocks_Click(object? sender, EventArgs e)
+    {
+        OpenGameDataViewer("TextBlocks");
+    }
+    
+    private void OpenGameDataViewer(string tableName)
+    {
+        var importer = new MdbImporter();
+        var filePath = Path.Combine(importer.GameDataPath, $"{tableName}.json");
+        
+        if (!File.Exists(filePath))
+        {
+            MessageBox.Show(
+                $"Game data for '{tableName}' has not been imported yet.\n\n" +
+                "Use File → Import Game Database... to import data from your MajorMUD .mdb file.",
+                "Game Data Not Found",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+        
+        using var dialog = new GameDataViewerDialog(tableName, filePath);
         dialog.ShowDialog(this);
     }
     
@@ -2019,11 +2185,47 @@ public partial class MainForm : Form
         // Reset terminal state
         _userInputBuffer.Clear();
         _serverOutputBuffer.Clear();
-        _inputStartPosition = _mudOutputTextBox.TextLength;
+        _terminalControl.ClearInput();
+        
+        // Reset session state in BuffManager
+        _buffManager.OnDisconnected();
 
         UpdateConnectionUI(false);
         LogMessage("Disconnected.", MessageType.System);
         UpdateStatus("Disconnected", Color.Gray);
+    }
+    
+    /// <summary>
+    /// Handle remote hangup request
+    /// </summary>
+    private void HandleRemoteHangup()
+    {
+        LogMessage("📡 Remote hangup command received - disconnecting...", MessageType.System);
+        Disconnect();
+    }
+    
+    /// <summary>
+    /// Handle remote relog request
+    /// </summary>
+    private void HandleRemoteRelog()
+    {
+        LogMessage("📡 Remote relog command received - reconnecting...", MessageType.System);
+        Disconnect();
+        
+        // Small delay before reconnecting
+        Task.Delay(1000).ContinueWith(_ =>
+        {
+            if (!IsDisposed)
+            {
+                BeginInvoke(() =>
+                {
+                    if (!_isConnected)
+                    {
+                        ConnectButton_Click(this, EventArgs.Empty);
+                    }
+                });
+            }
+        });
     }
 
     private void UpdateConnectionUI(bool connected)
@@ -2043,7 +2245,7 @@ public partial class MainForm : Form
         _screenBuffer.MoveCursorAbs(0, 0);
         _screenBuffer.Fg = ConsoleColor.Gray;
         _screenBuffer.Bg = ConsoleColor.Black;
-        _inputStartPosition = _mudOutputTextBox.TextLength;
+        _terminalControl.ClearInput();
 
         try
         {
@@ -2144,17 +2346,16 @@ public partial class MainForm : Form
         // Mark screen as dirty - will be rendered on next timer tick
         _screenDirty = true;
         
-        // Give focus to the MUD output for typing
+        // Give focus to the terminal for typing
         if (_isConnected)
         {
-            _mudOutputTextBox.Focus();
+            _terminalControl.Focus();
         }
     }
     
     /// <summary>
-    /// Render the virtual screen buffer to the RichTextBox.
-    /// Optimized to minimize flicker using WM_SETREDRAW.
-    /// Only outputs rows with content, trimming trailing spaces.
+    /// Render the virtual screen buffer to the terminal control.
+    /// The TerminalControl paints directly from the ScreenBuffer.
     /// </summary>
     private void RenderScreenBuffer()
     {
@@ -2164,120 +2365,9 @@ public partial class MainForm : Form
             return;
         }
         
-        // Build all text, only including rows with content
-        var fullText = new StringBuilder();
-        var colorRuns = new List<(int start, int length, Color color)>();
-        
-        int pos = 0;
-        bool firstRow = true;
-        
-        for (int row = 0; row < _screenBuffer.Rows; row++)
-        {
-            // Find the last non-space character in this row
-            int lastNonSpace = -1;
-            for (int col = _screenBuffer.Cols - 1; col >= 0; col--)
-            {
-                if (_screenBuffer.GetCell(row, col).Ch != ' ')
-                {
-                    lastNonSpace = col;
-                    break;
-                }
-            }
-            
-            // Skip empty rows entirely
-            if (lastNonSpace < 0)
-            {
-                continue;
-            }
-            
-            // Add newline before this row (except for the first row with content)
-            if (!firstRow)
-            {
-                fullText.Append('\n');
-                pos++;
-            }
-            firstRow = false;
-            
-            // Render characters up to and including the last non-space
-            int runStart = pos;
-            ConsoleColor runColor = _screenBuffer.GetCell(row, 0).Fg;
-            
-            for (int col = 0; col <= lastNonSpace; col++)
-            {
-                var cell = _screenBuffer.GetCell(row, col);
-                
-                // If color changes, save the run
-                if (cell.Fg != runColor)
-                {
-                    if (pos > runStart)
-                    {
-                        colorRuns.Add((runStart, pos - runStart, ConsoleColorToColor(runColor)));
-                    }
-                    runStart = pos;
-                    runColor = cell.Fg;
-                }
-                
-                fullText.Append(cell.Ch);
-                pos++;
-            }
-            
-            // Save final run for this row
-            if (pos > runStart)
-            {
-                colorRuns.Add((runStart, pos - runStart, ConsoleColorToColor(runColor)));
-            }
-        }
-        
-        // If no content at all, clear the display
-        if (fullText.Length == 0)
-        {
-            _mudOutputTextBox.Text = "";
-            _inputStartPosition = 0;
-            return;
-        }
-        
-        // Suspend drawing to prevent flicker
-        const int WM_SETREDRAW = 0x000B;
-        SendMessage(_mudOutputTextBox.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
-        
-        try
-        {
-            _mudOutputTextBox.ReadOnly = false;
-            
-            // Set all text at once
-            _mudOutputTextBox.Text = fullText.ToString();
-            
-            // Apply colors in batch
-            foreach (var run in colorRuns)
-            {
-                _mudOutputTextBox.Select(run.start, run.length);
-                _mudOutputTextBox.SelectionColor = run.color;
-            }
-            
-            // Position cursor at end
-            _mudOutputTextBox.SelectionStart = _mudOutputTextBox.TextLength;
-            _mudOutputTextBox.SelectionLength = 0;
-            
-            _mudOutputTextBox.ReadOnly = true;
-        }
-        finally
-        {
-            // Resume drawing
-            SendMessage(_mudOutputTextBox.Handle, WM_SETREDRAW, (IntPtr)1, IntPtr.Zero);
-            _mudOutputTextBox.Invalidate();
-        }
-        
-        _inputStartPosition = _mudOutputTextBox.TextLength;
-        
-        // Auto-scroll to end
-        if (_autoScrollCheckBox.Checked)
-        {
-            _mudOutputTextBox.ScrollToCaret();
-        }
+        // Tell the terminal control to repaint
+        _terminalControl.InvalidateTerminal();
     }
-    
-    [DllImport("user32.dll")]
-    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
     
     /// <summary>
     /// Convert ConsoleColor to System.Drawing.Color
@@ -2563,8 +2653,9 @@ public partial class MainForm : Form
             return;
         }
 
-        RichTextBox targetTextBox = type == MessageType.System ? _systemLogTextBox : _mudOutputTextBox;
-        CheckBox autoScrollCheckBox = type == MessageType.System ? _autoScrollLogsCheckBox : _autoScrollCheckBox;
+        // All log messages go to the system log
+        RichTextBox targetTextBox = _systemLogTextBox;
+        CheckBox autoScrollCheckBox = _autoScrollLogsCheckBox;
 
         // Trim log if needed
         _logMessageCount++;
@@ -2731,22 +2822,9 @@ public partial class MainForm : Form
             return;
         }
 
-        // Determine which textbox to use
-        RichTextBox targetTextBox;
-        CheckBox autoScrollCheckBox;
-        
-        if (type == MessageType.System)
-        {
-            // System messages go to the system log
-            targetTextBox = _systemLogTextBox;
-            autoScrollCheckBox = _autoScrollLogsCheckBox;
-        }
-        else
-        {
-            // Server and Client messages go to MUD output
-            targetTextBox = _mudOutputTextBox;
-            autoScrollCheckBox = _autoScrollCheckBox;
-        }
+        // All log messages go to the system log
+        RichTextBox targetTextBox = _systemLogTextBox;
+        CheckBox autoScrollCheckBox = _autoScrollLogsCheckBox;
 
         Color color = type switch
         {
@@ -2869,6 +2947,34 @@ public partial class MainForm : Form
             LogMessage($"Auto-load last character: {(item.Checked ? "ENABLED" : "DISABLED")}", MessageType.System);
         }
     }
+    
+    private void ToggleDisplaySystemLog_Click(object? sender, EventArgs e)
+    {
+        if (sender is ToolStripMenuItem item)
+        {
+            _displaySystemLog = item.Checked;
+            ApplySystemLogVisibility();
+            SaveUiSettings();
+            LogMessage($"Display system log: {(_displaySystemLog ? "ENABLED" : "DISABLED")}", MessageType.System);
+        }
+    }
+    
+    private void ApplySystemLogVisibility()
+    {
+        _terminalSplitContainer.Panel2Collapsed = !_displaySystemLog;
+    }
+    
+    private void LoadUiSettings()
+    {
+        // Load from BuffManager's settings (stored in settings.json)
+        _displaySystemLog = _buffManager.DisplaySystemLog;
+    }
+    
+    private void SaveUiSettings()
+    {
+        // Save via BuffManager (stored in settings.json)
+        _buffManager.DisplaySystemLog = _displaySystemLog;
+    }
 
     private void SaveCharacter_Click(object? sender, EventArgs e)
     {
@@ -2940,9 +3046,10 @@ public partial class MainForm : Form
 
         if (dialog.ShowDialog() == DialogResult.OK)
         {
-            // Save both MUD output and system log
+            // Save both terminal content and system log
+            var terminalContent = _screenBuffer.GetContentAsText();
             var combinedLog = "=== MUD OUTPUT ===" + Environment.NewLine +
-                              _mudOutputTextBox.Text + Environment.NewLine +
+                              terminalContent + Environment.NewLine +
                               Environment.NewLine +
                               "=== SYSTEM LOG ===" + Environment.NewLine +
                               _systemLogTextBox.Text;
@@ -2953,7 +3060,8 @@ public partial class MainForm : Form
 
     private void ClearLog_Click(object? sender, EventArgs e)
     {
-        _mudOutputTextBox.Clear();
+        _screenBuffer.ClearAll();
+        _terminalControl.InvalidateTerminal();
         _systemLogTextBox.Clear();
     }
 
@@ -3391,6 +3499,38 @@ public sealed class ScreenBuffer
         'x' => '│',
         _ => c
     };
+    
+    /// <summary>
+    /// Get the screen content as a string (for saving logs)
+    /// </summary>
+    public string GetContentAsText()
+    {
+        var sb = new StringBuilder();
+        
+        for (int row = 0; row < Rows; row++)
+        {
+            // Find last non-space character in row
+            int lastNonSpace = -1;
+            for (int col = Cols - 1; col >= 0; col--)
+            {
+                if (_cells[row, col].Ch != ' ' && _cells[row, col].Ch != '\0')
+                {
+                    lastNonSpace = col;
+                    break;
+                }
+            }
+            
+            // Add characters up to last non-space
+            for (int col = 0; col <= lastNonSpace; col++)
+            {
+                sb.Append(_cells[row, col].Ch);
+            }
+            
+            sb.AppendLine();
+        }
+        
+        return sb.ToString();
+    }
 }
 
 /// <summary>
@@ -3758,3 +3898,495 @@ public sealed class AnsiVtParser
         };
     }
 }
+
+/// <summary>
+/// Custom terminal control that paints a ScreenBuffer directly using GDI+.
+/// Replaces RichTextBox for proper VT100/ANSI terminal emulation.
+/// </summary>
+public sealed class TerminalControl : UserControl
+{
+    private ScreenBuffer? _screenBuffer;
+    private readonly StringBuilder _inputBuffer = new();
+    private int _charWidth = 8;
+    private int _charHeight = 16;
+    private bool _cursorVisible = true;
+    private readonly System.Windows.Forms.Timer _cursorTimer;
+    
+    // Events
+    public event Action<string>? OnCommandEntered;
+    public event Action<int, int>? OnTerminalSizeChanged;
+    public event Action<byte[]>? OnRawKeyData;  // For pass-through mode (training screen)
+    
+    // Properties
+    public int TerminalCols { get; private set; } = 80;
+    public int TerminalRows { get; private set; } = 24;
+    public string InputText => _inputBuffer.ToString();
+    
+    /// <summary>
+    /// When true, keystrokes are sent directly to server instead of buffered locally.
+    /// Used for training screen where server handles input fields.
+    /// </summary>
+    public bool PassThroughMode { get; set; } = false;
+    
+    public TerminalControl()
+    {
+        // Enable double buffering to reduce flicker
+        SetStyle(ControlStyles.AllPaintingInWmPaint | 
+                 ControlStyles.UserPaint | 
+                 ControlStyles.DoubleBuffer |
+                 ControlStyles.ResizeRedraw |
+                 ControlStyles.Selectable, true);
+        
+        BackColor = Color.Black;
+        Font = new Font("Consolas", 10f, FontStyle.Regular);
+        
+        // Cursor blink timer
+        _cursorTimer = new System.Windows.Forms.Timer();
+        _cursorTimer.Interval = 530;  // Standard cursor blink rate
+        _cursorTimer.Tick += (s, e) => 
+        {
+            _cursorVisible = !_cursorVisible;
+            InvalidateCursorArea();
+        };
+        _cursorTimer.Start();
+        
+        // Calculate initial character dimensions
+        UpdateCharacterDimensions();
+    }
+    
+    /// <summary>
+    /// Set the screen buffer to render
+    /// </summary>
+    public void SetScreenBuffer(ScreenBuffer buffer)
+    {
+        _screenBuffer = buffer;
+        Invalidate();
+    }
+    
+    /// <summary>
+    /// Clear the input buffer
+    /// </summary>
+    public void ClearInput()
+    {
+        _inputBuffer.Clear();
+        InvalidateCursorArea();
+    }
+    
+    /// <summary>
+    /// Force a full repaint
+    /// </summary>
+    public void InvalidateTerminal()
+    {
+        Invalidate();
+    }
+    
+    /// <summary>
+    /// Update character dimensions based on current font
+    /// </summary>
+    private void UpdateCharacterDimensions()
+    {
+        using (var g = CreateGraphics())
+        {
+            // Measure character size using TextRenderer for accuracy
+            var size = TextRenderer.MeasureText(g, "M", Font, Size.Empty, 
+                TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+            _charWidth = size.Width;
+            _charHeight = Font.Height;
+        }
+        
+        // Ensure minimum sizes
+        if (_charWidth < 1) _charWidth = 8;
+        if (_charHeight < 1) _charHeight = 16;
+        
+        UpdateTerminalSize();
+    }
+    
+    /// <summary>
+    /// Calculate terminal dimensions based on control size
+    /// </summary>
+    private void UpdateTerminalSize()
+    {
+        int newCols = Math.Max(20, ClientSize.Width / _charWidth);
+        int newRows = Math.Max(5, ClientSize.Height / _charHeight);
+        
+        if (newCols != TerminalCols || newRows != TerminalRows)
+        {
+            TerminalCols = newCols;
+            TerminalRows = newRows;
+            
+            // Resize the screen buffer if we have one
+            _screenBuffer?.Resize(TerminalCols, TerminalRows);
+            
+            // Notify listeners
+            OnTerminalSizeChanged?.Invoke(TerminalCols, TerminalRows);
+        }
+    }
+    
+    protected override void OnResize(EventArgs e)
+    {
+        base.OnResize(e);
+        UpdateTerminalSize();
+    }
+    
+    protected override void OnFontChanged(EventArgs e)
+    {
+        base.OnFontChanged(e);
+        UpdateCharacterDimensions();
+    }
+    
+    /// <summary>
+    /// Invalidate just the cursor area for efficient blinking
+    /// </summary>
+    private void InvalidateCursorArea()
+    {
+        if (_screenBuffer == null) return;
+        
+        // Calculate cursor position considering input buffer
+        int cursorRow = _screenBuffer.CursorY;
+        int cursorCol = _screenBuffer.CursorX + _inputBuffer.Length;
+        
+        // Handle line wrapping
+        while (cursorCol >= TerminalCols && cursorRow < TerminalRows - 1)
+        {
+            cursorCol -= TerminalCols;
+            cursorRow++;
+        }
+        
+        var rect = new Rectangle(cursorCol * _charWidth, cursorRow * _charHeight, 
+                                 _charWidth, _charHeight);
+        Invalidate(rect);
+    }
+    
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        base.OnPaint(e);
+        
+        var g = e.Graphics;
+        g.Clear(BackColor);
+        
+        if (_screenBuffer == null) return;
+        
+        // Use TextRenderer for crisp text (like the system uses)
+        var flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+        
+        // Draw each cell from the buffer
+        for (int row = 0; row < Math.Min(_screenBuffer.Rows, TerminalRows); row++)
+        {
+            for (int col = 0; col < Math.Min(_screenBuffer.Cols, TerminalCols); col++)
+            {
+                var cell = _screenBuffer.GetCell(row, col);
+                int x = col * _charWidth;
+                int y = row * _charHeight;
+                
+                // Draw background if not black (even for empty cells - important for input fields)
+                if (cell.Bg != ConsoleColor.Black)
+                {
+                    using var bgBrush = new SolidBrush(ConsoleColorToColor(cell.Bg));
+                    g.FillRectangle(bgBrush, x, y, _charWidth, _charHeight);
+                }
+                
+                // Draw the character (skip spaces/nulls - they're just background)
+                if (cell.Ch != ' ' && cell.Ch != '\0')
+                {
+                    var fgColor = ConsoleColorToColor(cell.Fg);
+                    TextRenderer.DrawText(g, cell.Ch.ToString(), Font, 
+                        new Point(x, y), fgColor, flags);
+                }
+            }
+        }
+        
+        // Draw the input buffer after the cursor position
+        if (_inputBuffer.Length > 0)
+        {
+            int inputRow = _screenBuffer.CursorY;
+            int inputCol = _screenBuffer.CursorX;
+            
+            for (int i = 0; i < _inputBuffer.Length; i++)
+            {
+                int x = inputCol * _charWidth;
+                int y = inputRow * _charHeight;
+                
+                // Draw the character in gray (user input color)
+                TextRenderer.DrawText(g, _inputBuffer[i].ToString(), Font,
+                    new Point(x, y), Color.FromArgb(192, 192, 192), flags);
+                
+                inputCol++;
+                if (inputCol >= TerminalCols)
+                {
+                    inputCol = 0;
+                    inputRow++;
+                    if (inputRow >= TerminalRows) break;
+                }
+            }
+        }
+        
+        // Draw cursor
+        if (_cursorVisible && Focused)
+        {
+            int cursorRow = _screenBuffer.CursorY;
+            int cursorCol = PassThroughMode ? _screenBuffer.CursorX : _screenBuffer.CursorX + _inputBuffer.Length;
+            
+            // Handle line wrapping (only in normal mode)
+            if (!PassThroughMode)
+            {
+                while (cursorCol >= TerminalCols && cursorRow < TerminalRows - 1)
+                {
+                    cursorCol -= TerminalCols;
+                    cursorRow++;
+                }
+            }
+            
+            int cx = cursorCol * _charWidth;
+            int cy = cursorRow * _charHeight;
+            
+            if (PassThroughMode)
+            {
+                // Training screen cursor: dark grey background with white text
+                using var cursorBrush = new SolidBrush(Color.FromArgb(96, 96, 96));  // Dark grey
+                g.FillRectangle(cursorBrush, cx, cy, _charWidth, _charHeight);
+                
+                // Draw the character at cursor position in white (if any)
+                var cell = _screenBuffer.GetCell(cursorRow, cursorCol);
+                if (cell.Ch != ' ' && cell.Ch != '\0')
+                {
+                    TextRenderer.DrawText(g, cell.Ch.ToString(), Font,
+                        new Point(cx, cy), Color.White, flags);
+                }
+            }
+            else
+            {
+                // Normal cursor: semi-transparent grey block
+                using var cursorBrush = new SolidBrush(Color.FromArgb(180, 192, 192, 192));
+                g.FillRectangle(cursorBrush, cx, cy, _charWidth, _charHeight);
+            }
+        }
+    }
+    
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        // Allow Ctrl+C for copy (future: implement copy)
+        if (e.Control && e.KeyCode == Keys.C)
+        {
+            base.OnKeyDown(e);
+            return;
+        }
+        
+        // Pass-through mode: send keystrokes directly to server (for training screen)
+        if (PassThroughMode)
+        {
+            byte[]? data = null;
+            
+            switch (e.KeyCode)
+            {
+                case Keys.Enter:
+                    data = new byte[] { 0x0D };  // CR
+                    break;
+                case Keys.Back:
+                    data = new byte[] { 0x08 };  // BS
+                    break;
+                case Keys.Escape:
+                    data = new byte[] { 0x1B };  // ESC
+                    break;
+                case Keys.Up:
+                    data = new byte[] { 0x1B, 0x5B, 0x41 };  // ESC [ A
+                    break;
+                case Keys.Down:
+                    data = new byte[] { 0x1B, 0x5B, 0x42 };  // ESC [ B
+                    break;
+                case Keys.Right:
+                    data = new byte[] { 0x1B, 0x5B, 0x43 };  // ESC [ C
+                    break;
+                case Keys.Left:
+                    data = new byte[] { 0x1B, 0x5B, 0x44 };  // ESC [ D
+                    break;
+                case Keys.Space:
+                    data = new byte[] { 0x20 };  // Space
+                    break;
+                case Keys.Tab:
+                    data = new byte[] { 0x09 };  // Tab
+                    break;
+                case Keys.Delete:
+                    data = new byte[] { 0x7F };  // DEL
+                    break;
+            }
+            
+            if (data != null)
+            {
+                // Only suppress KeyPress for special keys we handled
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                OnRawKeyData?.Invoke(data);
+            }
+            // For regular character keys, let OnKeyPress handle them
+            return;
+        }
+        
+        // Normal mode: buffer input locally
+        
+        // Handle Enter - send command
+        if (e.KeyCode == Keys.Enter)
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            
+            string command = _inputBuffer.ToString();
+            _inputBuffer.Clear();
+            _cursorVisible = true;  // Reset cursor visibility
+            
+            OnCommandEntered?.Invoke(command);
+            Invalidate();
+            return;
+        }
+        
+        // Handle Backspace
+        if (e.KeyCode == Keys.Back)
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            
+            if (_inputBuffer.Length > 0)
+            {
+                _inputBuffer.Remove(_inputBuffer.Length - 1, 1);
+                _cursorVisible = true;
+                Invalidate();
+            }
+            return;
+        }
+        
+        // Handle Escape - clear input
+        if (e.KeyCode == Keys.Escape)
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            
+            if (_inputBuffer.Length > 0)
+            {
+                _inputBuffer.Clear();
+                _cursorVisible = true;
+                Invalidate();
+            }
+            return;
+        }
+        
+        // Block navigation and special keys
+        if (e.Control || e.Alt ||
+            e.KeyCode == Keys.Left || e.KeyCode == Keys.Right ||
+            e.KeyCode == Keys.Up || e.KeyCode == Keys.Down ||
+            e.KeyCode == Keys.Home || e.KeyCode == Keys.End ||
+            e.KeyCode == Keys.PageUp || e.KeyCode == Keys.PageDown ||
+            e.KeyCode == Keys.Delete || e.KeyCode == Keys.Insert)
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            return;
+        }
+        
+        base.OnKeyDown(e);
+    }
+    
+    protected override void OnKeyPress(KeyPressEventArgs e)
+    {
+        // Pass-through mode: send characters directly to server
+        if (PassThroughMode)
+        {
+            if (!char.IsControl(e.KeyChar))
+            {
+                // Send the character directly
+                OnRawKeyData?.Invoke(new byte[] { (byte)e.KeyChar });
+                e.Handled = true;
+            }
+            return;
+        }
+        
+        // Normal mode: buffer locally
+        
+        // Ignore control characters
+        if (char.IsControl(e.KeyChar) && e.KeyChar != '\r' && e.KeyChar != '\b')
+        {
+            e.Handled = true;
+            return;
+        }
+        
+        // Add printable characters to input buffer
+        if (!char.IsControl(e.KeyChar))
+        {
+            _inputBuffer.Append(e.KeyChar);
+            _cursorVisible = true;
+            Invalidate();
+            e.Handled = true;
+        }
+        
+        base.OnKeyPress(e);
+    }
+    
+    protected override void OnGotFocus(EventArgs e)
+    {
+        base.OnGotFocus(e);
+        _cursorVisible = true;
+        _cursorTimer.Start();
+        Invalidate();
+    }
+    
+    protected override void OnLostFocus(EventArgs e)
+    {
+        base.OnLostFocus(e);
+        _cursorTimer.Stop();
+        _cursorVisible = false;
+        Invalidate();
+    }
+    
+    protected override bool IsInputKey(Keys keyData)
+    {
+        // Allow arrow keys and other navigation to be handled by KeyDown
+        switch (keyData)
+        {
+            case Keys.Up:
+            case Keys.Down:
+            case Keys.Left:
+            case Keys.Right:
+            case Keys.Tab:
+            case Keys.Escape:
+                return true;
+        }
+        return base.IsInputKey(keyData);
+    }
+    
+    /// <summary>
+    /// Convert ConsoleColor to System.Drawing.Color
+    /// </summary>
+    private static Color ConsoleColorToColor(ConsoleColor cc)
+    {
+        return cc switch
+        {
+            ConsoleColor.Black => Color.FromArgb(0, 0, 0),
+            ConsoleColor.DarkBlue => Color.FromArgb(0, 0, 128),
+            ConsoleColor.DarkGreen => Color.FromArgb(0, 128, 0),
+            ConsoleColor.DarkCyan => Color.FromArgb(0, 128, 128),
+            ConsoleColor.DarkRed => Color.FromArgb(128, 0, 0),
+            ConsoleColor.DarkMagenta => Color.FromArgb(128, 0, 128),
+            ConsoleColor.DarkYellow => Color.FromArgb(128, 128, 0),
+            ConsoleColor.Gray => Color.FromArgb(192, 192, 192),
+            ConsoleColor.DarkGray => Color.FromArgb(128, 128, 128),
+            ConsoleColor.Blue => Color.FromArgb(0, 0, 255),
+            ConsoleColor.Green => Color.FromArgb(0, 255, 0),
+            ConsoleColor.Cyan => Color.FromArgb(0, 255, 255),
+            ConsoleColor.Red => Color.FromArgb(255, 0, 0),
+            ConsoleColor.Magenta => Color.FromArgb(255, 0, 255),
+            ConsoleColor.Yellow => Color.FromArgb(255, 255, 0),
+            ConsoleColor.White => Color.FromArgb(255, 255, 255),
+            _ => Color.FromArgb(192, 192, 192)
+        };
+    }
+    
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _cursorTimer?.Stop();
+            _cursorTimer?.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+}
+
+

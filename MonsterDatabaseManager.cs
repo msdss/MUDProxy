@@ -2,16 +2,22 @@ using System.Text.Json;
 
 namespace MudProxyViewer;
 
+/// <summary>
+/// Manages monster data from CSV and per-character overrides.
+/// 
+/// CSV Path (monster_settings.json) - GLOBAL: The path to the monster CSV file is shared across all characters
+/// Monster Overrides - PER-CHARACTER: Stored in CharacterProfile, loaded via LoadOverridesFromProfile()
+/// </summary>
 public class MonsterDatabaseManager
 {
     private List<MonsterData> _monsters = new();
-    private MonsterOverrideDatabase _overrides = new();
+    private readonly List<MonsterOverride> _overrides = new();
     private readonly string _settingsFilePath;
-    private readonly string _overridesFilePath;
     private string _csvFilePath = string.Empty;
     
     public event Action? OnDatabaseLoaded;
     public event Action<string>? OnLogMessage;
+    public event Action? OnDataChanged;  // Fires when overrides change that should trigger a profile save
     
     public MonsterDatabaseManager()
     {
@@ -20,10 +26,8 @@ public class MonsterDatabaseManager
             "MudProxyViewer");
             
         _settingsFilePath = Path.Combine(appDataPath, "monster_settings.json");
-        _overridesFilePath = Path.Combine(appDataPath, "monster_overrides.json");
         
         LoadSettings();
-        LoadOverrides();
         
         // Auto-load if path is set
         if (!string.IsNullOrEmpty(_csvFilePath) && File.Exists(_csvFilePath))
@@ -37,7 +41,7 @@ public class MonsterDatabaseManager
     public string CsvFilePath => _csvFilePath;
     public bool IsLoaded => _monsters.Count > 0;
     
-    #region Settings
+    #region Settings (CSV Path - Global)
     
     private void LoadSettings()
     {
@@ -81,69 +85,57 @@ public class MonsterDatabaseManager
     
     #endregion
     
-    #region Overrides
+    #region Overrides (Per-Character Profile)
     
-    private void LoadOverrides()
+    /// <summary>
+    /// Load overrides from a character profile
+    /// </summary>
+    public void LoadOverridesFromProfile(List<MonsterOverride>? overrides)
     {
-        try
+        _overrides.Clear();
+        if (overrides != null)
         {
-            if (File.Exists(_overridesFilePath))
-            {
-                var json = File.ReadAllText(_overridesFilePath);
-                var overrides = JsonSerializer.Deserialize<MonsterOverrideDatabase>(json);
-                if (overrides != null)
-                {
-                    _overrides = overrides;
-                }
-            }
+            _overrides.AddRange(overrides);
         }
-        catch (Exception ex)
-        {
-            OnLogMessage?.Invoke($"Error loading monster overrides: {ex.Message}");
-        }
-    }
-    
-    private void SaveOverrides()
-    {
-        try
-        {
-            var directory = Path.GetDirectoryName(_overridesFilePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-            
-            var json = JsonSerializer.Serialize(_overrides, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(_overridesFilePath, json);
-        }
-        catch (Exception ex)
-        {
-            OnLogMessage?.Invoke($"Error saving monster overrides: {ex.Message}");
-        }
+        OnLogMessage?.Invoke($"📂 Loaded {_overrides.Count} monster override(s) from profile");
     }
     
     /// <summary>
-    /// Get all monster overrides (for saving to character profile)
+    /// Get all monster overrides for saving to character profile
+    /// </summary>
+    public List<MonsterOverride> GetOverridesForProfile()
+    {
+        return _overrides.ToList();
+    }
+    
+    /// <summary>
+    /// Get all overrides (read-only)
     /// </summary>
     public IReadOnlyList<MonsterOverride> GetAllOverrides()
     {
-        return _overrides.Overrides.AsReadOnly();
+        return _overrides.AsReadOnly();
     }
     
     /// <summary>
-    /// Replace all overrides (for loading from character profile)
+    /// Clear all overrides (when no character is loaded)
     /// </summary>
+    public void ClearOverrides()
+    {
+        _overrides.Clear();
+    }
+    
+    /// <summary>
+    /// Legacy method - calls LoadOverridesFromProfile
+    /// </summary>
+    [Obsolete("Use LoadOverridesFromProfile() instead")]
     public void ReplaceOverrides(List<MonsterOverride> overrides)
     {
-        _overrides.Overrides.Clear();
-        _overrides.Overrides.AddRange(overrides);
-        SaveOverrides();
-        OnLogMessage?.Invoke($"📂 Loaded {overrides.Count} monster override(s) from profile");
+        LoadOverridesFromProfile(overrides);
     }
     
     public MonsterOverride GetOverride(int monsterNumber)
     {
-        var existing = _overrides.Overrides.FirstOrDefault(o => o.MonsterNumber == monsterNumber);
+        var existing = _overrides.FirstOrDefault(o => o.MonsterNumber == monsterNumber);
         if (existing != null)
             return existing;
         
@@ -153,18 +145,18 @@ public class MonsterDatabaseManager
     
     public void SaveOverride(MonsterOverride monsterOverride)
     {
-        var existing = _overrides.Overrides.FirstOrDefault(o => o.MonsterNumber == monsterOverride.MonsterNumber);
+        var existing = _overrides.FirstOrDefault(o => o.MonsterNumber == monsterOverride.MonsterNumber);
         if (existing != null)
         {
-            var index = _overrides.Overrides.IndexOf(existing);
-            _overrides.Overrides[index] = monsterOverride;
+            var index = _overrides.IndexOf(existing);
+            _overrides[index] = monsterOverride;
         }
         else
         {
-            _overrides.Overrides.Add(monsterOverride);
+            _overrides.Add(monsterOverride);
         }
         
-        SaveOverrides();
+        OnDataChanged?.Invoke();  // Trigger profile save
     }
     
     public int GetNextMonsterId()
@@ -174,7 +166,7 @@ public class MonsterDatabaseManager
             maxId = _monsters.Max(m => m.Number);
         
         // Also check overrides for custom monsters
-        var customMaxId = _overrides.Overrides
+        var customMaxId = _overrides
             .Where(o => o.MonsterNumber > 0)
             .Select(o => o.MonsterNumber)
             .DefaultIfEmpty(0)
@@ -314,12 +306,12 @@ public class MonsterDatabaseManager
                         // Auto-set relationship based on alignment (if no override exists yet)
                         // Align: 1=Evil, 2=Chaotic Evil, 5=Neutral Evil, 6=Lawful Evil -> Enemy
                         // Align: 0=Good, 4=Lawful Good -> Friend
-                        var existingOverride = _overrides.Overrides.FirstOrDefault(o => o.MonsterNumber == monster.Number);
+                        var existingOverride = _overrides.FirstOrDefault(o => o.MonsterNumber == monster.Number);
                         if (existingOverride == null)
                         {
                             if (monster.Align == 1 || monster.Align == 2 || monster.Align == 5 || monster.Align == 6)
                             {
-                                _overrides.Overrides.Add(new MonsterOverride
+                                _overrides.Add(new MonsterOverride
                                 {
                                     MonsterNumber = monster.Number,
                                     Relationship = MonsterRelationship.Enemy
@@ -327,7 +319,7 @@ public class MonsterDatabaseManager
                             }
                             else if (monster.Align == 0 || monster.Align == 4)
                             {
-                                _overrides.Overrides.Add(new MonsterOverride
+                                _overrides.Add(new MonsterOverride
                                 {
                                     MonsterNumber = monster.Number,
                                     Relationship = MonsterRelationship.Friend
@@ -343,8 +335,8 @@ public class MonsterDatabaseManager
             }
             
             _csvFilePath = filePath;
-            SaveSettings();
-            SaveOverrides();  // Save default Enemy relationships for hostile monsters
+            SaveSettings();  // Save CSV path (global setting)
+            // Note: Overrides are NOT saved here - they're saved with character profile
             
             OnLogMessage?.Invoke($"📊 Loaded {_monsters.Count} monsters from database");
             OnDatabaseLoaded?.Invoke();

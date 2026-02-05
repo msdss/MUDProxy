@@ -19,6 +19,7 @@ public class BuffManager
     private readonly PlayerDatabaseManager _playerDatabaseManager;
     private readonly MonsterDatabaseManager _monsterDatabaseManager;
     private readonly CombatManager _combatManager;
+    private readonly RemoteCommandManager _remoteCommandManager;
     
     // Events for UI updates
     public event Action? OnBuffsChanged;
@@ -26,6 +27,10 @@ public class BuffManager
     public event Action? OnPlayerInfoChanged;
     public event Action<string>? OnLogMessage;
     public event Action<string>? OnSendCommand; // Event to send commands to the MUD
+    public event Action? OnHangupRequested;  // Remote command requested hangup
+    public event Action? OnRelogRequested;   // Remote command requested relog
+    public event Action? OnAutomationStateChanged;  // Remote command changed automation state
+    public event Action<bool>? OnTrainingScreenChanged;  // true = entered, false = exited
     
     // Casting state
     private bool _castBlockedUntilNextTick = false;
@@ -33,11 +38,13 @@ public class BuffManager
     private int _maxMana = 0;
     private int _currentHp = 0;
     private int _maxHp = 0;
+    private string _manaType = "MA";  // "MA" or "KAI" - detected from HP bar
     private int _manaReservePercent = 20; // Don't cast if mana below this %
     private bool _isResting = false;  // Player is in resting state
     private bool _inCombat = false;   // Player is in combat
     private bool _inTrainingScreen = false;  // Player is in character training screen
     private bool _commandsPaused = false;  // Manual pause for all commands
+    private bool _hasEnteredGame = false;  // True once we've seen the HP bar this session
     
     // Buff state settings (persisted)
     private bool _buffWhileResting = true;
@@ -48,9 +55,13 @@ public class BuffManager
     private bool _combatAutoEnabled = false;
     private bool _autoLoadLastCharacter = false;
     private string _lastCharacterPath = string.Empty;
+    private bool _displaySystemLog = true;  // UI setting: show/hide system log panel
     
     // BBS/Telnet settings (loaded from character profile)
     private BbsSettings _bbsSettings = new();
+    
+    // Experience tracking
+    private readonly ExperienceTracker _experienceTracker = new();
     
     // Par frequency settings (persisted)
     private bool _parAutoEnabled = false;
@@ -70,6 +81,17 @@ public class BuffManager
     private static readonly Regex StatLevelRegex = new(@"Level:\s*(\d+)", RegexOptions.Compiled);
     private static readonly Regex StatHitsRegex = new(@"Hits:\s*(\d+)/(\d+)", RegexOptions.Compiled);
     private static readonly Regex StatManaRegex = new(@"Mana:\s*\*?\s*(\d+)/(\d+)", RegexOptions.Compiled);
+    
+    // Experience parsing
+    // Format: Exp: 13837284996 Level: 72 Exp needed for next level: 898825529 (14736110525) [93%]
+    private static readonly Regex ExpCommandRegex = new(
+        @"Exp:\s*(\d+)\s+Level:\s*(\d+)\s+Exp needed for next level:\s*(\d+)\s+\((\d+)\)\s+\[(\d+)%\]",
+        RegexOptions.Compiled);
+    
+    // Format: You gain 1000 experience.
+    private static readonly Regex ExpGainRegex = new(
+        @"You gain (\d+) experience\.",
+        RegexOptions.Compiled);
     
     private static readonly Regex PartyMemberRegex = new(
         @"^\s{2}(\S.*?)\s+\((\w+)\)\s+(?:\[M:\s*(\d+)%\])?\s*\[H:\s*(\d+)%\]\s*(R?)(P?)\s*-\s*(\w+)",
@@ -169,6 +191,12 @@ public class BuffManager
         set { _lastCharacterPath = value; SaveSettings(); }
     }
     
+    public bool DisplaySystemLog
+    {
+        get => _displaySystemLog;
+        set { _displaySystemLog = value; SaveSettings(); }
+    }
+    
     public bool CombatAutoEnabled
     {
         get => _combatAutoEnabled;
@@ -186,6 +214,11 @@ public class BuffManager
     public bool IsResting => _isResting;
     public bool InCombat => _inCombat;
     public bool InTrainingScreen => _inTrainingScreen;
+    
+    /// <summary>
+    /// Experience tracker for calculating exp/hour and time to level
+    /// </summary>
+    public ExperienceTracker ExperienceTracker => _experienceTracker;
     
     /// <summary>
     /// Manual pause for all automatic commands
@@ -225,6 +258,7 @@ public class BuffManager
     public PlayerDatabaseManager PlayerDatabase => _playerDatabaseManager;
     public MonsterDatabaseManager MonsterDatabase => _monsterDatabaseManager;
     public CombatManager CombatManager => _combatManager;
+    public RemoteCommandManager RemoteCommandManager => _remoteCommandManager;
     public int CurrentHp => _currentHp;
     public int MaxHp => _maxHp;
     public int CurrentMana => _currentMana;
@@ -274,9 +308,11 @@ public class BuffManager
         
         _playerDatabaseManager = new PlayerDatabaseManager();
         _playerDatabaseManager.OnLogMessage += msg => OnLogMessage?.Invoke(msg);
+        _playerDatabaseManager.OnDataChanged += AutoSaveCharacterProfile;
         
         _monsterDatabaseManager = new MonsterDatabaseManager();
         _monsterDatabaseManager.OnLogMessage += msg => OnLogMessage?.Invoke(msg);
+        _monsterDatabaseManager.OnDataChanged += AutoSaveCharacterProfile;
         
         _combatManager = new CombatManager();
         _combatManager.OnLogMessage += msg => OnLogMessage?.Invoke(msg);
@@ -285,6 +321,37 @@ public class BuffManager
             _combatAutoEnabled = _combatManager.CombatEnabled; 
             SaveSettings(); 
         };
+        _combatManager.OnPlayersDetected += CheckAutoInvitePlayers;
+        
+        _remoteCommandManager = new RemoteCommandManager(
+            _playerDatabaseManager,
+            () => _currentHp,
+            () => _maxHp,
+            () => _currentMana,
+            () => _maxMana,
+            () => _manaType,  // Use actual mana type from HP bar (MA or KAI)
+            () => _combatManager.CombatEnabled,
+            enabled => _combatManager.CombatEnabled = enabled,
+            () => _healingManager.HealingEnabled,
+            enabled => _healingManager.HealingEnabled = enabled,
+            () => _cureManager.CuringEnabled,
+            enabled => _cureManager.CuringEnabled = enabled,
+            () => _autoRecastEnabled,
+            enabled => AutoRecastEnabled = enabled,
+            () => _playerInfo.Level,
+            () => _playerInfo.ExperienceNeededForNextLevel,
+            () => _experienceTracker.GetExpPerHour(),
+            () => ExperienceTracker.FormatTimeSpan(
+                _experienceTracker.EstimateTimeToExp(_playerInfo.ExperienceNeededForNextLevel),
+                _playerInfo.ExperienceNeededForNextLevel <= 0),  // "Now!" if already leveled
+            () => _experienceTracker.SessionExpGained,
+            () => _experienceTracker.Reset()
+        );
+        _remoteCommandManager.OnLogMessage += msg => OnLogMessage?.Invoke(msg);
+        _remoteCommandManager.OnSendCommand += cmd => OnSendCommand?.Invoke(cmd);
+        _remoteCommandManager.OnHangupRequested += () => OnHangupRequested?.Invoke();
+        _remoteCommandManager.OnRelogRequested += () => OnRelogRequested?.Invoke();
+        _remoteCommandManager.OnAutomationStateChanged += () => OnAutomationStateChanged?.Invoke();
         
         LoadConfigurations();
         LoadSettings();
@@ -458,6 +525,7 @@ public class BuffManager
                     _combatAutoEnabled = settings.CombatAutoEnabled;
                     _autoLoadLastCharacter = settings.AutoLoadLastCharacter;
                     _lastCharacterPath = settings.LastCharacterPath;
+                    _displaySystemLog = settings.DisplaySystemLog;
                     _combatManager.SetCombatEnabledFromSettings(_combatAutoEnabled);
                 }
             }
@@ -491,7 +559,8 @@ public class BuffManager
                 AutoStartProxy = _autoStartProxy,
                 CombatAutoEnabled = _combatAutoEnabled,
                 AutoLoadLastCharacter = _autoLoadLastCharacter,
-                LastCharacterPath = _lastCharacterPath
+                LastCharacterPath = _lastCharacterPath,
+                DisplaySystemLog = _displaySystemLog
             };
             
             var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions 
@@ -512,13 +581,34 @@ public class BuffManager
     
     public void ProcessMessage(string message)
     {
+        // Check for remote commands first (telepath, say, gangpath)
+        // This processes commands like @health, @invite, @do, etc.
+        _remoteCommandManager.ProcessMessage(message);
+        
+        // Check for party invitations from other players
+        // Format: "PlayerName has invited you to follow him." or "PlayerName has invited you to follow her."
+        CheckPartyInvitation(message);
+        
+        // Check for party membership changes - refresh party list
+        // "You have invited {username} to follow you."
+        // "{username} started to follow you."
+        // "You are now following {username}."
+        if (message.Contains("to follow you.") || 
+            message.Contains("started to follow you.") || 
+            message.Contains("You are now following"))
+        {
+            OnLogMessage?.Invoke("👥 Party membership changed - refreshing party list");
+            OnSendCommand?.Invoke("par");
+        }
+        
         // Check for training/character creation screen
         if (message.Contains("Point Cost Chart"))
         {
             if (!_inTrainingScreen)
             {
                 _inTrainingScreen = true;
-                OnLogMessage?.Invoke("📋 Training screen detected - commands paused");
+                OnLogMessage?.Invoke("📋 Training screen detected - pass-through mode enabled");
+                OnTrainingScreenChanged?.Invoke(true);
             }
         }
         
@@ -526,6 +616,34 @@ public class BuffManager
         if (message.Contains("Name:") && message.Contains("Race:") && message.Contains("Class:"))
         {
             ParseStatOutput(message);
+        }
+        
+        // Check for exp command output
+        // Format: Exp: 13837284996 Level: 72 Exp needed for next level: 898825529 (14736110525) [93%]
+        var expMatch = ExpCommandRegex.Match(message);
+        if (expMatch.Success)
+        {
+            ParseExpCommandOutput(expMatch);
+        }
+        
+        // Check for experience gain
+        // Format: You gain 1000 experience.
+        var expGainMatch = ExpGainRegex.Match(message);
+        if (expGainMatch.Success)
+        {
+            if (long.TryParse(expGainMatch.Groups[1].Value, out long expGained))
+            {
+                _experienceTracker.AddExpGain(expGained);
+                _playerInfo.TotalExperience += expGained;
+                _playerInfo.ExperienceNeededForNextLevel -= expGained;
+                
+                // Check for level up (exp needed went negative or zero)
+                if (_playerInfo.ExperienceNeededForNextLevel <= 0)
+                {
+                    OnLogMessage?.Invoke($"🎉 Level up imminent! Sending exp command to refresh...");
+                    OnSendCommand?.Invoke("exp");
+                }
+            }
         }
         
         // Check for party command output
@@ -569,7 +687,26 @@ public class BuffManager
             if (_inTrainingScreen)
             {
                 _inTrainingScreen = false;
-                OnLogMessage?.Invoke("🎮 Returned to game - commands resumed");
+                OnLogMessage?.Invoke("🎮 Returned to game - pass-through mode disabled");
+                OnTrainingScreenChanged?.Invoke(false);
+            }
+            
+            // First time seeing HP bar this session - send startup commands
+            if (!_hasEnteredGame)
+            {
+                _hasEnteredGame = true;
+                OnLogMessage?.Invoke("🎮 Entered game - sending startup commands");
+                
+                // Small delay between commands to avoid flooding
+                Task.Run(async () =>
+                {
+                    await Task.Delay(500);
+                    OnSendCommand?.Invoke("who");
+                    await Task.Delay(500);
+                    OnSendCommand?.Invoke("stat");
+                    await Task.Delay(500);
+                    OnSendCommand?.Invoke("exp");
+                });
             }
             
             if (int.TryParse(promptMatch.Groups[1].Value, out int hp))
@@ -593,6 +730,13 @@ public class BuffManager
             {
                 _currentMana = mana;
                 _playerInfo.CurrentMana = mana;
+                
+                // Capture the mana type (MA or KAI) from group 3
+                if (promptMatch.Groups[3].Success)
+                {
+                    _manaType = promptMatch.Groups[3].Value.ToUpperInvariant();
+                }
+                
                 // Check for max mana in group 5
                 if (promptMatch.Groups[5].Success && int.TryParse(promptMatch.Groups[5].Value, out int maxMana))
                 {
@@ -843,6 +987,38 @@ public class BuffManager
         OnPlayerInfoChanged?.Invoke();
     }
     
+    /// <summary>
+    /// Parse the exp command output
+    /// Format: Exp: 13837284996 Level: 72 Exp needed for next level: 898825529 (14736110525) [93%]
+    /// </summary>
+    private void ParseExpCommandOutput(Match match)
+    {
+        if (long.TryParse(match.Groups[1].Value, out long totalExp))
+            _playerInfo.TotalExperience = totalExp;
+        
+        if (int.TryParse(match.Groups[2].Value, out int level))
+            _playerInfo.Level = level;
+        
+        if (long.TryParse(match.Groups[3].Value, out long expNeeded))
+            _playerInfo.ExperienceNeededForNextLevel = expNeeded;
+        
+        if (long.TryParse(match.Groups[4].Value, out long totalExpForNext))
+            _playerInfo.TotalExperienceForNextLevel = totalExpForNext;
+        
+        if (int.TryParse(match.Groups[5].Value, out int percent))
+            _playerInfo.LevelProgressPercent = percent;
+        
+        var expPerHour = _experienceTracker.GetExpPerHour();
+        var timeToLevel = _experienceTracker.EstimateTimeToExp(_playerInfo.ExperienceNeededForNextLevel);
+        
+        OnLogMessage?.Invoke($"📊 EXP: Level {_playerInfo.Level} | " +
+            $"Need {ExperienceTracker.FormatNumber(_playerInfo.ExperienceNeededForNextLevel)} | " +
+            $"Rate: {ExperienceTracker.FormatNumber(expPerHour)}/hr | " +
+            $"ETA: {ExperienceTracker.FormatTimeSpan(timeToLevel)}");
+        
+        OnPlayerInfoChanged?.Invoke();
+    }
+    
     private void ParsePartyOutput(string message)
     {
         // Remember previous members and their telepath data
@@ -935,6 +1111,62 @@ public class BuffManager
         _cureManager.UpdatePartyPoisonStatus(_partyMembers);
     }
     
+    // Regex for party invitation: "PlayerName has invited you to follow him." or "her."
+    private static readonly Regex PartyInviteRegex = new(
+        @"(\w+)\s+has invited you to follow (?:him|her)\.",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    
+    /// <summary>
+    /// Check if message contains a party invitation and auto-join if player has that option enabled
+    /// </summary>
+    private void CheckPartyInvitation(string message)
+    {
+        var match = PartyInviteRegex.Match(message);
+        if (!match.Success)
+            return;
+        
+        var inviterName = match.Groups[1].Value;
+        OnLogMessage?.Invoke($"👥 Party invitation received from {inviterName}");
+        
+        // Check if this player is in our database with JoinPartyIfInvited enabled
+        var player = _playerDatabaseManager.GetPlayer(inviterName);
+        if (player != null && player.JoinPartyIfInvited)
+        {
+            OnLogMessage?.Invoke($"👥 Auto-joining {inviterName}'s party");
+            OnSendCommand?.Invoke($"join {inviterName}");
+        }
+    }
+    
+    /// <summary>
+    /// Check "Also here:" content for players that should be auto-invited
+    /// Called from CombatManager when it parses room contents
+    /// </summary>
+    public void CheckAutoInvitePlayers(IEnumerable<string> playersInRoom)
+    {
+        foreach (var playerName in playersInRoom)
+        {
+            // Extract first name (players may be shown as "Name (Class Level)")
+            var firstName = playerName.Split(' ')[0].Trim();
+            if (firstName.Contains("("))
+                firstName = firstName.Split('(')[0].Trim();
+            
+            var player = _playerDatabaseManager.GetPlayer(firstName);
+            if (player != null && player.InviteToPartyIfSeen)
+            {
+                // Check if already in party
+                var inParty = _partyMembers.Any(m => 
+                    m.Name.StartsWith(firstName, StringComparison.OrdinalIgnoreCase));
+                
+                if (!inParty)
+                {
+                    OnLogMessage?.Invoke($"👥 Auto-inviting {firstName} to party (seen in room)");
+                    OnSendCommand?.Invoke($"invite {firstName}");
+                    OnSendCommand?.Invoke($"/{firstName} @join");
+                }
+            }
+        }
+    }
+    
     #endregion
     
     #region Buff Activation/Expiration
@@ -988,6 +1220,21 @@ public class BuffManager
     {
         _activeBuffs.Clear();
         OnBuffsChanged?.Invoke();
+    }
+    
+    /// <summary>
+    /// Called when disconnected from server - resets session state
+    /// </summary>
+    public void OnDisconnected()
+    {
+        _hasEnteredGame = false;
+        _inTrainingScreen = false;
+        _inCombat = false;
+        _isResting = false;
+        _partyMembers.Clear();
+        _experienceTracker.Reset();
+        OnPartyChanged?.Invoke();
+        OnLogMessage?.Invoke("📡 Disconnected - session state reset");
     }
     
     /// <summary>
@@ -1479,6 +1726,21 @@ public class BuffManager
     }
     
     /// <summary>
+    /// Auto-save character profile when data changes (called by manager events)
+    /// </summary>
+    private void AutoSaveCharacterProfile()
+    {
+        if (!string.IsNullOrEmpty(_currentProfilePath))
+        {
+            var (success, message) = SaveCharacterProfile(_currentProfilePath);
+            if (!success)
+            {
+                OnLogMessage?.Invoke($"⚠️ Auto-save failed: {message}");
+            }
+        }
+    }
+    
+    /// <summary>
     /// Save the current character profile to a file
     /// </summary>
     public (bool success, string message) SaveCharacterProfile(string filePath)
@@ -1515,10 +1777,10 @@ public class BuffManager
                 CureSpells = _cureManager.Configuration.CureSpells.Select(c => c.Clone()).ToList(),
                 
                 // Monster Overrides
-                MonsterOverrides = _monsterDatabaseManager.GetAllOverrides().ToList(),
+                MonsterOverrides = _monsterDatabaseManager.GetOverridesForProfile(),
                 
                 // Player Database
-                Players = _playerDatabaseManager.Players.ToList()
+                Players = _playerDatabaseManager.GetPlayersForProfile()
             };
             
             var directory = Path.GetDirectoryName(filePath);
@@ -1564,13 +1826,10 @@ public class BuffManager
             }
             
             // Load Combat Settings
-            if (profile.CombatSettings != null)
+            _combatManager.LoadFromProfile(profile.CombatSettings);
+            if (!string.IsNullOrEmpty(profile.CharacterName))
             {
-                _combatManager.SaveSettings(profile.CombatSettings);
-                if (!string.IsNullOrEmpty(profile.CharacterName))
-                {
-                    _combatManager.CurrentCharacter = profile.CharacterName;
-                }
+                _combatManager.CurrentCharacter = profile.CharacterName;
             }
             
             // Load BBS/Telnet Settings
@@ -1617,16 +1876,10 @@ public class BuffManager
             }
             
             // Load Monster Overrides
-            if (profile.MonsterOverrides != null && profile.MonsterOverrides.Count > 0)
-            {
-                _monsterDatabaseManager.ReplaceOverrides(profile.MonsterOverrides);
-            }
+            _monsterDatabaseManager.LoadOverridesFromProfile(profile.MonsterOverrides);
             
             // Load Player Database
-            if (profile.Players != null && profile.Players.Count > 0)
-            {
-                _playerDatabaseManager.ReplaceDatabase(profile.Players);
-            }
+            _playerDatabaseManager.LoadFromProfile(profile.Players);
             
             // Update player info if provided
             if (!string.IsNullOrEmpty(profile.CharacterName))
