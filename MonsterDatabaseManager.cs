@@ -3,17 +3,16 @@ using System.Text.Json;
 namespace MudProxyViewer;
 
 /// <summary>
-/// Manages monster data from CSV and per-character overrides.
+/// Manages monster data from imported Game Data (Monsters.json) and per-character overrides.
 /// 
-/// CSV Path (monster_settings.json) - GLOBAL: The path to the monster CSV file is shared across all characters
+/// Monster Data - Loaded from Game Data JSON (imported via MDB importer)
 /// Monster Overrides - PER-CHARACTER: Stored in CharacterProfile, loaded via LoadOverridesFromProfile()
 /// </summary>
 public class MonsterDatabaseManager
 {
     private List<MonsterData> _monsters = new();
     private readonly List<MonsterOverride> _overrides = new();
-    private readonly string _settingsFilePath;
-    private string _csvFilePath = string.Empty;
+    private readonly string _gameDataPath;
     
     public event Action? OnDatabaseLoaded;
     public event Action<string>? OnLogMessage;
@@ -21,69 +20,18 @@ public class MonsterDatabaseManager
     
     public MonsterDatabaseManager()
     {
-        var appDataPath = Path.Combine(
+        _gameDataPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "MudProxyViewer");
-            
-        _settingsFilePath = Path.Combine(appDataPath, "monster_settings.json");
+            "MudProxyViewer",
+            "Game Data");
         
-        LoadSettings();
-        
-        // Auto-load if path is set
-        if (!string.IsNullOrEmpty(_csvFilePath) && File.Exists(_csvFilePath))
-        {
-            LoadFromCsv(_csvFilePath);
-        }
+        // Auto-load from Game Data if available
+        LoadFromGameData();
     }
     
     public IReadOnlyList<MonsterData> Monsters => _monsters.AsReadOnly();
     public int MonsterCount => _monsters.Count;
-    public string CsvFilePath => _csvFilePath;
     public bool IsLoaded => _monsters.Count > 0;
-    
-    #region Settings (CSV Path - Global)
-    
-    private void LoadSettings()
-    {
-        try
-        {
-            if (File.Exists(_settingsFilePath))
-            {
-                var json = File.ReadAllText(_settingsFilePath);
-                var settings = JsonSerializer.Deserialize<MonsterDbSettings>(json);
-                if (settings != null)
-                {
-                    _csvFilePath = settings.CsvFilePath ?? string.Empty;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            OnLogMessage?.Invoke($"Error loading monster DB settings: {ex.Message}");
-        }
-    }
-    
-    private void SaveSettings()
-    {
-        try
-        {
-            var directory = Path.GetDirectoryName(_settingsFilePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-            
-            var settings = new MonsterDbSettings { CsvFilePath = _csvFilePath };
-            var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(_settingsFilePath, json);
-        }
-        catch (Exception ex)
-        {
-            OnLogMessage?.Invoke($"Error saving monster DB settings: {ex.Message}");
-        }
-    }
-    
-    #endregion
     
     #region Overrides (Per-Character Profile)
     
@@ -198,88 +146,78 @@ public class MonsterDatabaseManager
     
     #endregion
     
-    #region CSV Loading
+    #region Game Data Loading
     
-    public bool LoadFromCsv(string filePath)
+    /// <summary>
+    /// Load monsters from imported Game Data JSON (Monsters.json).
+    /// Tries GameDataCache first, falls back to reading the file directly.
+    /// </summary>
+    public bool LoadFromGameData()
     {
         try
         {
-            if (!File.Exists(filePath))
-            {
-                OnLogMessage?.Invoke($"Monster CSV not found: {filePath}");
-                return false;
-            }
+            List<Dictionary<string, object?>>? monsterRows = null;
             
-            var lines = File.ReadAllLines(filePath);
-            if (lines.Length < 2)
-            {
-                OnLogMessage?.Invoke("Monster CSV is empty or has no data rows");
-                return false;
-            }
+            // Try cache first
+            monsterRows = GameDataCache.Instance.GetTable("Monsters");
             
-            // Parse header to get column indices
-            var headers = ParseCsvLine(lines[0]);
-            var columnMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-            for (int i = 0; i < headers.Length; i++)
+            // Fall back to reading file directly
+            if (monsterRows == null)
             {
-                columnMap[headers[i]] = i;
-            }
-            
-            // Verify required columns exist
-            var requiredColumns = new[] { "Number", "Name", "HP", "EXP" };
-            foreach (var col in requiredColumns)
-            {
-                if (!columnMap.ContainsKey(col))
+                var filePath = Path.Combine(_gameDataPath, "Monsters.json");
+                if (!File.Exists(filePath))
                 {
-                    OnLogMessage?.Invoke($"Monster CSV missing required column: {col}");
+                    // No data available yet - not an error, just not imported
                     return false;
                 }
+                
+                var json = File.ReadAllText(filePath);
+                monsterRows = ParseJsonArray(json);
             }
+            
+            if (monsterRows == null || monsterRows.Count == 0)
+                return false;
             
             _monsters.Clear();
             
-            // Parse data rows
-            for (int i = 1; i < lines.Length; i++)
+            foreach (var row in monsterRows)
             {
                 try
                 {
-                    var fields = ParseCsvLine(lines[i]);
-                    if (fields.Length < 10) continue;
-                    
                     var monster = new MonsterData
                     {
-                        Number = GetInt(fields, columnMap, "Number"),
-                        Name = GetString(fields, columnMap, "Name"),
-                        ArmourClass = GetInt(fields, columnMap, "ArmourClass"),
-                        DamageResist = GetInt(fields, columnMap, "DamageResist"),
-                        MagicRes = GetInt(fields, columnMap, "MagicRes"),
-                        BSDefense = GetInt(fields, columnMap, "BSDefense"),
-                        EXP = GetInt(fields, columnMap, "EXP"),
-                        HP = GetInt(fields, columnMap, "HP"),
-                        AvgDmg = GetDouble(fields, columnMap, "AvgDmg"),
-                        HPRegen = GetInt(fields, columnMap, "HPRegen"),
-                        Type = GetInt(fields, columnMap, "Type"),
-                        Undead = GetInt(fields, columnMap, "Undead") == 1,
-                        Align = GetInt(fields, columnMap, "Align"),
-                        InGame = GetInt(fields, columnMap, "In Game") == 1,
-                        Energy = GetInt(fields, columnMap, "Energy"),
-                        CharmLVL = GetInt(fields, columnMap, "CharmLVL"),
-                        Weapon = GetInt(fields, columnMap, "Weapon"),
-                        FollowPercent = GetInt(fields, columnMap, "Follow%")
+                        Number = GetInt(row, "Number"),
+                        Name = GetString(row, "Name"),
+                        ArmourClass = GetInt(row, "ArmourClass"),
+                        DamageResist = GetInt(row, "DamageResist"),
+                        MagicRes = GetInt(row, "MagicRes"),
+                        BSDefense = GetInt(row, "BSDefense"),
+                        EXP = GetInt(row, "EXP"),
+                        HP = GetInt(row, "HP"),
+                        AvgDmg = GetDouble(row, "AvgDmg"),
+                        HPRegen = GetInt(row, "HPRegen"),
+                        Type = GetInt(row, "Type"),
+                        Undead = GetInt(row, "Undead") == 1,
+                        Align = GetInt(row, "Align"),
+                        InGame = GetInt(row, "In Game") == 1,
+                        Energy = GetInt(row, "Energy"),
+                        CharmLVL = GetInt(row, "CharmLVL"),
+                        Weapon = GetInt(row, "Weapon"),
+                        FollowPercent = GetInt(row, "Follow%")
                     };
                     
                     // Parse attacks (up to 5)
                     for (int a = 0; a < 5; a++)
                     {
-                        var attackName = GetString(fields, columnMap, $"AttName-{a}");
+                        var attackName = GetString(row, $"AttName-{a}");
                         if (!string.IsNullOrEmpty(attackName) && attackName != "None")
                         {
                             monster.Attacks.Add(new MonsterAttack
                             {
                                 Name = attackName,
-                                Min = GetInt(fields, columnMap, $"AttMin-{a}"),
-                                Max = GetInt(fields, columnMap, $"AttMax-{a}"),
-                                Accuracy = GetInt(fields, columnMap, $"AttAcc-{a}")
+                                Min = GetInt(row, $"AttMin-{a}"),
+                                Max = GetInt(row, $"AttMax-{a}"),
+                                Accuracy = GetInt(row, $"AttAcc-{a}")
                             });
                         }
                     }
@@ -287,8 +225,8 @@ public class MonsterDatabaseManager
                     // Parse drops (up to 10)
                     for (int d = 0; d < 10; d++)
                     {
-                        var itemId = GetInt(fields, columnMap, $"DropItem-{d}");
-                        var dropPercent = GetInt(fields, columnMap, $"DropItem%-{d}");
+                        var itemId = GetInt(row, $"DropItem-{d}");
+                        var dropPercent = GetInt(row, $"DropItem%-{d}");
                         if (itemId > 0)
                         {
                             monster.Drops.Add(new MonsterDrop
@@ -334,69 +272,85 @@ public class MonsterDatabaseManager
                 }
             }
             
-            _csvFilePath = filePath;
-            SaveSettings();  // Save CSV path (global setting)
-            // Note: Overrides are NOT saved here - they're saved with character profile
-            
-            OnLogMessage?.Invoke($"📊 Loaded {_monsters.Count} monsters from database");
+            OnLogMessage?.Invoke($"📊 Loaded {_monsters.Count} monsters from game data");
             OnDatabaseLoaded?.Invoke();
             return true;
         }
         catch (Exception ex)
         {
-            OnLogMessage?.Invoke($"Error loading monster CSV: {ex.Message}");
+            OnLogMessage?.Invoke($"Error loading monster game data: {ex.Message}");
             return false;
         }
     }
     
-    private string[] ParseCsvLine(string line)
+    /// <summary>
+    /// Reload monster data (e.g. after a new MDB import)
+    /// </summary>
+    public void Reload()
     {
-        var result = new List<string>();
-        bool inQuotes = false;
-        var current = new System.Text.StringBuilder();
-        
-        for (int i = 0; i < line.Length; i++)
-        {
-            char c = line[i];
-            
-            if (c == '"')
-            {
-                inQuotes = !inQuotes;
-            }
-            else if (c == ',' && !inQuotes)
-            {
-                result.Add(current.ToString());
-                current.Clear();
-            }
-            else
-            {
-                current.Append(c);
-            }
-        }
-        result.Add(current.ToString());
-        
-        return result.ToArray();
+        LoadFromGameData();
     }
     
-    private string GetString(string[] fields, Dictionary<string, int> columnMap, string column)
+    private static List<Dictionary<string, object?>>? ParseJsonArray(string json)
     {
-        if (columnMap.TryGetValue(column, out int index) && index < fields.Length)
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        
+        if (root.ValueKind != JsonValueKind.Array)
+            return null;
+        
+        var result = new List<Dictionary<string, object?>>();
+        
+        foreach (var row in root.EnumerateArray())
         {
-            return fields[index].Trim();
+            var dict = new Dictionary<string, object?>();
+            foreach (var prop in row.EnumerateObject())
+            {
+                dict[prop.Name] = prop.Value.ValueKind switch
+                {
+                    JsonValueKind.String => prop.Value.GetString(),
+                    JsonValueKind.Number => prop.Value.TryGetInt64(out var l) ? l : prop.Value.GetDecimal(),
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    JsonValueKind.Null => null,
+                    _ => prop.Value.ToString()
+                };
+            }
+            result.Add(dict);
         }
+        
+        return result;
+    }
+    
+    private static string GetString(Dictionary<string, object?> row, string key)
+    {
+        if (row.TryGetValue(key, out var val) && val != null)
+            return val.ToString()?.Trim() ?? string.Empty;
         return string.Empty;
     }
     
-    private int GetInt(string[] fields, Dictionary<string, int> columnMap, string column)
+    private static int GetInt(Dictionary<string, object?> row, string key)
     {
-        var str = GetString(fields, columnMap, column);
-        return int.TryParse(str, out int val) ? val : 0;
+        if (row.TryGetValue(key, out var val) && val != null)
+        {
+            if (val is long l) return (int)l;
+            if (val is int i) return i;
+            if (val is decimal d) return (int)d;
+            if (int.TryParse(val.ToString(), out int parsed)) return parsed;
+        }
+        return 0;
     }
     
-    private double GetDouble(string[] fields, Dictionary<string, int> columnMap, string column)
+    private static double GetDouble(Dictionary<string, object?> row, string key)
     {
-        var str = GetString(fields, columnMap, column);
-        return double.TryParse(str, out double val) ? val : 0;
+        if (row.TryGetValue(key, out var val) && val != null)
+        {
+            if (val is double d) return d;
+            if (val is decimal dec) return (double)dec;
+            if (val is long l) return l;
+            if (double.TryParse(val.ToString(), out double parsed)) return parsed;
+        }
+        return 0;
     }
     
     #endregion
@@ -444,9 +398,4 @@ public class MonsterDatabaseManager
     }
     
     #endregion
-}
-
-public class MonsterDbSettings
-{
-    public string? CsvFilePath { get; set; }
 }

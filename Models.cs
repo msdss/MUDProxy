@@ -560,8 +560,11 @@ public class CharacterProfile
     // Monster overrides (attack priorities, relationships, etc.)
     public List<MonsterOverride> MonsterOverrides { get; set; } = new();
     
-    // Player database (friends, enemies, etc.)
+// Player database (friends, enemies, etc.)
     public List<PlayerData> Players { get; set; } = new();
+    
+    // Window layout (per-character)
+    public WindowSettings? WindowSettings { get; set; }
 }
 
 // Export/Import classes
@@ -795,4 +798,14 @@ public class CombatSettings
 public class CombatSettingsDatabase
 {
     public List<CombatSettings> Characters { get; set; } = new();
+}
+
+/// Window position and size settings, stored per-character profile
+public class WindowSettings
+{
+    public int X { get; set; }
+    public int Y { get; set; }
+    public int Width { get; set; }
+    public int Height { get; set; }
+    public bool IsMaximized { get; set; }
 }

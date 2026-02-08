@@ -42,6 +42,7 @@ public class BuffManager
     private int _manaReservePercent = 20; // Don't cast if mana below this %
     private bool _isResting = false;  // Player is in resting state
     private bool _inCombat = false;   // Player is in combat
+    private bool _isInLoginPhase = true;  // Start true, cleared when HP bar appears
     private bool _inTrainingScreen = false;  // Player is in character training screen
     private bool _commandsPaused = false;  // Manual pause for all commands
     private bool _hasEnteredGame = false;  // True once we've seen the HP bar this session
@@ -59,6 +60,9 @@ public class BuffManager
     
     // BBS/Telnet settings (loaded from character profile)
     private BbsSettings _bbsSettings = new();
+    
+    // Window settings (loaded from character profile)
+    private WindowSettings? _windowSettings;
     
     // Experience tracking
     private readonly ExperienceTracker _experienceTracker = new();
@@ -235,11 +239,17 @@ public class BuffManager
             }
         }
     }
-    
+
+    public bool IsInLoginPhase
+    {
+        get => _isInLoginPhase;
+        set => _isInLoginPhase = value;
+    }
+
     /// <summary>
-    /// Returns true if commands should not be sent (training screen or manually paused)
+    /// Returns true if commands should not be sent (training screen, login, or manually paused)
     /// </summary>
-    public bool ShouldPauseCommands => _inTrainingScreen || _commandsPaused;
+    public bool ShouldPauseCommands => _inTrainingScreen || _commandsPaused || _isInLoginPhase;
     
     /// <summary>
     /// Set the combat state (called from MainForm when combat state changes)
@@ -267,6 +277,13 @@ public class BuffManager
     
     // BBS Settings (loaded from character profile)
     public BbsSettings BbsSettings => _bbsSettings;
+    
+    // Window Settings (loaded from character profile)
+    public WindowSettings? WindowSettings
+    {
+        get => _windowSettings;
+        set => _windowSettings = value;
+    }
     public event Action? OnBbsSettingsChanged;
     
     public BuffManager()
@@ -1780,7 +1797,10 @@ public class BuffManager
                 MonsterOverrides = _monsterDatabaseManager.GetOverridesForProfile(),
                 
                 // Player Database
-                Players = _playerDatabaseManager.GetPlayersForProfile()
+                Players = _playerDatabaseManager.GetPlayersForProfile(),
+                
+                // Window Settings
+                WindowSettings = _windowSettings
             };
             
             var directory = Path.GetDirectoryName(filePath);
@@ -1889,6 +1909,9 @@ public class BuffManager
                 _playerInfo.Level = profile.CharacterLevel;
                 OnPlayerInfoChanged?.Invoke();
             }
+            
+            // Load Window Settings
+            _windowSettings = profile.WindowSettings;
             
             _currentProfilePath = filePath;
             HasUnsavedChanges = false;

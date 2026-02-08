@@ -148,6 +148,7 @@ public partial class MainForm : Form
                 {
                     RefreshPlayerInfo();
                     RefreshBuffDisplay();
+                    ApplyWindowSettings();
                     LogMessage("Character loaded. Click Connect to connect to the server.", MessageType.System);
                 }
                 else
@@ -548,7 +549,8 @@ public partial class MainForm : Form
 
         // Game Data menu
         var gameDataMenu = new ToolStripMenuItem("Game Data") { ForeColor = Color.White };
-        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Races / Classes...", null, OpenRacesClasses_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Races...", null, OpenGameDataRaces_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Classes...", null, OpenGameDataClasses_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Items...", null, OpenGameDataItems_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Spells...", null, OpenGameDataSpells_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Monsters...", null, OpenGameDataMonsters_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
@@ -1711,10 +1713,14 @@ public partial class MainForm : Form
         }
     }
     
-    private void OpenRacesClasses_Click(object? sender, EventArgs e)
+    private void OpenGameDataRaces_Click(object? sender, EventArgs e)
     {
-        using var dialog = new RacesClassesDialog();
-        dialog.ShowDialog(this);
+        OpenGameDataViewer("Races");
+    }
+    
+    private void OpenGameDataClasses_Click(object? sender, EventArgs e)
+    {
+        OpenGameDataViewer("Classes");
     }
     
     private void OpenGameDataItems_Click(object? sender, EventArgs e)
@@ -1729,7 +1735,8 @@ public partial class MainForm : Form
     
     private void OpenGameDataMonsters_Click(object? sender, EventArgs e)
     {
-        OpenGameDataViewer("Monsters");
+        using var dialog = new MonsterDatabaseDialog(_buffManager.MonsterDatabase);
+        dialog.ShowDialog(this);
     }
     
     private void OpenGameDataRooms_Click(object? sender, EventArgs e)
@@ -1997,6 +2004,7 @@ public partial class MainForm : Form
             if (_isInLoginPhase)
             {
                 _isInLoginPhase = false;
+                _buffManager.IsInLoginPhase = false;
                 LogMessage("✅ Login complete - entered game", MessageType.System);
             }
         }
@@ -2929,6 +2937,7 @@ public partial class MainForm : Form
             var (success, message) = _buffManager.LoadCharacterProfile(dialog.FileName);
             if (success)
             {
+                ApplyWindowSettings();
                 MessageBox.Show(message, "Character Loaded", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 UpdateTitle();
             }
@@ -2976,6 +2985,67 @@ public partial class MainForm : Form
         _buffManager.DisplaySystemLog = _displaySystemLog;
     }
 
+/// <summary>
+    /// Apply window position and size from the loaded character profile.
+    /// Validates that the window is visible on at least one screen.
+    /// </summary>
+    private void ApplyWindowSettings()
+    {
+        var ws = _buffManager.WindowSettings;
+        if (ws == null)
+            return;
+        
+        // Validate that the saved position is at least partially visible on a connected screen
+        var savedBounds = new Rectangle(ws.X, ws.Y, ws.Width, ws.Height);
+        bool isOnScreen = false;
+        foreach (var screen in Screen.AllScreens)
+        {
+            if (screen.WorkingArea.IntersectsWith(savedBounds))
+            {
+                isOnScreen = true;
+                break;
+            }
+        }
+        
+        if (isOnScreen && ws.Width > 100 && ws.Height > 100)
+        {
+            this.StartPosition = FormStartPosition.Manual;
+            this.Location = new Point(ws.X, ws.Y);
+            this.Size = new Size(ws.Width, ws.Height);
+            
+            if (ws.IsMaximized)
+            {
+                this.WindowState = FormWindowState.Maximized;
+            }
+        }
+    }
+    
+    /// Capture current window position/size and save to the character profile.
+    /// Saves RestoreBounds when maximized so the normal position is preserved.
+    private void CaptureWindowSettings()
+    {
+        // Only save if a character profile is loaded
+        if (string.IsNullOrEmpty(_buffManager.CurrentProfilePath))
+            return;
+        
+        var isMaximized = this.WindowState == FormWindowState.Maximized;
+        var bounds = isMaximized ? this.RestoreBounds : this.Bounds;
+        
+        _buffManager.WindowSettings = new WindowSettings
+        {
+            X = bounds.X,
+            Y = bounds.Y,
+            Width = bounds.Width,
+            Height = bounds.Height,
+            IsMaximized = isMaximized
+        };
+        
+        // Auto-save the profile so window settings persist
+        if (!string.IsNullOrEmpty(_buffManager.CurrentProfilePath))
+        {
+            _buffManager.SaveCharacterProfile(_buffManager.CurrentProfilePath);
+        }
+    }
     private void SaveCharacter_Click(object? sender, EventArgs e)
     {
         // If we have a current profile path, save to it; otherwise prompt for location
@@ -3089,6 +3159,8 @@ public partial class MainForm : Form
 
     private void MainForm_FormClosing(object? sender, FormClosingEventArgs e)
     {
+        // Save window position/size to character profile
+        CaptureWindowSettings();
         _tickTimer?.Stop();
         _tickTimer?.Dispose();
         _buffUpdateTimer?.Stop();

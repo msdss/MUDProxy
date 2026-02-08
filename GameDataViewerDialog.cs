@@ -13,10 +13,41 @@ public class GameDataViewerDialog : Form
     
     private DataGridView _dataGrid = null!;
     private TextBox _searchBox = null!;
+    private Label _searchLabel = null!;
     private Label _countLabel = null!;
     private Label _loadingLabel = null!;
     private System.Data.DataTable? _dataTable;
     private System.Data.DataView? _dataView;
+    
+    // Column aliases for Races display (maps DataPropertyName -> Header text)
+    private static readonly Dictionary<string, string> RacesColumnAliases = new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "mSTR", "Min STR" }, { "xSTR", "Max STR" },
+        { "mINT", "Min INT" }, { "xINT", "Max INT" },
+        { "mWIL", "Min WIL" }, { "xWIL", "Max WIL" },
+        { "mAGL", "Min AGL" }, { "xAGL", "Max AGL" },
+        { "mHEA", "Min HEA" }, { "xHEA", "Max HEA" },
+        { "mCHM", "Min CHM" }, { "xCHM", "Max CHM" },
+        { "ExpTable", "Exp %" }
+    };
+    
+    // Columns to hide for Races (HPPerLVL + all Abil/AbilVal columns handled separately)
+    private static readonly HashSet<string> RacesHiddenColumns = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "HPPerLVL"
+    };
+    
+    // Columns to show for Classes (only these)
+    private static readonly HashSet<string> ClassesVisibleColumns = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Number", "Name", "ExpTable"
+    };
+    
+    // Tables that don't need a search bar
+    private static readonly HashSet<string> NoSearchBarTables = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Races", "Classes"
+    };
     
     public GameDataViewerDialog(string tableName, string filePath)
     {
@@ -34,15 +65,19 @@ public class GameDataViewerDialog : Form
         this.StartPosition = FormStartPosition.CenterParent;
         this.BackColor = Color.FromArgb(45, 45, 45);
         
+        bool hideSearch = NoSearchBarTables.Contains(_tableName);
+        int gridTop = hideSearch ? 15 : 50;
+        
         // Search label
-        var searchLabel = new Label
+        _searchLabel = new Label
         {
             Text = "Search:",
             Location = new Point(15, 15),
             AutoSize = true,
-            ForeColor = Color.White
+            ForeColor = Color.White,
+            Visible = !hideSearch
         };
-        this.Controls.Add(searchLabel);
+        this.Controls.Add(_searchLabel);
         
         // Search box
         _searchBox = new TextBox
@@ -50,7 +85,8 @@ public class GameDataViewerDialog : Form
             Location = new Point(70, 12),
             Width = 300,
             BackColor = Color.FromArgb(60, 60, 60),
-            ForeColor = Color.White
+            ForeColor = Color.White,
+            Visible = !hideSearch
         };
         _searchBox.TextChanged += SearchBox_TextChanged;
         this.Controls.Add(_searchBox);
@@ -58,9 +94,10 @@ public class GameDataViewerDialog : Form
         // Count label
         _countLabel = new Label
         {
-            Location = new Point(385, 15),
+            Location = new Point(hideSearch ? 15 : 385, 15),
             AutoSize = true,
-            ForeColor = Color.LightGray
+            ForeColor = Color.LightGray,
+            Visible = !hideSearch
         };
         this.Controls.Add(_countLabel);
         
@@ -68,8 +105,8 @@ public class GameDataViewerDialog : Form
         _loadingLabel = new Label
         {
             Text = "Loading data...",
-            Location = new Point(15, 50),
-            Size = new Size(this.ClientSize.Width - 30, this.ClientSize.Height - 110),
+            Location = new Point(15, gridTop),
+            Size = new Size(this.ClientSize.Width - 30, this.ClientSize.Height - gridTop - 60),
             Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
             TextAlign = ContentAlignment.MiddleCenter,
             ForeColor = Color.White,
@@ -78,11 +115,11 @@ public class GameDataViewerDialog : Form
         };
         this.Controls.Add(_loadingLabel);
         
-        // Data grid - positioned below search, above buttons
+        // Data grid
         _dataGrid = new DataGridView
         {
-            Location = new Point(15, 50),
-            Size = new Size(this.ClientSize.Width - 30, this.ClientSize.Height - 110),
+            Location = new Point(15, gridTop),
+            Size = new Size(this.ClientSize.Width - 30, this.ClientSize.Height - gridTop - 60),
             Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
             BackgroundColor = Color.FromArgb(30, 30, 30),
             ForeColor = Color.White,
@@ -103,7 +140,6 @@ public class GameDataViewerDialog : Form
             Visible = false
         };
         
-        // Style the headers
         _dataGrid.ColumnHeadersDefaultCellStyle = new DataGridViewCellStyle
         {
             BackColor = Color.FromArgb(70, 70, 70),
@@ -112,7 +148,6 @@ public class GameDataViewerDialog : Form
             Alignment = DataGridViewContentAlignment.MiddleLeft
         };
         
-        // Style the cells
         _dataGrid.DefaultCellStyle = new DataGridViewCellStyle
         {
             BackColor = Color.FromArgb(35, 35, 35),
@@ -121,7 +156,6 @@ public class GameDataViewerDialog : Form
             SelectionForeColor = Color.White
         };
         
-        // Alternating row style
         _dataGrid.AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle
         {
             BackColor = Color.FromArgb(45, 45, 45),
@@ -130,12 +164,11 @@ public class GameDataViewerDialog : Form
             SelectionForeColor = Color.White
         };
         
-        // Enable sorting by clicking column headers
         _dataGrid.ColumnHeaderMouseClick += DataGrid_ColumnHeaderMouseClick;
+        _dataGrid.CellDoubleClick += DataGrid_CellDoubleClick;
         
         this.Controls.Add(_dataGrid);
         
-        // Close button
         var closeButton = new Button
         {
             Text = "Close",
@@ -150,7 +183,6 @@ public class GameDataViewerDialog : Form
         };
         this.Controls.Add(closeButton);
         
-        // Refresh button
         var refreshButton = new Button
         {
             Text = "Refresh",
@@ -166,8 +198,6 @@ public class GameDataViewerDialog : Form
         this.Controls.Add(refreshButton);
         
         this.AcceptButton = closeButton;
-        
-        // Load data when shown
         this.Shown += async (s, e) => await LoadDataAsync();
     }
     
@@ -180,7 +210,6 @@ public class GameDataViewerDialog : Form
         
         try
         {
-            // Try to get from cache first (faster)
             System.Data.DataTable? dataTable = null;
             var cachedData = GameDataCache.Instance.GetTable(_tableName);
             
@@ -203,62 +232,130 @@ public class GameDataViewerDialog : Form
             _dataTable = dataTable;
             _dataView = new System.Data.DataView(_dataTable);
             
-            // Apply default sort by "Number" column if it exists
             if (_dataTable.Columns.Contains("Number"))
             {
                 _dataView.Sort = "[Number] ASC";
             }
             
-            // Clear existing columns
             _dataGrid.Columns.Clear();
             _dataGrid.DataSource = null;
-            
-            // Bind to grid
             _dataGrid.DataSource = _dataView;
             
-            // Configure columns after binding
+            ConfigureTableColumns();
+            
             foreach (DataGridViewColumn col in _dataGrid.Columns)
             {
+                if (!col.Visible) continue;
+                
                 col.SortMode = DataGridViewColumnSortMode.Programmatic;
                 col.MinimumWidth = 50;
                 
-                // Show sort glyph on Number column if sorted
                 if (col.DataPropertyName == "Number")
                 {
                     col.HeaderCell.SortGlyphDirection = SortOrder.Ascending;
                 }
                 
-                // Auto-size then fix width
                 col.AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
             }
             
-            // Force a refresh to apply auto-sizing
             _dataGrid.AutoResizeColumns(DataGridViewAutoSizeColumnsMode.AllCells);
             
-            // Now fix the widths and set limits
+            bool useNarrowWidths = _tableName == "Races" || _tableName == "Classes";
+            DataGridViewColumn? lastVisibleColumn = null;
+            
             foreach (DataGridViewColumn col in _dataGrid.Columns)
             {
+                if (!col.Visible) continue;
+                
                 int width = col.Width;
                 col.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
-                col.Width = Math.Min(Math.Max(width, 60), 300);
+                
+                if (useNarrowWidths)
+                {
+                    if (col.DataPropertyName == "Name")
+                        col.Width = Math.Max(width - 5, 60);
+                    else
+                        col.Width = Math.Max(Math.Min(width, 80), 50);
+                }
+                else
+                {
+                    col.Width = Math.Min(Math.Max(width, 60), 300);
+                }
+                
+                lastVisibleColumn = col;
+            }
+            
+            if (_tableName == "Classes" && lastVisibleColumn != null)
+            {
+                lastVisibleColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
             }
             
             _loadingLabel.Visible = false;
             _dataGrid.Visible = true;
             _searchBox.Enabled = true;
             UpdateCountLabel();
-            
-            // Debug: Log column info
-            System.Diagnostics.Debug.WriteLine($"Loaded {_dataTable.Columns.Count} columns, {_dataTable.Rows.Count} rows");
-            foreach (System.Data.DataColumn col in _dataTable.Columns)
-            {
-                System.Diagnostics.Debug.WriteLine($"  Column: {col.ColumnName}");
-            }
         }
         catch (Exception ex)
         {
             _loadingLabel.Text = $"Error loading data:\n{ex.Message}";
             _countLabel.Text = "Error";
+        }
+    }
+    
+    private void ConfigureTableColumns()
+    {
+        switch (_tableName)
+        {
+            case "Races":
+                ConfigureRacesColumns();
+                break;
+            case "Classes":
+                ConfigureClassesColumns();
+                break;
+        }
+    }
+    
+    private void ConfigureRacesColumns()
+    {
+        foreach (DataGridViewColumn col in _dataGrid.Columns)
+        {
+            var name = col.DataPropertyName;
+            
+            if (RacesHiddenColumns.Contains(name))
+            {
+                col.Visible = false;
+                continue;
+            }
+            
+            if (AbilityNames.IsAbilityColumn(name))
+            {
+                col.Visible = false;
+                continue;
+            }
+            
+            if (RacesColumnAliases.TryGetValue(name, out var alias))
+            {
+                col.HeaderText = alias;
+            }
+        }
+    }
+    
+    private void ConfigureClassesColumns()
+    {
+        foreach (DataGridViewColumn col in _dataGrid.Columns)
+        {
+            var name = col.DataPropertyName;
+            
+            if (!ClassesVisibleColumns.Contains(name))
+            {
+                col.Visible = false;
+                continue;
+            }
+            
+            if (name == "ExpTable")
+            {
+                col.HeaderText = "Exp %";
+            }
         }
     }
     
@@ -269,14 +366,12 @@ public class GameDataViewerDialog : Form
         
         var dt = new System.Data.DataTable(_tableName);
         
-        // Get columns from first row and detect types
         var firstRow = cachedData[0];
         var columns = firstRow.Keys.ToList();
         var columnTypes = new Dictionary<string, Type>();
         
         foreach (var col in columns)
         {
-            // Detect type from first non-null value
             Type colType = typeof(string);
             var val = firstRow[col];
             if (val != null)
@@ -293,7 +388,6 @@ public class GameDataViewerDialog : Form
             dataCol.Caption = col;
         }
         
-        // Add rows
         foreach (var row in cachedData)
         {
             var values = new object[columns.Count];
@@ -342,7 +436,6 @@ public class GameDataViewerDialog : Form
         
         var dt = new System.Data.DataTable(_tableName);
         
-        // Get columns from first row and detect types
         var firstRow = root[0];
         var columns = new List<string>();
         var columnTypes = new Dictionary<string, Type>();
@@ -351,7 +444,6 @@ public class GameDataViewerDialog : Form
         {
             columns.Add(prop.Name);
             
-            // Detect type from JSON
             Type colType = prop.Value.ValueKind switch
             {
                 JsonValueKind.Number => typeof(decimal),
@@ -364,7 +456,6 @@ public class GameDataViewerDialog : Form
             dataCol.Caption = prop.Name;
         }
         
-        // Add rows
         foreach (var row in root.EnumerateArray())
         {
             var values = new object[columns.Count];
@@ -410,7 +501,6 @@ public class GameDataViewerDialog : Form
         }
         catch { }
         
-        // Fall back to string
         return GetValueAsString(element);
     }
     
@@ -496,5 +586,46 @@ public class GameDataViewerDialog : Form
                 col.HeaderCell.SortGlyphDirection = SortOrder.None;
             }
         }
+    }
+    
+    private void DataGrid_CellDoubleClick(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex < 0 || _dataGrid.SelectedRows.Count == 0)
+            return;
+        
+        var selectedRow = _dataGrid.SelectedRows[0];
+        var dataRowView = selectedRow.DataBoundItem as System.Data.DataRowView;
+        if (dataRowView == null) return;
+        
+        var dataRow = dataRowView.Row;
+        var rowData = new Dictionary<string, object?>();
+        
+        foreach (System.Data.DataColumn col in dataRow.Table.Columns)
+        {
+            var value = dataRow[col];
+            rowData[col.ColumnName] = value == DBNull.Value ? null : value;
+        }
+        
+        Form detailDialog = _tableName switch
+        {
+            "Races" => new RaceDetailDialog(rowData),
+            "Classes" => new ClassDetailDialog(rowData),
+            "Items" => new ItemDetailDialog(rowData),
+            _ => new GenericDetailDialog(rowData, $"{_tableName} Details - {GetRowDisplayName(rowData)}")
+        };
+        
+        using (detailDialog)
+        {
+            detailDialog.ShowDialog(this);
+        }
+    }
+    
+    private static string GetRowDisplayName(Dictionary<string, object?> rowData)
+    {
+        if (rowData.TryGetValue("Name", out var name) && name != null)
+            return name.ToString() ?? "Unknown";
+        if (rowData.TryGetValue("Number", out var number) && number != null)
+            return $"#{number}";
+        return "Unknown";
     }
 }

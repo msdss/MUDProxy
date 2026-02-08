@@ -7,7 +7,6 @@ public class MonsterDatabaseDialog : Form
     private TextBox _searchTextBox = null!;
     private ListView _monsterListView = null!;
     private Label _statusLabel = null!;
-    private Button _loadCsvButton = null!;
     private Button _editButton = null!;
     
     private string _sortColumn = "Name";
@@ -29,7 +28,7 @@ public class MonsterDatabaseDialog : Form
         this.MaximizeBox = false;
         this.BackColor = Color.FromArgb(45, 45, 45);
         
-        // Top panel with search and load button
+        // Top panel with search
         var topPanel = new Panel
         {
             Dock = DockStyle.Top,
@@ -62,19 +61,7 @@ public class MonsterDatabaseDialog : Form
             Location = new Point(340, 14)
         };
         
-        _loadCsvButton = new Button
-        {
-            Text = "Load CSV...",
-            Width = 100,
-            Height = 28,
-            Location = new Point(630, 8),
-            BackColor = Color.FromArgb(60, 60, 60),
-            ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat
-        };
-        _loadCsvButton.Click += LoadCsvButton_Click;
-        
-        topPanel.Controls.AddRange(new Control[] { searchLabel, _searchTextBox, _statusLabel, _loadCsvButton });
+        topPanel.Controls.AddRange(new Control[] { searchLabel, _searchTextBox, _statusLabel });
         
         // Monster list
         _monsterListView = new ListView
@@ -135,16 +122,6 @@ public class MonsterDatabaseDialog : Form
         };
         _editButton.Click += EditButton_Click;
         
-        var pathLabel = new Label
-        {
-            Text = GetPathDisplayText(),
-            ForeColor = Color.Gray,
-            Font = new Font("Segoe UI", 8),
-            AutoSize = true,
-            Location = new Point(190, 15),
-            MaximumSize = new Size(400, 0)
-        };
-        
         var closeButton = new Button
         {
             Text = "Close",
@@ -157,19 +134,12 @@ public class MonsterDatabaseDialog : Form
         };
         closeButton.Click += (s, e) => this.Close();
         
-        bottomPanel.Controls.AddRange(new Control[] { addButton, _editButton, pathLabel, closeButton });
+        bottomPanel.Controls.AddRange(new Control[] { addButton, _editButton, closeButton });
         
         // Add controls
         this.Controls.Add(_monsterListView);
         this.Controls.Add(topPanel);
         this.Controls.Add(bottomPanel);
-    }
-    
-    private string GetPathDisplayText()
-    {
-        if (string.IsNullOrEmpty(_databaseManager.CsvFilePath))
-            return "No CSV loaded";
-        return $"CSV: {_databaseManager.CsvFilePath}";
     }
     
     private void RefreshMonsterList()
@@ -178,7 +148,7 @@ public class MonsterDatabaseDialog : Form
         
         if (!_databaseManager.IsLoaded)
         {
-            _statusLabel.Text = "No data loaded";
+            _statusLabel.Text = "No data loaded - import game database first";
             return;
         }
         
@@ -332,48 +302,6 @@ public class MonsterDatabaseDialog : Form
     private void SearchTextBox_TextChanged(object? sender, EventArgs e)
     {
         RefreshMonsterList();
-    }
-    
-    private void LoadCsvButton_Click(object? sender, EventArgs e)
-    {
-        using var dialog = new OpenFileDialog
-        {
-            Title = "Select Monster CSV File",
-            Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*",
-            FileName = "Monsters.csv"
-        };
-        
-        if (dialog.ShowDialog() == DialogResult.OK)
-        {
-            if (_databaseManager.LoadFromCsv(dialog.FileName))
-            {
-                RefreshMonsterList();
-                
-                // Update path label
-                foreach (Control c in this.Controls)
-                {
-                    if (c is Panel panel && panel.Dock == DockStyle.Bottom)
-                    {
-                        foreach (Control pc in panel.Controls)
-                        {
-                            if (pc is Label label && label.Location.X == 100)
-                            {
-                                label.Text = GetPathDisplayText();
-                                break;
-                            }
-                        }
-                    }
-                }
-                
-                MessageBox.Show($"Loaded {_databaseManager.MonsterCount} monsters.", 
-                    "Load Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            else
-            {
-                MessageBox.Show("Failed to load monster CSV. Check the log for details.",
-                    "Load Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
     }
 }
 
@@ -629,7 +557,7 @@ public class MonsterEditDialog : Form
         else
         {
             // New monster - show placeholder
-            AddLabel(rightPanel, "(No CSV data for custom monsters)", 10, infoY);
+            AddLabel(rightPanel, "(No data for custom monsters)", 10, infoY);
         }
         
         this.Controls.Add(rightPanel);
@@ -742,7 +670,7 @@ public class MonsterEditDialog : Form
         }
         else
         {
-            // Only save custom name if different from CSV name
+            // Only save custom name if different from original name
             var newName = _nameText.Text.Trim();
             _override.CustomName = newName != _monster.Name ? newName : string.Empty;
         }

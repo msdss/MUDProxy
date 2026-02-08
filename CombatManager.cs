@@ -39,6 +39,7 @@ public class CombatManager
     // Regex to match complete "Also here:" with content ending in period
     // Uses Singleline mode so . matches newlines (for wrapped lines)
     private static readonly Regex AlsoHereRegex = new(@"Also here:\s*(.+?)\.", RegexOptions.Compiled | RegexOptions.Singleline);
+    private static readonly Regex EntityEnteredRoomRegex = new(@"in from the (north|south|east|west|northeast|southeast|northwest|southwest|above|below)!", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     
     public event Action<string>? OnLogMessage;
     public event Action<string>? OnSendCommand;
@@ -225,7 +226,7 @@ public class CombatManager
             {
                 ProcessAlsoHere(match.Groups[1].Value);
             }
-            else
+else
             {
                 // Incomplete line - start capturing
                 _capturingAlsoHere = true;
@@ -234,23 +235,15 @@ public class CombatManager
             }
         }
         
-        // Check for enemy killed
-        if (message.Contains(" is DEAD!"))
+        // Check for entity entering the room - refresh room contents to detect new enemies
+        // NOTE: This may false-positive on chat messages containing directional text.
+        // This is harmless (just an extra room refresh). If it becomes a problem,
+        // add chat message filtering here (e.g., exclude lines matching "tells you:", "gossips:", etc.)
+        if (EntityEnteredRoomRegex.IsMatch(message))
         {
-            OnLogMessage?.Invoke($"💀 Enemy killed");
-            // Try to attack next enemy
-            TryInitiateCombat();
-        }
-        
-        // Check for room change (clear enemies)
-        if (message.Contains("Obvious exits:") || message.Contains("You can't go that way"))
-        {
-            // Only clear if we actually moved or tried to move
-            if (!_capturingAlsoHere)  // Don't clear if we're still capturing Also here
-            {
-                _currentRoomEnemies.Clear();
-                _lastProcessedAlsoHere = string.Empty;
-            }
+            _lastProcessedAlsoHere = string.Empty;
+            OnLogMessage?.Invoke("👁️ Something entered the room, refreshing...");
+            OnSendCommand?.Invoke("");
         }
     }
     
@@ -416,14 +409,7 @@ public class CombatManager
     {
         if (!_combatEnabled)
             return;
-        
-        // Don't attack if already in combat
-        if (_isInCombat != null && _isInCombat())
-        {
-            OnLogMessage?.Invoke("⚠️ Already in combat, waiting for tick");
-            return;
-        }
-        
+
         // Don't attack if no character is set (we don't know what settings to use)
         if (string.IsNullOrEmpty(_currentCharacter))
         {
