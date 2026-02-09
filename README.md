@@ -1,4 +1,4 @@
-# MUD Proxy Viewer - AI Knowledge Base
+# MUD Proxy Viewer - Knowledge Base
 
 > **Version:** 1.0.0  
 > **Last Updated:** February 2026  
