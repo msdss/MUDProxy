@@ -511,6 +511,12 @@ public class BbsSettings
     public string RelogCommand { get; set; } = string.Empty;
     public int PvpLevel { get; set; } = 0;
     
+    // Reconnection settings
+    public bool ReconnectOnConnectionFail { get; set; } = true;   // Retry if initial connection fails
+    public bool ReconnectOnConnectionLost { get; set; } = true;   // Retry if established connection is lost
+    public int MaxConnectionAttempts { get; set; } = 0;           // 0 = unlimited, 1-99 = max attempts
+    public int ConnectionRetryPauseSeconds { get; set; } = 5;     // Seconds to wait between retry attempts
+    
     public BbsSettings Clone()
     {
         return new BbsSettings
@@ -520,7 +526,11 @@ public class BbsSettings
             LogonSequences = this.LogonSequences.Select(s => s.Clone()).ToList(),
             LogoffCommand = this.LogoffCommand,
             RelogCommand = this.RelogCommand,
-            PvpLevel = this.PvpLevel
+            PvpLevel = this.PvpLevel,
+            ReconnectOnConnectionFail = this.ReconnectOnConnectionFail,
+            ReconnectOnConnectionLost = this.ReconnectOnConnectionLost,
+            MaxConnectionAttempts = this.MaxConnectionAttempts,
+            ConnectionRetryPauseSeconds = this.ConnectionRetryPauseSeconds
         };
     }
 }

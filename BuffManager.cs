@@ -46,6 +46,8 @@ public class BuffManager
     private bool _inTrainingScreen = false;  // Player is in character training screen
     private bool _commandsPaused = false;  // Manual pause for all commands
     private bool _hasEnteredGame = false;  // True once we've seen the HP bar this session
+    private bool _isInParty = false;  // True when following someone or being followed
+    private bool _requestHealthAfterPartyUpdate = false;  // Request health from all members after next par
     
     // Buff state settings (persisted)
     private bool _buffWhileResting = true;
@@ -113,8 +115,39 @@ public class BuffManager
         @"You have already cast a spell this round!",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
     
+    // Party membership detection
+    // "You are now following {player}." - you joined someone's party
+    // "{player} started to follow you." - someone joined your party
+    // "{player} is no longer following you." - someone left your party  
+    // "{player} has been removed from your followers." - you kicked someone from your party
+    // "You are no longer following {player}." - you left someone's party (now solo)
+    // "Your party has been disbanded." - party ended (everyone left)
+    private static readonly Regex StartedFollowingRegex = new(
+        @"You are now following (\w+)\.",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex SomeoneFollowingYouRegex = new(
+        @"(\w+) started to follow you\.",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex SomeoneLeftPartyRegex = new(
+        @"(\w+) is no longer following you\.",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex SomeoneRemovedFromPartyRegex = new(
+        @"(\w+) has been removed from your followers\.",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex YouLeftPartyRegex = new(
+        @"You are no longer following (\w+)\.",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex PartyDisbandedRegex = new(
+        @"Your party has been disbanded\.",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    
+    // HP bar formats:
+    // Non-mana user: [HP=208]:
+    // Mana user:     [HP=208/MA=30]:
+    // Kai user:      [HP=208/KAI=30]:
+    // With resting:  [HP=208/MA=30]: (Resting)
     private static readonly Regex HpManaPromptRegex = new(
-        @"\[HP=(\d+)(?:/(\d+))?/(MA|KAI)=(\d+)(?:/(\d+))?\]:?\s*(\(Resting\))?",
+        @"\[HP=(\d+)(?:/(MA|KAI)=(\d+))?\]:?\s*(\(Resting\))?",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
     
     // Telepath HP update variations:
@@ -218,6 +251,7 @@ public class BuffManager
     public bool IsResting => _isResting;
     public bool InCombat => _inCombat;
     public bool InTrainingScreen => _inTrainingScreen;
+    public bool IsInParty => _isInParty;
     
     /// <summary>
     /// Experience tracker for calculating exp/hour and time to level
@@ -606,17 +640,8 @@ public class BuffManager
         // Format: "PlayerName has invited you to follow him." or "PlayerName has invited you to follow her."
         CheckPartyInvitation(message);
         
-        // Check for party membership changes - refresh party list
-        // "You have invited {username} to follow you."
-        // "{username} started to follow you."
-        // "You are now following {username}."
-        if (message.Contains("to follow you.") || 
-            message.Contains("started to follow you.") || 
-            message.Contains("You are now following"))
-        {
-            OnLogMessage?.Invoke("👥 Party membership changed - refreshing party list");
-            OnSendCommand?.Invoke("par");
-        }
+        // Check for party membership changes - track _isInParty state
+        CheckPartyMembershipChanges(message);
         
         // Check for training/character creation screen
         if (message.Contains("Point Cost Chart"))
@@ -696,7 +721,8 @@ public class BuffManager
         // Process player database (parse "who" command output)
         _playerDatabaseManager.ProcessMessage(message);
         
-        // Track HP and mana from prompt [HP=X/Y/MA=Z/W]: or [HP=X/MA=Z]:
+        // Track HP and mana from prompt [HP=X]: or [HP=X/MA=Y]: or [HP=X/KAI=Y]:
+        // Note: The HP bar only shows CURRENT values, not max. Max comes from 'stat' command.
         var promptMatch = HpManaPromptRegex.Match(message);
         if (promptMatch.Success)
         {
@@ -726,50 +752,42 @@ public class BuffManager
                 });
             }
             
+            // Group 1: Current HP
             if (int.TryParse(promptMatch.Groups[1].Value, out int hp))
             {
                 _currentHp = hp;
                 _playerInfo.CurrentHp = hp;
-                // Check for max HP in group 2
-                if (promptMatch.Groups[2].Success && int.TryParse(promptMatch.Groups[2].Value, out int maxHp))
-                {
-                    _maxHp = maxHp;
-                    _playerInfo.MaxHp = maxHp;
-                }
-                else if (_currentHp > _maxHp)
+                
+                // If current HP exceeds known max, update max (until stat command provides real value)
+                if (_currentHp > _maxHp)
                 {
                     _maxHp = _currentHp;
                     _playerInfo.MaxHp = _currentHp;
                 }
             }
             
-            if (int.TryParse(promptMatch.Groups[4].Value, out int mana))
+            // Group 2: Mana type (MA or KAI), Group 3: Current Mana
+            if (promptMatch.Groups[2].Success)
             {
-                _currentMana = mana;
-                _playerInfo.CurrentMana = mana;
+                _manaType = promptMatch.Groups[2].Value.ToUpperInvariant();
                 
-                // Capture the mana type (MA or KAI) from group 3
-                if (promptMatch.Groups[3].Success)
+                if (int.TryParse(promptMatch.Groups[3].Value, out int mana))
                 {
-                    _manaType = promptMatch.Groups[3].Value.ToUpperInvariant();
-                }
-                
-                // Check for max mana in group 5
-                if (promptMatch.Groups[5].Success && int.TryParse(promptMatch.Groups[5].Value, out int maxMana))
-                {
-                    _maxMana = maxMana;
-                    _playerInfo.MaxMana = maxMana;
-                }
-                else if (_currentMana > _maxMana)
-                {
-                    _maxMana = _currentMana;
-                    _playerInfo.MaxMana = _currentMana;
+                    _currentMana = mana;
+                    _playerInfo.CurrentMana = mana;
+                    
+                    // If current mana exceeds known max, update max (until stat command provides real value)
+                    if (_currentMana > _maxMana)
+                    {
+                        _maxMana = _currentMana;
+                        _playerInfo.MaxMana = _currentMana;
+                    }
                 }
             }
             
-            // Check for resting state (Group 6 is the optional "(Resting)" capture)
+            // Group 4: (Resting) indicator
             bool wasResting = _isResting;
-            _isResting = promptMatch.Groups[6].Success;
+            _isResting = promptMatch.Groups[4].Success;
             
             if (_isResting != wasResting)
             {
@@ -992,11 +1010,15 @@ public class BuffManager
         {
             _playerInfo.CurrentHp = int.Parse(hitsMatch.Groups[1].Value);
             _playerInfo.MaxHp = int.Parse(hitsMatch.Groups[2].Value);
+            _currentHp = _playerInfo.CurrentHp;
+            _maxHp = _playerInfo.MaxHp;
         }
         if (manaMatch.Success)
         {
             _playerInfo.CurrentMana = int.Parse(manaMatch.Groups[1].Value);
             _playerInfo.MaxMana = int.Parse(manaMatch.Groups[2].Value);
+            _currentMana = _playerInfo.CurrentMana;
+            _maxMana = _playerInfo.MaxMana;
         }
         
         OnLogMessage?.Invoke($"📊 Player detected: {_playerInfo.Name} ({_playerInfo.Class} {_playerInfo.Level})");
@@ -1115,6 +1137,11 @@ public class BuffManager
         var currentMembers = _partyMembers.Select(p => p.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var removedMembers = previousMembers.Keys.Where(name => !currentMembers.Contains(name) && !IsTargetSelf(name)).ToList();
         
+        // Find NEW members who joined the party (not in previous list)
+        var newMembers = _partyMembers
+            .Where(m => !IsTargetSelf(m.Name) && !previousMembers.ContainsKey(m.Name))
+            .ToList();
+        
         // Clear buffs and ailments for removed members
         foreach (var removedName in removedMembers)
         {
@@ -1126,6 +1153,21 @@ public class BuffManager
         
         // Update poison status in CureManager
         _cureManager.UpdatePartyPoisonStatus(_partyMembers);
+        
+        // If we just joined a party, request health from all members
+        if (_requestHealthAfterPartyUpdate)
+        {
+            _requestHealthAfterPartyUpdate = false;
+            RequestHealthFromAllPartyMembers();
+        }
+        // Otherwise, request health from any NEW members we detected
+        else if (newMembers.Count > 0)
+        {
+            foreach (var newMember in newMembers)
+            {
+                RequestHealthFromPlayer(newMember.Name);
+            }
+        }
     }
     
     // Regex for party invitation: "PlayerName has invited you to follow him." or "her."
@@ -1151,6 +1193,98 @@ public class BuffManager
         {
             OnLogMessage?.Invoke($"👥 Auto-joining {inviterName}'s party");
             OnSendCommand?.Invoke($"join {inviterName}");
+        }
+    }
+    
+    /// <summary>
+    /// Check for party join/leave messages and update _isInParty state accordingly.
+    /// Also sends 'par' command when party membership changes to refresh party list.
+    /// </summary>
+    private void CheckPartyMembershipChanges(string message)
+    {
+        // Check if we started following someone (we joined a party)
+        if (StartedFollowingRegex.IsMatch(message))
+        {
+            var match = StartedFollowingRegex.Match(message);
+            var leaderName = match.Groups[1].Value;
+            _isInParty = true;
+            _requestHealthAfterPartyUpdate = true;  // Request health from all members after par populates list
+            OnLogMessage?.Invoke($"👥 Joined party - now following {leaderName}");
+            OnSendCommand?.Invoke("par");
+            return;
+        }
+        
+        // Check if someone started following us (they joined our party)
+        if (SomeoneFollowingYouRegex.IsMatch(message))
+        {
+            var match = SomeoneFollowingYouRegex.Match(message);
+            var followerName = match.Groups[1].Value;
+            var wasInParty = _isInParty;
+            _isInParty = true;
+            
+            if (!wasInParty)
+            {
+                OnLogMessage?.Invoke($"👥 Party formed - {followerName} is now following you");
+            }
+            else
+            {
+                OnLogMessage?.Invoke($"👥 {followerName} joined the party");
+            }
+            OnSendCommand?.Invoke("par");
+            
+            // Request health from the new party member immediately
+            RequestHealthFromPlayer(followerName);
+            return;
+        }
+        
+        // Check if someone left our party (still in party, just fewer members)
+        if (SomeoneLeftPartyRegex.IsMatch(message))
+        {
+            var match = SomeoneLeftPartyRegex.Match(message);
+            var followerName = match.Groups[1].Value;
+            OnLogMessage?.Invoke($"👥 {followerName} left the party");
+            // Still in a party (unless disbanded message follows)
+            OnSendCommand?.Invoke("par");
+            return;
+        }
+        
+        // Check if we kicked someone from our party (still in party, just fewer members)
+        if (SomeoneRemovedFromPartyRegex.IsMatch(message))
+        {
+            var match = SomeoneRemovedFromPartyRegex.Match(message);
+            var followerName = match.Groups[1].Value;
+            OnLogMessage?.Invoke($"👥 {followerName} was removed from the party");
+            // Still in a party (unless disbanded message follows)
+            OnSendCommand?.Invoke("par");
+            return;
+        }
+        
+        // Check if we left someone else's party (now solo)
+        if (YouLeftPartyRegex.IsMatch(message))
+        {
+            var match = YouLeftPartyRegex.Match(message);
+            var leaderName = match.Groups[1].Value;
+            _isInParty = false;
+            _partyMembers.Clear();
+            OnPartyChanged?.Invoke();
+            OnLogMessage?.Invoke($"👤 Left {leaderName}'s party - now solo");
+            return;
+        }
+        
+        // Check if party was disbanded (no longer in a party)
+        if (PartyDisbandedRegex.IsMatch(message))
+        {
+            _isInParty = false;
+            _partyMembers.Clear();
+            OnPartyChanged?.Invoke();
+            OnLogMessage?.Invoke("👤 Party disbanded - now solo");
+            return;
+        }
+        
+        // Legacy detection for "You have invited X to follow you" 
+        if (message.Contains("You have invited") && message.Contains("to follow you"))
+        {
+            OnSendCommand?.Invoke("par");
         }
     }
     
@@ -1248,6 +1382,8 @@ public class BuffManager
         _inTrainingScreen = false;
         _inCombat = false;
         _isResting = false;
+        _isInParty = false;
+        _requestHealthAfterPartyUpdate = false;
         _partyMembers.Clear();
         _experienceTracker.Reset();
         OnPartyChanged?.Invoke();
@@ -1374,10 +1510,12 @@ public class BuffManager
     /// <summary>
     /// Check if it's time to send a 'par' command and send it if so.
     /// Call this periodically (e.g., every second).
+    /// Only sends if we're actually in a party.
     /// </summary>
     public void CheckParCommand()
     {
         if (!_parAutoEnabled) return;
+        if (!_isInParty) return;  // Don't send par if not in a party
         if (ShouldPauseCommands) return;
         
         var timeSinceLastPar = (DateTime.Now - _lastParSent).TotalSeconds;
@@ -1399,9 +1537,9 @@ public class BuffManager
         // Don't send commands if paused
         if (ShouldPauseCommands) return;
         
-        // Send par after combat tick if configured
+        // Send par after combat tick if configured (only if in a party)
         // Check that we haven't sent par in the last 2 seconds to prevent duplicates
-        if (_parAfterCombatTick && _parAutoEnabled)
+        if (_parAfterCombatTick && _parAutoEnabled && _isInParty)
         {
             var timeSinceLastPar = (DateTime.Now - _lastParSent).TotalSeconds;
             if (timeSinceLastPar >= 2.0)
@@ -1447,6 +1585,42 @@ public class BuffManager
                 // Only request from one member per interval to avoid spam
                 return;
             }
+        }
+    }
+    
+    /// <summary>
+    /// Request health data from a specific player immediately.
+    /// Used when joining a party or when a new member joins.
+    /// </summary>
+    private void RequestHealthFromPlayer(string playerName)
+    {
+        if (ShouldPauseCommands) return;
+        if (IsTargetSelf(playerName)) return;
+        
+        var command = $"/{playerName} @health";
+        OnSendCommand?.Invoke(command);
+        OnLogMessage?.Invoke($"📡 Requesting health from {playerName}");
+    }
+    
+    /// <summary>
+    /// Request health data from all current party members.
+    /// Used when joining an existing party.
+    /// </summary>
+    private void RequestHealthFromAllPartyMembers()
+    {
+        if (ShouldPauseCommands) return;
+        
+        foreach (var member in _partyMembers)
+        {
+            if (IsTargetSelf(member.Name)) continue;
+            
+            var command = $"/{member.Name} @health";
+            OnSendCommand?.Invoke(command);
+        }
+        
+        if (_partyMembers.Count(m => !IsTargetSelf(m.Name)) > 0)
+        {
+            OnLogMessage?.Invoke($"📡 Requesting health from all party members");
         }
     }
     

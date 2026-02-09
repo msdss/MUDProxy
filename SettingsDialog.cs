@@ -50,6 +50,10 @@ public class SettingsDialog : Form
     private TextBox _logoffCommandText = null!;
     private TextBox _relogCommandText = null!;
     private NumericUpDown _pvpLevelNum = null!;
+    private CheckBox _reconnectOnFailCheck = null!;
+    private CheckBox _reconnectOnLostCheck = null!;
+    private NumericUpDown _maxConnectionAttemptsNum = null!;
+    private NumericUpDown _connectionRetryPauseNum = null!;
     
     public SettingsDialog(BuffManager buffManager, CombatManager combatManager, string currentCharacter = "")
     {
@@ -1179,7 +1183,7 @@ public class SettingsDialog : Form
         var logonPanel = new Panel
         {
             Location = new Point(10, 95),
-            Size = new Size(535, 200),
+            Size = new Size(535, 185),
             BackColor = Color.FromArgb(40, 40, 40)
         };
         
@@ -1324,6 +1328,69 @@ public class SettingsDialog : Form
         
         tab.Controls.Add(commandsPanel);
         
+        // ── Reconnection Section ──
+        var reconnectPanel = new Panel
+        {
+            Location = new Point(10, 285),
+            Size = new Size(535, 65),
+            BackColor = Color.FromArgb(40, 40, 40)
+        };
+        
+        int ry = 8;
+        AddLabel(reconnectPanel, "── Reconnection ──", 10, ry);
+        ry += 22;
+        
+        _reconnectOnFailCheck = new CheckBox
+        {
+            Text = "Reconnect if connection fails",
+            Location = new Point(10, ry),
+            AutoSize = true,
+            ForeColor = Color.White,
+            Checked = settings.ReconnectOnConnectionFail
+        };
+        reconnectPanel.Controls.Add(_reconnectOnFailCheck);
+        
+        AddLabel(reconnectPanel, "Max attempts:", 270, ry + 2);
+        _maxConnectionAttemptsNum = new NumericUpDown
+        {
+            Location = new Point(355, ry),
+            Width = 50,
+            Minimum = 0,
+            Maximum = 99,
+            Value = settings.MaxConnectionAttempts,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White
+        };
+        reconnectPanel.Controls.Add(_maxConnectionAttemptsNum);
+        AddLabel(reconnectPanel, "(0 = unlimited)", 410, ry + 2);
+        ry += 22;
+        
+        _reconnectOnLostCheck = new CheckBox
+        {
+            Text = "Reconnect if connection lost",
+            Location = new Point(10, ry),
+            AutoSize = true,
+            ForeColor = Color.White,
+            Checked = settings.ReconnectOnConnectionLost
+        };
+        reconnectPanel.Controls.Add(_reconnectOnLostCheck);
+        
+        AddLabel(reconnectPanel, "Retry pause:", 270, ry + 2);
+        _connectionRetryPauseNum = new NumericUpDown
+        {
+            Location = new Point(355, ry),
+            Width = 50,
+            Minimum = 1,
+            Maximum = 300,
+            Value = settings.ConnectionRetryPauseSeconds,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White
+        };
+        reconnectPanel.Controls.Add(_connectionRetryPauseNum);
+        AddLabel(reconnectPanel, "seconds", 410, ry + 2);
+        
+        tab.Controls.Add(reconnectPanel);
+        
         return tab;
     }
     
@@ -1392,7 +1459,11 @@ public class SettingsDialog : Form
             Port = (int)_bbsPortNum.Value,
             LogoffCommand = _logoffCommandText.Text.Trim(),
             RelogCommand = _relogCommandText.Text.Trim(),
-            PvpLevel = (int)_pvpLevelNum.Value
+            PvpLevel = (int)_pvpLevelNum.Value,
+            ReconnectOnConnectionFail = _reconnectOnFailCheck.Checked,
+            ReconnectOnConnectionLost = _reconnectOnLostCheck.Checked,
+            MaxConnectionAttempts = (int)_maxConnectionAttemptsNum.Value,
+            ConnectionRetryPauseSeconds = (int)_connectionRetryPauseNum.Value
         };
         
         // Collect logon sequences from list

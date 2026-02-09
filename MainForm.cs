@@ -24,6 +24,10 @@ public partial class MainForm : Form
     private bool _isInLoginPhase = true;  // True until we see HP bar
     private HashSet<string> _triggeredLogonSequences = new();  // Track which sequences have fired
     
+    // Reconnection state
+    private int _connectionAttemptCount = 0;
+    private bool _userRequestedDisconnect = false;  // True if user clicked Disconnect
+    
     // Terminal input/output state - user types directly after HP prompt like MegaMUD
     private readonly StringBuilder _userInputBuffer = new();      // What user is currently typing
     private readonly StringBuilder _serverOutputBuffer = new();   // Buffered server data while user types
@@ -882,7 +886,7 @@ public partial class MainForm : Form
         _statusLabel = new Label
         {
             Text = "Status: Stopped",
-            ForeColor = Color.Yellow,
+            ForeColor = Color.White,
             AutoSize = true,
             Location = new Point(10, 5)
         };
@@ -891,7 +895,7 @@ public partial class MainForm : Form
         _expStatusLabel = new Label
         {
             Text = "",
-            ForeColor = Color.LightGreen,
+            ForeColor = Color.White,
             AutoSize = true,
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
             TextAlign = ContentAlignment.MiddleRight
@@ -2122,61 +2126,144 @@ public partial class MainForm : Form
     private async void ConnectButton_Click(object? sender, EventArgs e)
     {
         if (!_isConnected)
-            await Connect();
+        {
+            _userRequestedDisconnect = false;
+            _connectionAttemptCount = 0;
+            await ConnectWithRetry(isInitialConnection: true);
+        }
         else
+        {
+            _userRequestedDisconnect = true;
             Disconnect();
+        }
     }
 
-    private async Task Connect()
+    private async Task ConnectWithRetry(bool isInitialConnection)
     {
         // Check if we have BBS settings
         if (string.IsNullOrEmpty(_serverAddress))
         {
-            MessageBox.Show("Please load a character profile with BBS settings first.\n\nUse File → Load Character to load a profile.", 
-                "No Profile Loaded", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            if (isInitialConnection)
+            {
+                LogMessage("Please load a character profile with BBS settings first.", MessageType.System);
+            }
             return;
         }
 
-        _cancellationTokenSource = new CancellationTokenSource();
+        var bbsSettings = _buffManager.BbsSettings;
+        var maxAttempts = bbsSettings.MaxConnectionAttempts;  // 0 = unlimited
+        var retryPauseSeconds = bbsSettings.ConnectionRetryPauseSeconds;
+        var shouldRetry = isInitialConnection 
+            ? bbsSettings.ReconnectOnConnectionFail 
+            : bbsSettings.ReconnectOnConnectionLost;
 
-        try
+        while (!_userRequestedDisconnect)
         {
-            _serverConnection = new TcpClient();
+            _connectionAttemptCount++;
             
-            UpdateStatus("Connecting...", Color.Yellow);
-            LogMessage($"Connecting to {_serverAddress}:{_serverPort}...", MessageType.System);
-            
-            await _serverConnection.ConnectAsync(_serverAddress, _serverPort, _cancellationTokenSource.Token);
-            _serverStream = _serverConnection.GetStream();
-            
-            _isConnected = true;
-            _isInLoginPhase = true;
-            _triggeredLogonSequences.Clear();
-            
-            UpdateConnectionUI(true);
-            LogMessage($"Connected to {_serverAddress}:{_serverPort}", MessageType.System);
-            UpdateStatus("Connected", Color.LimeGreen);
-            
-            // Reset combat state on new connection
-            _buffManager.CombatManager.ResetState();
+            // Check if we've exceeded max attempts (0 = unlimited)
+            if (maxAttempts > 0 && _connectionAttemptCount > maxAttempts)
+            {
+                LogMessage($"Max connection attempts ({maxAttempts}) reached. Giving up.", MessageType.System);
+                UpdateStatus("Connection failed", Color.Red);
+                break;
+            }
 
-            // Start reading from server
-            await ReadServerDataAsync(_cancellationTokenSource.Token);
+            _cancellationTokenSource = new CancellationTokenSource();
+
+            try
+            {
+                _serverConnection = new TcpClient();
+                
+                var attemptText = maxAttempts > 0 
+                    ? $" (attempt {_connectionAttemptCount}/{maxAttempts})"
+                    : _connectionAttemptCount > 1 ? $" (attempt {_connectionAttemptCount})" : "";
+                    
+                UpdateStatus("Connecting...", Color.Yellow);
+                LogMessage($"Connecting to {_serverAddress}:{_serverPort}...{attemptText}", MessageType.System);
+                
+                await _serverConnection.ConnectAsync(_serverAddress, _serverPort, _cancellationTokenSource.Token);
+                _serverStream = _serverConnection.GetStream();
+                
+                _isConnected = true;
+                _isInLoginPhase = true;
+                _connectionAttemptCount = 0;  // Reset on successful connection
+                _triggeredLogonSequences.Clear();
+                
+                UpdateConnectionUI(true);
+                LogMessage($"Connected to {_serverAddress}:{_serverPort}", MessageType.System);
+                UpdateStatus("Connected", Color.White);
+                
+                // Reset combat state on new connection
+                _buffManager.CombatManager.ResetState();
+
+                // Start reading from server - this will return when connection is lost
+                await ReadServerDataAsync(_cancellationTokenSource.Token);
+                
+                // If we get here, connection was lost (not user-initiated disconnect)
+                if (!_userRequestedDisconnect && bbsSettings.ReconnectOnConnectionLost)
+                {
+                    LogMessage("Connection lost. Will attempt to reconnect...", MessageType.System);
+                    CleanupConnection();
+                    _connectionAttemptCount = 0;  // Reset for reconnection attempts
+                    shouldRetry = true;
+                    // Continue the while loop to reconnect
+                }
+                else
+                {
+                    break;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // User cancelled - don't retry
+                break;
+            }
+            catch (Exception ex)
+            {
+                LogMessage($"Connection failed: {ex.Message}", MessageType.System);
+                CleanupConnection();
+                
+                if (!shouldRetry || _userRequestedDisconnect)
+                {
+                    UpdateStatus("Connection failed", Color.Red);
+                    break;
+                }
+                
+                // Wait before retry
+                UpdateStatus($"Retrying in {retryPauseSeconds}s...", Color.Orange);
+                LogMessage($"Waiting {retryPauseSeconds} seconds before retry...", MessageType.System);
+                
+                try
+                {
+                    await Task.Delay(retryPauseSeconds * 1000, _cancellationTokenSource.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+            }
         }
-        catch (OperationCanceledException)
-        {
-            // Normal cancellation
-        }
-        catch (Exception ex)
-        {
-            LogMessage($"Connection failed: {ex.Message}", MessageType.System);
-            MessageBox.Show($"Failed to connect to {_serverAddress}:{_serverPort}.\n\n{ex.Message}",
-                "Connection Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-        finally
+        
+        // Final cleanup
+        if (!_isConnected)
         {
             Disconnect();
         }
+    }
+
+    /// <summary>
+    /// Clean up connection resources without triggering full disconnect logic
+    /// </summary>
+    private void CleanupConnection()
+    {
+        _isConnected = false;
+        
+        try { _serverStream?.Close(); } catch { }
+        try { _serverConnection?.Close(); } catch { }
+        
+        _serverStream = null;
+        _serverConnection = null;
     }
 
     private void Disconnect()

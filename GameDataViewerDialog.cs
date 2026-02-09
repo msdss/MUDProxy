@@ -43,6 +43,12 @@ public class GameDataViewerDialog : Form
         "Number", "Name", "ExpTable"
     };
     
+    // Columns to show for Items (only these)
+    private static readonly HashSet<string> ItemsVisibleColumns = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Number", "Name"
+    };
+    
     // Tables that don't need a search bar
     private static readonly HashSet<string> NoSearchBarTables = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -262,6 +268,7 @@ public class GameDataViewerDialog : Form
             
             bool useNarrowWidths = _tableName == "Races" || _tableName == "Classes";
             DataGridViewColumn? lastVisibleColumn = null;
+            DataGridViewColumn? nameColumn = null;
             
             foreach (DataGridViewColumn col in _dataGrid.Columns)
             {
@@ -270,7 +277,15 @@ public class GameDataViewerDialog : Form
                 int width = col.Width;
                 col.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
                 
-                if (useNarrowWidths)
+                if (_tableName == "Items")
+                {
+                    // For Items: Number gets fixed width, Name fills remaining space
+                    if (col.DataPropertyName == "Number")
+                        col.Width = 80;
+                    else if (col.DataPropertyName == "Name")
+                        nameColumn = col;
+                }
+                else if (useNarrowWidths)
                 {
                     if (col.DataPropertyName == "Name")
                         col.Width = Math.Max(width - 5, 60);
@@ -288,6 +303,11 @@ public class GameDataViewerDialog : Form
             if (_tableName == "Classes" && lastVisibleColumn != null)
             {
                 lastVisibleColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            }
+            
+            if (_tableName == "Items" && nameColumn != null)
+            {
+                nameColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
             }
             
             _loadingLabel.Visible = false;
@@ -311,6 +331,9 @@ public class GameDataViewerDialog : Form
                 break;
             case "Classes":
                 ConfigureClassesColumns();
+                break;
+            case "Items":
+                ConfigureItemsColumns();
                 break;
         }
     }
@@ -355,6 +378,19 @@ public class GameDataViewerDialog : Form
             if (name == "ExpTable")
             {
                 col.HeaderText = "Exp %";
+            }
+        }
+    }
+    
+    private void ConfigureItemsColumns()
+    {
+        foreach (DataGridViewColumn col in _dataGrid.Columns)
+        {
+            var name = col.DataPropertyName;
+            
+            if (!ItemsVisibleColumns.Contains(name))
+            {
+                col.Visible = false;
             }
         }
     }
@@ -611,6 +647,11 @@ public class GameDataViewerDialog : Form
             "Races" => new RaceDetailDialog(rowData),
             "Classes" => new ClassDetailDialog(rowData),
             "Items" => new ItemDetailDialog(rowData),
+            "Spells" => new SpellDetailDialog(rowData),
+            "Rooms" => new RoomDetailDialog(rowData),
+            "Shops" => new ShopDetailDialog(rowData),
+            "Lairs" => new LairDetailDialog(rowData),
+            "TextBlocks" => new TextBlockDetailDialog(rowData),
             _ => new GenericDetailDialog(rowData, $"{_tableName} Details - {GetRowDisplayName(rowData)}")
         };
         
