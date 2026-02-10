@@ -95,12 +95,13 @@ public class BuffManager
         RegexOptions.Compiled);
     
     // Format: You gain 1000 experience.
+    // May be prefixed with HP bar like [HP=325/MA=47]:You gain 1000 experience.
     private static readonly Regex ExpGainRegex = new(
-        @"You gain (\d+) experience\.",
+        @"You gain (\d[\d,]*) experience\.",
         RegexOptions.Compiled);
     
     private static readonly Regex PartyMemberRegex = new(
-        @"^\s{2}(\S.*?)\s+\((\w+)\)\s+(?:\[M:\s*(\d+)%\])?\s*\[H:\s*(\d+)%\]\s*(R?)(P?)\s*-\s*(\w+)",
+        @"^\s{2}(\S.*?)\s+\((\w+)\)\s+(?:\[M:\s*(\d+)%\])?\s*\[H:\s*(\d+)%\]\s*([RPM]?)\s*-\s*(\w+)",
         RegexOptions.Compiled | RegexOptions.Multiline);
     
     private static readonly Regex CastFailRegex = new(
@@ -678,6 +679,8 @@ public class BuffManager
                 _experienceTracker.AddExpGain(expGained);
                 _playerInfo.TotalExperience += expGained;
                 _playerInfo.ExperienceNeededForNextLevel -= expGained;
+                // Debug system log message to track exp gains and leveling progress.
+                OnLogMessage?.Invoke($"📈 EXP gained: {expGained} | Session total: {_experienceTracker.SessionExpGained} | Rate: {_experienceTracker.GetExpPerHour()}/hr");
                 
                 // Check for level up (exp needed went negative or zero)
                 if (_playerInfo.ExperienceNeededForNextLevel <= 0)
@@ -1088,8 +1091,11 @@ public class BuffManager
             }
             addedNames.Add(firstName);
             
-            var isResting = match.Groups[5].Value == "R";
-            var isPoisoned = match.Groups[6].Value == "P";
+            // Group 5 captures the single status indicator: R (resting), P (poisoned), M (meditating), or empty
+            var indicator = match.Groups[5].Value;
+            var isResting = indicator == "R";
+            var isPoisoned = indicator == "P";
+            var isMeditating = indicator == "M";
             
             var member = new PartyMember
             {
@@ -1100,7 +1106,8 @@ public class BuffManager
                 HealthPercent = int.TryParse(match.Groups[4].Value, out int h) ? h : 0,
                 IsResting = isResting,
                 IsPoisoned = isPoisoned,
-                Rank = match.Groups[7].Value
+                IsMeditating = isMeditating,
+                Rank = match.Groups[6].Value  // Was Groups[7], now Groups[6] after regex change
             };
             
             // Preserve telepath data if we had it before (MaxHp, MaxMana, ResourceType)
@@ -1127,8 +1134,9 @@ public class BuffManager
             
             var restingIndicator = isResting ? " 💤" : "";
             var poisonIndicator = isPoisoned ? " ☠️" : "";
+            var meditatingIndicator = isMeditating ? " 🧘" : "";
             var manaDisplay = member.ManaPercent > 0 ? $" M:{member.ManaPercent}%" : "";
-            OnLogMessage?.Invoke($"  👤 {member.Name} ({member.Class}) H:{member.HealthPercent}%{manaDisplay}{restingIndicator}{poisonIndicator} - {member.Rank}");
+            OnLogMessage?.Invoke($"  👤 {member.Name} ({member.Class}) H:{member.HealthPercent}%{manaDisplay}{restingIndicator}{poisonIndicator}{meditatingIndicator} - {member.Rank}");
         }
         
         OnLogMessage?.Invoke($"👥 Party updated: {_partyMembers.Count} members detected");
@@ -1158,15 +1166,7 @@ public class BuffManager
         if (_requestHealthAfterPartyUpdate)
         {
             _requestHealthAfterPartyUpdate = false;
-            RequestHealthFromAllPartyMembers();
-        }
-        // Otherwise, request health from any NEW members we detected
-        else if (newMembers.Count > 0)
-        {
-            foreach (var newMember in newMembers)
-            {
-                RequestHealthFromPlayer(newMember.Name);
-            }
+            RequestPartyMemberHealth();
         }
     }
     
@@ -1624,6 +1624,17 @@ public class BuffManager
         }
     }
     
+    private void RequestPartyMemberHealth()
+    {
+        foreach (var member in _partyMembers)
+        {
+            if (!IsTargetSelf(member.Name))
+            {
+                RequestHealthFromPlayer(member.Name);
+            }
+        }
+    }
+
     private bool TryCastByPriority(CastPriorityType priorityType)
     {
         switch (priorityType)

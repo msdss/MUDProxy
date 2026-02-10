@@ -88,6 +88,7 @@ public class PartyMember
     public string Rank { get; set; } = string.Empty; // Frontrank or Backrank
     public bool IsResting { get; set; } = false;
     public bool IsPoisoned { get; set; } = false;
+    public bool IsMeditating { get; set; } = false;
     
     // Actual HP/Mana values from telepath messages
     public int CurrentHp { get; set; } = 0;

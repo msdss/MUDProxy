@@ -25,6 +25,9 @@ public class TelnetConnection
     private int _connectionAttemptCount = 0;
     private bool _userRequestedDisconnect = false;
     
+    // Track if we've already fired disconnect event to prevent duplicates
+    private bool _disconnectEventFired = false;
+    
     /// <summary>
     /// Connect to the MUD server with automatic reconnection
     /// </summary>
@@ -47,7 +50,7 @@ public class TelnetConnection
                 if (maxAttempts > 0 && _connectionAttemptCount > maxAttempts)
                 {
                     OnLogMessage?.Invoke($"Maximum connection attempts ({maxAttempts}) reached.");
-                    OnStatusChanged?.Invoke(false, "Max attempts reached");
+                    FireDisconnectEvent("Max attempts reached");
                     break;
                 }
                 
@@ -71,6 +74,7 @@ public class TelnetConnection
                 await _tcpClient.ConnectAsync(address, port);
                 _stream = _tcpClient.GetStream();
                 _isConnected = true;
+                _disconnectEventFired = false;  // Reset - we're connected now
                 
                 OnLogMessage?.Invoke($"✓ Connected to {address}:{port}");
                 OnStatusChanged?.Invoke(true, "Connected");
@@ -83,6 +87,7 @@ public class TelnetConnection
                 {
                     OnLogMessage?.Invoke("Connection lost. Will attempt to reconnect...");
                     CleanupConnection();
+                    FireDisconnectEvent("Connection lost");
                     _connectionAttemptCount = 0;  // Reset for reconnection attempts
                     shouldRetry = true;
                     // Continue the while loop to reconnect
@@ -104,7 +109,7 @@ public class TelnetConnection
                 
                 if (!shouldRetry || _userRequestedDisconnect)
                 {
-                    OnStatusChanged?.Invoke(false, "Connection failed");
+                    FireDisconnectEvent("Connection failed");
                     break;
                 }
                 
@@ -123,11 +128,21 @@ public class TelnetConnection
             }
         }
         
-        // Final cleanup
-        if (!_isConnected)
-        {
-            Disconnect();
-        }
+        // Final cleanup - only fire disconnect if we haven't already
+        CleanupConnection();
+        FireDisconnectEvent("Disconnected");
+    }
+    
+    /// <summary>
+    /// Fire disconnect event only once per connection cycle
+    /// </summary>
+    private void FireDisconnectEvent(string statusMessage)
+    {
+        if (_disconnectEventFired) return;
+        
+        _disconnectEventFired = true;
+        _isConnected = false;
+        OnStatusChanged?.Invoke(false, statusMessage);
     }
     
     /// <summary>
@@ -136,13 +151,16 @@ public class TelnetConnection
     public void Disconnect()
     {
         _userRequestedDisconnect = true;
-        _isConnected = false;
         _cancellationTokenSource?.Cancel();
         
         CleanupConnection();
         
-        OnLogMessage?.Invoke("Disconnected.");
-        OnStatusChanged?.Invoke(false, "Disconnected");
+        // Only log and fire event if we haven't already
+        if (!_disconnectEventFired)
+        {
+            OnLogMessage?.Invoke("Disconnected.");
+            FireDisconnectEvent("Disconnected");
+        }
     }
     
     /// <summary>
@@ -185,7 +203,7 @@ public class TelnetConnection
     }
     
     /// <summary>
-    /// Clean up connection resources
+    /// Clean up connection resources (does NOT fire events)
     /// </summary>
     private void CleanupConnection()
     {

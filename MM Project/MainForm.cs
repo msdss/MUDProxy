@@ -177,8 +177,10 @@ public partial class MainForm : Form
         
         if (connected)
         {
+            _isInLoginPhase = true;  // Reset login phase - wait for login sequence to complete
+            _messageRouter.ResetLoginPhase();  // Reset the message router's login tracking too
             UpdateConnectionUI(true);
-            UpdateStatus("Connected", Color.LimeGreen);
+            UpdateStatus("Connected", Color.White);
             // Connection established - managers will be notified via message processing
         }
         else
@@ -204,19 +206,28 @@ public partial class MainForm : Form
         SetCombatState(inCombat);
     }
     
-    private void MessageRouter_OnPlayerStatsUpdated(int currentHp, int maxHp, int currentMana, int maxMana, string manaType)
+    private void MessageRouter_OnPlayerStatsUpdated(int currentHp, int currentMana, string manaType)
     {
         if (InvokeRequired)
         {
-            BeginInvoke(() => MessageRouter_OnPlayerStatsUpdated(currentHp, maxHp, currentMana, maxMana, manaType));
+            BeginInvoke(() => MessageRouter_OnPlayerStatsUpdated(currentHp, currentMana, manaType));
             return;
         }
         
+        // Update current values only - max values come from BuffManager (set by stat command)
         _currentHp = currentHp;
-        _maxHp = maxHp;
         _currentMana = currentMana;
-        _maxMana = maxMana;
         _manaType = manaType;
+        
+        // Get max values from BuffManager (set by stat command parsing)
+        if (_buffManager.MaxHp > 0)
+        {
+            _maxHp = _buffManager.MaxHp;
+        }
+        if (_buffManager.MaxMana > 0)
+        {
+            _maxMana = _buffManager.MaxMana;
+        }
         
         // Update the self status panel
         var info = _buffManager.PlayerInfo;
@@ -242,6 +253,7 @@ public partial class MainForm : Form
     
     private void MessageRouter_OnLoginComplete()
     {
+        _isInLoginPhase = false;
         LogMessage("✅ Login complete - entered game", MessageType.System);
     }
     

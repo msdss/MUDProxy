@@ -10,7 +10,7 @@ public class MessageRouter
 {
     // Events to notify MainForm of state changes
     public event Action<bool>? OnCombatStateChanged;           // true = in combat, false = idle
-    public event Action<int, int, int, int, string>? OnPlayerStatsUpdated;  // HP, maxHP, Mana, maxMana, manaType
+    public event Action<int, int, string>? OnPlayerStatsUpdated;  // currentHP, currentMana, manaType
     public event Action? OnCombatTickDetected;                  // Combat tick happened
     public event Action? OnPlayerDeath;                         // Player died
     public event Action? OnLoginComplete;                       // HP bar detected = login complete
@@ -124,39 +124,21 @@ public class MessageRouter
     private void ParsePlayerStats(Match match)
     {
         int currentHp = 0;
-        int maxHp = 0;
         int currentMana = 0;
-        int maxMana = 0;
         string manaType = "MA";
         
         if (int.TryParse(match.Groups[1].Value, out int hp))
         {
             currentHp = hp;
-            if (match.Groups[2].Success && int.TryParse(match.Groups[2].Value, out int max))
-            {
-                maxHp = max;
-            }
-            else
-            {
-                maxHp = currentHp;  // Use current as max if max not provided
-            }
         }
         
         manaType = match.Groups[3].Value;
         if (int.TryParse(match.Groups[4].Value, out int mana))
         {
             currentMana = mana;
-            if (match.Groups[5].Success && int.TryParse(match.Groups[5].Value, out int max))
-            {
-                maxMana = max;
-            }
-            else
-            {
-                maxMana = currentMana;  // Use current as max if max not provided
-            }
         }
         
-        OnPlayerStatsUpdated?.Invoke(currentHp, maxHp, currentMana, maxMana, manaType);
+        OnPlayerStatsUpdated?.Invoke(currentHp, currentMana, manaType);
     }
     
     /// <summary>
