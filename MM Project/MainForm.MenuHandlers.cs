@@ -568,6 +568,7 @@ public partial class MainForm
             // Clear and reload the cache with new data
             GameDataCache.Instance.ClearCache();
             GameDataCache.Instance.StartPreload();
+            _buffManager.RoomGraph.Reload();
         }
     }
     
@@ -615,6 +616,12 @@ public partial class MainForm
     private void OpenGameDataTextBlocks_Click(object? sender, EventArgs e)
     {
         OpenGameDataViewer("TextBlocks");
+    }
+
+    private void OpenPathfindingTest_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new PathfindingTestDialog(_buffManager.RoomGraph);
+        dialog.ShowDialog(this);
     }
     
     private void SetParFrequency_Click(object? sender, EventArgs e)

@@ -20,6 +20,7 @@ public class BuffManager
     private readonly MonsterDatabaseManager _monsterDatabaseManager;
     private readonly CombatManager _combatManager;
     private readonly RemoteCommandManager _remoteCommandManager;
+    private readonly RoomGraphManager _roomGraphManager;
     
     // Events for UI updates
     public event Action? OnBuffsChanged;
@@ -304,6 +305,7 @@ public class BuffManager
     public MonsterDatabaseManager MonsterDatabase => _monsterDatabaseManager;
     public CombatManager CombatManager => _combatManager;
     public RemoteCommandManager RemoteCommandManager => _remoteCommandManager;
+    public RoomGraphManager RoomGraph => _roomGraphManager;
     public int CurrentHp => _currentHp;
     public int MaxHp => _maxHp;
     public int CurrentMana => _currentMana;
@@ -404,6 +406,10 @@ public class BuffManager
         _remoteCommandManager.OnHangupRequested += () => OnHangupRequested?.Invoke();
         _remoteCommandManager.OnRelogRequested += () => OnRelogRequested?.Invoke();
         _remoteCommandManager.OnAutomationStateChanged += () => OnAutomationStateChanged?.Invoke();
+        
+        _roomGraphManager = new RoomGraphManager();
+        _roomGraphManager.OnLogMessage += msg => OnLogMessage?.Invoke(msg);
+        _roomGraphManager.LoadFromGameData();
         
         LoadConfigurations();
         LoadSettings();

@@ -592,6 +592,7 @@ public partial class MainForm : Form
         gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Shops...", null, OpenGameDataShops_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Lairs...", null, OpenGameDataLairs_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Text Blocks...", null, OpenGameDataTextBlocks_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Pathfinding Test...", null, OpenPathfindingTest_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         gameDataMenu.DropDownItems.Add(new ToolStripSeparator());
         gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Player DB...", null, OpenPlayerDB_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
 
