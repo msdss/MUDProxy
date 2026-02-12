@@ -594,7 +594,6 @@ public partial class MainForm : Form
         gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Text Blocks...", null, OpenGameDataTextBlocks_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         gameDataMenu.DropDownItems.Add(new ToolStripSeparator());
         gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Player DB...", null, OpenPlayerDB_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
-        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Monster DB (Deprecated)...", null, OpenMonsterDB_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
 
         var helpMenu = new ToolStripMenuItem("Help") { ForeColor = Color.White };
         helpMenu.DropDownItems.Add(new ToolStripMenuItem("About", null, About_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });

@@ -536,12 +536,6 @@ public partial class MainForm
         dialog.ShowDialog(this);
     }
     
-    private void OpenMonsterDB_Click(object? sender, EventArgs e)
-    {
-        using var dialog = new MonsterDatabaseDialog(_buffManager.MonsterDatabase);
-        dialog.ShowDialog(this);
-    }
-    
     private void ImportGameDatabase_Click(object? sender, EventArgs e)
     {
         // Check if ACE is installed first
