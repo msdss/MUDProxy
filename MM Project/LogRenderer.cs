@@ -165,6 +165,7 @@ public class LogRenderer
             MessageType.Server => Color.FromArgb(0, 255, 0),
             MessageType.Client => Color.FromArgb(0, 191, 255),
             MessageType.System => Color.FromArgb(255, 204, 0),
+            MessageType.RoomTracker => Color.FromArgb(0, 210, 180),
             _ => Color.White
         };
 

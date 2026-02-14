@@ -179,6 +179,7 @@ public partial class MainForm : Form
         {
             _isInLoginPhase = true;  // Reset login phase - wait for login sequence to complete
             _messageRouter.ResetLoginPhase();  // Reset the message router's login tracking too
+            _triggeredLogonSequences.Clear();  // Reset so logon automation triggers again on reconnect
             UpdateConnectionUI(true);
             UpdateStatus("Connected", Color.White);
             // Connection established - managers will be notified via message processing
@@ -277,6 +278,8 @@ public partial class MainForm : Form
                 {
                     RefreshPlayerInfo();
                     RefreshBuffDisplay();
+                    UpdateToggleButtonStates();
+                    LogMessage($"DEBUG: CombatEnabled={_buffManager.CombatManager.CombatEnabled}, CombatAutoEnabled={_buffManager.CombatAutoEnabled}", MessageType.System);
                     ApplyWindowSettings();
                     LogMessage("Character loaded. Click Connect to connect to the server.", MessageType.System);
                 }
@@ -344,6 +347,7 @@ public partial class MainForm : Form
         _buffManager.OnPlayerInfoChanged += () => BeginInvoke(RefreshPlayerInfo);
         _buffManager.OnBbsSettingsChanged += () => BeginInvoke(RefreshBbsSettingsDisplay);
         _buffManager.OnLogMessage += (msg) => LogMessage(msg, MessageType.System);
+        _buffManager.OnRoomTrackerLogMessage += (msg) => LogMessage(msg, MessageType.RoomTracker);
         _buffManager.OnSendCommand += SendCommandToServer;
         _buffManager.OnHangupRequested += () => BeginInvoke(HandleRemoteHangup);
         _buffManager.OnRelogRequested += () => BeginInvoke(HandleRemoteRelog);
@@ -408,6 +412,9 @@ public partial class MainForm : Form
     /// </summary>
     private void TerminalControl_CommandEntered(string command)
     {
+        // Notify room tracker of outgoing command (must be BEFORE send, so tracker
+        // knows the direction before the server's room response arrives)
+        _buffManager.TrackOutgoingCommand(command);
         // Send command to server
         SendCommandToServer(command);
         
@@ -532,6 +539,7 @@ public partial class MainForm : Form
         menuStrip.Renderer = new DarkMenuRenderer();
 
         var fileMenu = new ToolStripMenuItem("File") { ForeColor = Color.White };
+        fileMenu.DropDownItems.Add(new ToolStripMenuItem("New Character", null, NewCharacter_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("Load Character...", null, LoadCharacter_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("Save Character", null, SaveCharacter_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("Save Character As...", null, SaveCharacterAs_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
@@ -592,6 +600,7 @@ public partial class MainForm : Form
         gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Shops...", null, OpenGameDataShops_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Lairs...", null, OpenGameDataLairs_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Text Blocks...", null, OpenGameDataTextBlocks_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Pathfinding Test...", null, OpenPathfindingTest_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         gameDataMenu.DropDownItems.Add(new ToolStripSeparator());
         gameDataMenu.DropDownItems.Add(new ToolStripMenuItem("Player DB...", null, OpenPlayerDB_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
 

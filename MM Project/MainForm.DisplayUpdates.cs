@@ -208,16 +208,20 @@ public partial class MainForm
         var disabledColor = Color.FromArgb(60, 60, 60);   // Gray when disabled
         var pausedColor = Color.FromArgb(180, 100, 50);   // Orange when paused
         
-        // Pause button shows orange when paused or when in training screen
-        if (_buffManager.ShouldPauseCommands)
+        // Auto-all button: blue when all automation is on, grey with play icon when off
+        bool anyAutomationOn = _buffManager.CombatManager.CombatEnabled ||
+                               _buffManager.HealingManager.HealingEnabled ||
+                               _buffManager.AutoRecastEnabled ||
+                               _buffManager.CureManager.CuringEnabled;
+        if (anyAutomationOn)
         {
-            _pauseButton.BackColor = pausedColor;
-            _pauseButton.Text = ">";  // Play icon to indicate "click to resume"
+            _pauseButton.BackColor = enabledColor;
+            _pauseButton.Text = "||";  // Pause icon to indicate "click to turn all off"
         }
         else
         {
             _pauseButton.BackColor = disabledColor;
-            _pauseButton.Text = "||";  // Pause icon to indicate "click to pause"
+            _pauseButton.Text = ">";  // Play icon to indicate "click to turn all on"
         }
         
         _combatToggleButton.BackColor = _buffManager.CombatManager.CombatEnabled ? enabledColor : disabledColor;

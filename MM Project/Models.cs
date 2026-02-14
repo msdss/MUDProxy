@@ -452,21 +452,9 @@ public class CureConfiguration
 
 public class ProxySettings
 {
-    public bool ParAutoEnabled { get; set; } = false;
-    public int ParFrequencySeconds { get; set; } = 15;
-    public bool ParAfterCombatTick { get; set; } = false;
-    public bool HealthRequestEnabled { get; set; } = false;
-    public int HealthRequestIntervalSeconds { get; set; } = 60;
-    public int ManaReservePercent { get; set; } = 20;
-    public bool BuffWhileResting { get; set; } = true;  // Allow buffing while resting
-    public bool BuffWhileInCombat { get; set; } = true;  // Allow buffing while in combat
-    public bool AutoStartProxy { get; set; } = false;  // Legacy - no longer used
-    public bool CombatAutoEnabled { get; set; } = false;  // Combat toggle state
-    public bool AutoLoadLastCharacter { get; set; } = false;  // Auto-load last character on startup
-    public string LastCharacterPath { get; set; } = string.Empty;  // Path to last loaded character
-    
-    // UI Settings (merged from ui_settings.json)
-    public bool DisplaySystemLog { get; set; } = true;  // Show/hide system log panel
+    public bool AutoLoadLastCharacter { get; set; } = false;
+    public string LastCharacterPath { get; set; } = string.Empty;
+    public bool DisplaySystemLog { get; set; } = true;
 }
 
 /// <summary>
@@ -571,7 +559,18 @@ public class CharacterProfile
     // Monster overrides (attack priorities, relationships, etc.)
     public List<MonsterOverride> MonsterOverrides { get; set; } = new();
     
-// Player database (friends, enemies, etc.)
+    // Automation settings (per-character)
+    public bool ParAutoEnabled { get; set; } = true;
+    public int ParFrequencySeconds { get; set; } = 15;
+    public bool ParAfterCombatTick { get; set; } = false;
+    public bool HealthRequestEnabled { get; set; } = true;
+    public int HealthRequestIntervalSeconds { get; set; } = 60;
+    public int ManaReservePercent { get; set; } = 20;
+    public bool BuffWhileResting { get; set; } = false;
+    public bool BuffWhileInCombat { get; set; } = true;
+    public bool CombatAutoEnabled { get; set; } = true;
+    
+    // Player database (friends, enemies, etc.)
     public List<PlayerData> Players { get; set; } = new();
     
     // Window layout (per-character)
@@ -819,4 +818,140 @@ public class WindowSettings
     public int Width { get; set; }
     public int Height { get; set; }
     public bool IsMaximized { get; set; }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Room Graph & Pathing Models
+// Add these to the end of your Models.cs file (before the final closing brace if there is one,
+// or simply at the bottom of the file).
+// ═══════════════════════════════════════════════════════════════
+
+/// <summary>
+/// Represents a single room in the game world graph.
+/// </summary>
+public class RoomNode
+{
+    /// <summary>Map this room belongs to.</summary>
+    public int MapNumber { get; set; }
+
+    /// <summary>Room ID within the map.</summary>
+    public int RoomNumber { get; set; }
+
+    /// <summary>Display name (e.g., "Town Gates").</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>Composite key in "MapNumber/RoomNumber" format (e.g., "1/297").</summary>
+    public string Key { get; set; } = string.Empty;
+
+    /// <summary>Light level (negative = dark).</summary>
+    public int Light { get; set; }
+
+    /// <summary>Shop number (0 = none).</summary>
+    public int Shop { get; set; }
+
+    /// <summary>Lair data string.</summary>
+    public string Lair { get; set; } = string.Empty;
+
+    /// <summary>All exits from this room.</summary>
+    public List<RoomExit> Exits { get; set; } = new();
+
+    public override string ToString() => $"[{Key}] {Name}";
+}
+
+/// <summary>
+/// Represents a single exit from a room.
+/// </summary>
+public class RoomExit
+{
+    /// <summary>Direction column this exit came from (e.g., "N", "SE", "U").</summary>
+    public string Direction { get; set; } = string.Empty;
+
+    /// <summary>The command the player types to use this exit (e.g., "n", "se", "go crimson").</summary>
+    public string Command { get; set; } = string.Empty;
+
+    /// <summary>Destination room key in "MapNumber/RoomNumber" format.</summary>
+    public string DestinationKey { get; set; } = string.Empty;
+
+    /// <summary>Type of exit (Normal, Door, Locked, Hidden, Text).</summary>
+    public RoomExitType ExitType { get; set; } = RoomExitType.Normal;
+
+    /// <summary>The raw value from the data file, preserved for debugging/display.</summary>
+    public string RawValue { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Whether the pathfinder will use this exit.
+    /// Phase 1: Only Normal exits are traversable.
+    /// Future phases will expand this as exit mechanics are understood.
+    /// </summary>
+    public bool Traversable { get; set; } = true;
+
+    public override string ToString() => $"{Direction} -> {DestinationKey} ({ExitType}, cmd: {Command})";
+}
+
+/// <summary>
+/// Classification of room exits.
+/// </summary>
+public enum RoomExitType
+{
+    /// <summary>Plain directional exit with no modifiers.</summary>
+    Normal,
+
+    /// <summary>Door exit — may require opening before traversal.</summary>
+    Door,
+
+    /// <summary>Locked door — requires picklock skill or strength.</summary>
+    Locked,
+
+    /// <summary>Hidden exit — requires performing actions to reveal.</summary>
+    Hidden,
+
+    /// <summary>Special command exit — uses a text command like "go crimson" instead of a direction.</summary>
+    Text
+}
+
+/// <summary>
+/// Result of a pathfinding query.
+/// </summary>
+public class PathResult
+{
+    /// <summary>Whether a path was found.</summary>
+    public bool Success { get; set; }
+
+    /// <summary>Starting room key.</summary>
+    public string StartKey { get; set; } = string.Empty;
+
+    /// <summary>Destination room key.</summary>
+    public string DestinationKey { get; set; } = string.Empty;
+
+    /// <summary>Ordered list of steps to walk the path. Empty if no path found or already at destination.</summary>
+    public List<PathStep> Steps { get; set; } = new();
+
+    /// <summary>Total number of steps in the path.</summary>
+    public int TotalSteps { get; set; }
+
+    /// <summary>Error message if pathfinding failed.</summary>
+    public string ErrorMessage { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// A single step in a walking path.
+/// </summary>
+public class PathStep
+{
+    /// <summary>The command to type (e.g., "n", "se", "go crimson").</summary>
+    public string Command { get; set; } = string.Empty;
+
+    /// <summary>The direction column this step uses (e.g., "N", "SE").</summary>
+    public string Direction { get; set; } = string.Empty;
+
+    /// <summary>Room key we are leaving.</summary>
+    public string FromKey { get; set; } = string.Empty;
+
+    /// <summary>Room key we are entering.</summary>
+    public string ToKey { get; set; } = string.Empty;
+
+    /// <summary>Name of the room we are entering (for display).</summary>
+    public string ToName { get; set; } = string.Empty;
+
+    public override string ToString() => $"{Command} -> [{ToKey}] {ToName}";
 }

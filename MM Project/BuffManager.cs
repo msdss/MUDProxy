@@ -20,12 +20,15 @@ public class BuffManager
     private readonly MonsterDatabaseManager _monsterDatabaseManager;
     private readonly CombatManager _combatManager;
     private readonly RemoteCommandManager _remoteCommandManager;
+    private readonly RoomGraphManager _roomGraphManager;
+    private readonly RoomTracker _roomTracker;
     
     // Events for UI updates
     public event Action? OnBuffsChanged;
     public event Action? OnPartyChanged;
     public event Action? OnPlayerInfoChanged;
     public event Action<string>? OnLogMessage;
+    public event Action<string>? OnRoomTrackerLogMessage;
     public event Action<string>? OnSendCommand; // Event to send commands to the MUD
     public event Action? OnHangupRequested;  // Remote command requested hangup
     public event Action? OnRelogRequested;   // Remote command requested relog
@@ -54,8 +57,7 @@ public class BuffManager
     private bool _buffWhileInCombat = true;
     
     // App settings (persisted)
-    private bool _autoStartProxy = false;
-    private bool _combatAutoEnabled = false;
+    private bool _combatAutoEnabled = true;
     private bool _autoLoadLastCharacter = false;
     private string _lastCharacterPath = string.Empty;
     private bool _displaySystemLog = true;  // UI setting: show/hide system log panel
@@ -166,55 +168,49 @@ public class BuffManager
     public int ManaReservePercent
     {
         get => _manaReservePercent;
-        set { _manaReservePercent = Math.Clamp(value, 0, 100); SaveSettings(); }
+        set { _manaReservePercent = Math.Clamp(value, 0, 100); AutoSaveCharacterProfile(); }
     }
     
     public bool ParAutoEnabled
     {
         get => _parAutoEnabled;
-        set { _parAutoEnabled = value; SaveSettings(); }
+        set { _parAutoEnabled = value; AutoSaveCharacterProfile(); }
     }
     
     public int ParFrequencySeconds
     {
         get => _parFrequencySeconds;
-        set { _parFrequencySeconds = Math.Clamp(value, 5, 300); SaveSettings(); }
+        set { _parFrequencySeconds = Math.Clamp(value, 5, 300); AutoSaveCharacterProfile(); }
     }
     
     public bool ParAfterCombatTick
     {
         get => _parAfterCombatTick;
-        set { _parAfterCombatTick = value; SaveSettings(); }
+        set { _parAfterCombatTick = value; AutoSaveCharacterProfile(); }
     }
     
     public bool HealthRequestEnabled
     {
         get => _healthRequestEnabled;
-        set { _healthRequestEnabled = value; SaveSettings(); }
+        set { _healthRequestEnabled = value; AutoSaveCharacterProfile(); }
     }
     
     public int HealthRequestIntervalSeconds
     {
         get => _healthRequestIntervalSeconds;
-        set { _healthRequestIntervalSeconds = Math.Clamp(value, 30, 300); SaveSettings(); }
+        set { _healthRequestIntervalSeconds = Math.Clamp(value, 30, 300); AutoSaveCharacterProfile(); }
     }
     
     public bool BuffWhileResting
     {
         get => _buffWhileResting;
-        set { _buffWhileResting = value; SaveSettings(); }
+        set { _buffWhileResting = value; AutoSaveCharacterProfile(); }
     }
     
     public bool BuffWhileInCombat
     {
         get => _buffWhileInCombat;
-        set { _buffWhileInCombat = value; SaveSettings(); }
-    }
-    
-    public bool AutoStartProxy
-    {
-        get => _autoStartProxy;
-        set { _autoStartProxy = value; SaveSettings(); }
+        set { _buffWhileInCombat = value; AutoSaveCharacterProfile(); }
     }
     
     public bool AutoLoadLastCharacter
@@ -244,7 +240,7 @@ public class BuffManager
             {
                 _combatAutoEnabled = value;
                 _combatManager.CombatEnabled = value;
-                SaveSettings(); 
+                AutoSaveCharacterProfile(); 
             }
         }
     }
@@ -304,6 +300,20 @@ public class BuffManager
     public MonsterDatabaseManager MonsterDatabase => _monsterDatabaseManager;
     public CombatManager CombatManager => _combatManager;
     public RemoteCommandManager RemoteCommandManager => _remoteCommandManager;
+    public RoomGraphManager RoomGraph => _roomGraphManager;
+    public RoomTracker RoomTracker => _roomTracker;
+
+    /// <summary>
+    /// Notify the room tracker that a command is being sent to the server.
+    /// Must be called BEFORE the command is actually sent, so the tracker
+    /// knows which direction the player is moving before the room response arrives.
+    /// </summary>
+    public void TrackOutgoingCommand(string command)
+    {
+        _roomTracker.OnPlayerCommand(command);
+    }
+
+
     public int CurrentHp => _currentHp;
     public int MaxHp => _maxHp;
     public int CurrentMana => _currentMana;
@@ -371,7 +381,7 @@ public class BuffManager
         _combatManager.OnCombatEnabledChanged += () => 
         { 
             _combatAutoEnabled = _combatManager.CombatEnabled; 
-            SaveSettings(); 
+            AutoSaveCharacterProfile(); 
         };
         _combatManager.OnPlayersDetected += CheckAutoInvitePlayers;
         
@@ -404,6 +414,13 @@ public class BuffManager
         _remoteCommandManager.OnHangupRequested += () => OnHangupRequested?.Invoke();
         _remoteCommandManager.OnRelogRequested += () => OnRelogRequested?.Invoke();
         _remoteCommandManager.OnAutomationStateChanged += () => OnAutomationStateChanged?.Invoke();
+        _remoteCommandManager.SetPartyMemberCheck(name => _partyMembers.Any(m => m.Name.Equals(name, StringComparison.OrdinalIgnoreCase)));
+        
+        _roomGraphManager = new RoomGraphManager();
+        _roomGraphManager.OnLogMessage += msg => OnLogMessage?.Invoke(msg);
+        _roomGraphManager.LoadFromGameData();
+        _roomTracker = new RoomTracker(_roomGraphManager);
+        _roomTracker.OnLogMessage += msg => OnRoomTrackerLogMessage?.Invoke(msg);
         
         LoadConfigurations();
         LoadSettings();
@@ -565,20 +582,9 @@ public class BuffManager
                 var settings = JsonSerializer.Deserialize<ProxySettings>(json);
                 if (settings != null)
                 {
-                    _parAutoEnabled = settings.ParAutoEnabled;
-                    _parFrequencySeconds = settings.ParFrequencySeconds;
-                    _parAfterCombatTick = settings.ParAfterCombatTick;
-                    _healthRequestEnabled = settings.HealthRequestEnabled;
-                    _healthRequestIntervalSeconds = settings.HealthRequestIntervalSeconds;
-                    _manaReservePercent = settings.ManaReservePercent;
-                    _buffWhileResting = settings.BuffWhileResting;
-                    _buffWhileInCombat = settings.BuffWhileInCombat;
-                    _autoStartProxy = settings.AutoStartProxy;
-                    _combatAutoEnabled = settings.CombatAutoEnabled;
                     _autoLoadLastCharacter = settings.AutoLoadLastCharacter;
                     _lastCharacterPath = settings.LastCharacterPath;
                     _displaySystemLog = settings.DisplaySystemLog;
-                    _combatManager.SetCombatEnabledFromSettings(_combatAutoEnabled);
                 }
             }
         }
@@ -600,16 +606,6 @@ public class BuffManager
             
             var settings = new ProxySettings
             {
-                ParAutoEnabled = _parAutoEnabled,
-                ParFrequencySeconds = _parFrequencySeconds,
-                ParAfterCombatTick = _parAfterCombatTick,
-                HealthRequestEnabled = _healthRequestEnabled,
-                HealthRequestIntervalSeconds = _healthRequestIntervalSeconds,
-                ManaReservePercent = _manaReservePercent,
-                BuffWhileResting = _buffWhileResting,
-                BuffWhileInCombat = _buffWhileInCombat,
-                AutoStartProxy = _autoStartProxy,
-                CombatAutoEnabled = _combatAutoEnabled,
                 AutoLoadLastCharacter = _autoLoadLastCharacter,
                 LastCharacterPath = _lastCharacterPath,
                 DisplaySystemLog = _displaySystemLog
@@ -633,6 +629,12 @@ public class BuffManager
     
     public void ProcessMessage(string message)
     {
+        // Feed lines to room tracker for location detection
+        foreach (var line in message.Split('\n'))
+        {
+            _roomTracker.ProcessLine(line.TrimEnd('\r'));
+        }
+
         // Check for remote commands first (telepath, say, gangpath)
         // This processes commands like @health, @invite, @do, etc.
         _remoteCommandManager.ProcessMessage(message);
@@ -681,13 +683,6 @@ public class BuffManager
                 _playerInfo.ExperienceNeededForNextLevel -= expGained;
                 // Debug system log message to track exp gains and leveling progress.
                 OnLogMessage?.Invoke($"📈 EXP gained: {expGained} | Session total: {_experienceTracker.SessionExpGained} | Rate: {_experienceTracker.GetExpPerHour()}/hr");
-                
-                // Check for level up (exp needed went negative or zero)
-                if (_playerInfo.ExperienceNeededForNextLevel <= 0)
-                {
-                    OnLogMessage?.Invoke($"🎉 Level up imminent! Sending exp command to refresh...");
-                    OnSendCommand?.Invoke("exp");
-                }
             }
         }
         
@@ -735,6 +730,16 @@ public class BuffManager
                 _inTrainingScreen = false;
                 OnLogMessage?.Invoke("🎮 Returned to game - pass-through mode disabled");
                 OnTrainingScreenChanged?.Invoke(false);
+
+                // Refresh character data after training (may have leveled up)
+                OnLogMessage?.Invoke("🎮 Refreshing character data after training...");
+                Task.Run(async () =>
+                {
+                    await Task.Delay(500);
+                    OnSendCommand?.Invoke("stat");
+                    await Task.Delay(500);
+                    OnSendCommand?.Invoke("exp");
+                });
             }
             
             // First time seeing HP bar this session - send startup commands
@@ -1137,6 +1142,20 @@ public class BuffManager
             var meditatingIndicator = isMeditating ? " 🧘" : "";
             var manaDisplay = member.ManaPercent > 0 ? $" M:{member.ManaPercent}%" : "";
             OnLogMessage?.Invoke($"  👤 {member.Name} ({member.Class}) H:{member.HealthPercent}%{manaDisplay}{restingIndicator}{poisonIndicator}{meditatingIndicator} - {member.Rank}");
+        }
+
+        // Check for [Invited] members and send @join command to them
+        var invitedRegex = new Regex(@"^\s{2}(\S.*?)\s+\((\w+)\)\s+\[Invited\]", RegexOptions.Compiled | RegexOptions.Multiline);
+        var invitedMatches = invitedRegex.Matches(message);
+        foreach (Match invitedMatch in invitedMatches)
+        {
+            var invitedFullName = invitedMatch.Groups[1].Value.Trim();
+            var invitedFirstName = invitedFullName.Split(' ')[0];
+            if (!IsTargetSelf(invitedFirstName))
+            {
+                OnLogMessage?.Invoke($"👥 Sending @join to invited member: {invitedFirstName}");
+                OnSendCommand?.Invoke($"/{invitedFirstName} @join");
+            }
         }
         
         OnLogMessage?.Invoke($"👥 Party updated: {_partyMembers.Count} members detected");
@@ -1984,6 +2003,17 @@ public class BuffManager
                 // Player Database
                 Players = _playerDatabaseManager.GetPlayersForProfile(),
                 
+                // Automation Settings
+                ParAutoEnabled = _parAutoEnabled,
+                ParFrequencySeconds = _parFrequencySeconds,
+                ParAfterCombatTick = _parAfterCombatTick,
+                HealthRequestEnabled = _healthRequestEnabled,
+                HealthRequestIntervalSeconds = _healthRequestIntervalSeconds,
+                ManaReservePercent = _manaReservePercent,
+                BuffWhileResting = _buffWhileResting,
+                BuffWhileInCombat = _buffWhileInCombat,
+                CombatAutoEnabled = _combatAutoEnabled,
+
                 // Window Settings
                 WindowSettings = _windowSettings
             };
@@ -2010,6 +2040,87 @@ public class BuffManager
         }
     }
     
+    /// <summary>
+    /// Create a new, empty character profile. Clears all character-specific data
+    /// so the user can configure a fresh character from scratch.
+    /// </summary>
+    public void NewCharacterProfile()
+    {
+        // Clear Combat Settings
+        _combatManager.Clear();
+
+        // Reset BBS/Telnet Settings to defaults
+        _bbsSettings = new BbsSettings();
+        OnBbsSettingsChanged?.Invoke();
+
+        // Clear Buff Configurations
+        _buffConfigurations.Clear();
+        _activeBuffs.Clear();
+        SaveConfigurations();
+        OnBuffsChanged?.Invoke();
+
+        // Clear Heal Configurations
+        var emptyHealConfig = new HealingConfiguration
+        {
+            HealingEnabled = false,
+            HealSpells = new List<HealSpellConfiguration>(),
+            SelfHealRules = new List<HealRule>(),
+            PartyHealRules = new List<HealRule>(),
+            PartyWideHealRules = new List<HealRule>()
+        };
+        _healingManager.ReplaceConfiguration(emptyHealConfig);
+
+        // Clear Cure Configurations
+        var emptyCureConfig = new CureConfiguration
+        {
+            CuringEnabled = false,
+            Ailments = new List<AilmentConfiguration>(),
+            CureSpells = new List<CureSpellConfiguration>(),
+            PriorityOrder = new List<CastPriorityType>
+            {
+                CastPriorityType.Heals,
+                CastPriorityType.Cures,
+                CastPriorityType.Buffs
+            }
+        };
+        _cureManager.ReplaceConfiguration(emptyCureConfig);
+
+        // Clear Monster Overrides
+        // Reset Monster Overrides to alignment-based defaults from game data
+        _monsterDatabaseManager.LoadOverridesFromProfile(new List<MonsterOverride>());
+        _monsterDatabaseManager.Reload();
+
+        // Clear Player Database
+        _playerDatabaseManager.Clear();
+
+        // Reset Player Info
+        _playerInfo = new PlayerInfo();
+        OnPlayerInfoChanged?.Invoke();
+
+        // Reset Automation Settings to defaults
+        _parAutoEnabled = true;
+        _parFrequencySeconds = 15;
+        _parAfterCombatTick = false;
+        _healthRequestEnabled = true;
+        _healthRequestIntervalSeconds = 60;
+        _manaReservePercent = 20;
+        _buffWhileResting = false;
+        _buffWhileInCombat = true;
+        _combatAutoEnabled = true;
+        _combatManager.SetCombatEnabledFromSettings(true);
+
+        // Clear Window Settings
+        _windowSettings = null;
+
+        // Clear Party
+        _partyMembers.Clear();
+        OnPartyChanged?.Invoke();
+
+        // Reset profile path (force Save As on first save)
+        _currentProfilePath = string.Empty;
+        HasUnsavedChanges = false;
+    }
+
     /// <summary>
     /// Load a character profile from a file
     /// </summary>
@@ -2044,41 +2155,35 @@ public class BuffManager
                 OnBbsSettingsChanged?.Invoke();
             }
             
-            // Load Buff Configurations
-            if (profile.Buffs != null && profile.Buffs.Count > 0)
+            // Load Buff Configurations (always replace, even if empty)
+            _buffConfigurations.Clear();
+            if (profile.Buffs != null)
             {
-                _buffConfigurations.Clear();
                 _buffConfigurations.AddRange(profile.Buffs);
-                SaveConfigurations();
-                OnBuffsChanged?.Invoke();
             }
+            SaveConfigurations();
+            OnBuffsChanged?.Invoke();
             
-            // Load Heal Configurations - use the configuration object directly
-            if (profile.HealSpells != null && profile.HealSpells.Count > 0)
+            // Load Heal Configurations (always replace, even if empty)
+            var healConfig = new HealingConfiguration
             {
-                var healConfig = new HealingConfiguration
-                {
-                    HealingEnabled = _healingManager.HealingEnabled,
-                    HealSpells = profile.HealSpells,
-                    SelfHealRules = profile.SelfHealRules ?? new List<HealRule>(),
-                    PartyHealRules = profile.PartyHealRules ?? new List<HealRule>(),
-                    PartyWideHealRules = profile.PartyWideHealRules ?? new List<HealRule>()
-                };
-                _healingManager.ReplaceConfiguration(healConfig);
-            }
+                HealingEnabled = _healingManager.HealingEnabled,
+                HealSpells = profile.HealSpells ?? new List<HealSpellConfiguration>(),
+                SelfHealRules = profile.SelfHealRules ?? new List<HealRule>(),
+                PartyHealRules = profile.PartyHealRules ?? new List<HealRule>(),
+                PartyWideHealRules = profile.PartyWideHealRules ?? new List<HealRule>()
+            };
+            _healingManager.ReplaceConfiguration(healConfig);
             
-            // Load Cure Configurations - use the configuration object directly
-            if (profile.Ailments != null && profile.Ailments.Count > 0)
+            // Load Cure Configurations (always replace, even if empty)
+            var cureConfig = new CureConfiguration
             {
-                var cureConfig = new CureConfiguration
-                {
-                    CuringEnabled = _cureManager.CuringEnabled,
-                    Ailments = profile.Ailments,
-                    CureSpells = profile.CureSpells ?? new List<CureSpellConfiguration>(),
-                    PriorityOrder = _cureManager.PriorityOrder
-                };
-                _cureManager.ReplaceConfiguration(cureConfig);
-            }
+                CuringEnabled = _cureManager.CuringEnabled,
+                Ailments = profile.Ailments ?? new List<AilmentConfiguration>(),
+                CureSpells = profile.CureSpells ?? new List<CureSpellConfiguration>(),
+                PriorityOrder = _cureManager.PriorityOrder
+            };
+            _cureManager.ReplaceConfiguration(cureConfig);
             
             // Load Monster Overrides
             _monsterDatabaseManager.LoadOverridesFromProfile(profile.MonsterOverrides);
@@ -2095,6 +2200,18 @@ public class BuffManager
                 OnPlayerInfoChanged?.Invoke();
             }
             
+            // Load Automation Settings
+            _parAutoEnabled = profile.ParAutoEnabled;
+            _parFrequencySeconds = profile.ParFrequencySeconds;
+            _parAfterCombatTick = profile.ParAfterCombatTick;
+            _healthRequestEnabled = profile.HealthRequestEnabled;
+            _healthRequestIntervalSeconds = profile.HealthRequestIntervalSeconds;
+            _manaReservePercent = profile.ManaReservePercent;
+            _buffWhileResting = profile.BuffWhileResting;
+            _buffWhileInCombat = profile.BuffWhileInCombat;
+            _combatAutoEnabled = profile.CombatAutoEnabled;
+            _combatManager.SetCombatEnabledFromSettings(_combatAutoEnabled);
+
             // Load Window Settings
             _windowSettings = profile.WindowSettings;
             

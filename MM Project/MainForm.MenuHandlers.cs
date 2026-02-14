@@ -5,7 +5,30 @@ public partial class MainForm
 {
     // This file contains all menu click handlers and button events
     // Extracted from MainForm.cs for better organization
-    
+
+    private void NewCharacter_Click(object? sender, EventArgs e)
+    {
+        // Warn if there are unsaved changes
+        if (_buffManager.HasUnsavedChanges)
+        {
+            var result = MessageBox.Show(
+                "You have unsaved changes. Do you want to save before creating a new character?",
+                "Unsaved Changes",
+                MessageBoxButtons.YesNoCancel,
+                MessageBoxIcon.Warning);
+
+            if (result == DialogResult.Cancel)
+                return;
+
+            if (result == DialogResult.Yes)
+                SaveCharacter_Click(sender, e);
+        }
+
+        _buffManager.NewCharacterProfile();
+        UpdateTitle();
+        LogMessage("📄 New character profile created. Configure settings and use Save As to save.", MessageType.System);
+    }
+
     private void LoadCharacter_Click(object? sender, EventArgs e)
     {
         using var dialog = new OpenFileDialog
@@ -22,6 +45,7 @@ public partial class MainForm
             if (success)
             {
                 ApplyWindowSettings();
+                UpdateToggleButtonStates();
                 MessageBox.Show(message, "Character Loaded", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 UpdateTitle();
             }
@@ -279,9 +303,20 @@ public partial class MainForm
     
     private void PauseButton_Click(object? sender, EventArgs e)
     {
-        _buffManager.CommandsPaused = !_buffManager.CommandsPaused;
+        // Determine new state: if ANY automation is on, turn all off; otherwise turn all on
+        bool anyOn = _buffManager.CombatManager.CombatEnabled ||
+                     _buffManager.HealingManager.HealingEnabled ||
+                     _buffManager.AutoRecastEnabled ||
+                     _buffManager.CureManager.CuringEnabled;
+        bool newState = !anyOn;
+
+        _buffManager.CombatManager.CombatEnabled = newState;
+        _buffManager.HealingManager.HealingEnabled = newState;
+        _buffManager.AutoRecastEnabled = newState;
+        _buffManager.CureManager.CuringEnabled = newState;
+
         UpdateToggleButtonStates();
-        LogMessage($"All commands {(_buffManager.CommandsPaused ? "PAUSED" : "RESUMED")}", MessageType.System);
+        LogMessage($"All automation {(newState ? "ENABLED" : "DISABLED")}", MessageType.System);
     }
 
     private void ClearActiveBuffs_Click(object? sender, EventArgs e)
@@ -568,6 +603,7 @@ public partial class MainForm
             // Clear and reload the cache with new data
             GameDataCache.Instance.ClearCache();
             GameDataCache.Instance.StartPreload();
+            _buffManager.RoomGraph.Reload();
         }
     }
     
@@ -615,6 +651,12 @@ public partial class MainForm
     private void OpenGameDataTextBlocks_Click(object? sender, EventArgs e)
     {
         OpenGameDataViewer("TextBlocks");
+    }
+
+    private void OpenPathfindingTest_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new PathfindingTestDialog(_buffManager.RoomGraph);
+        dialog.ShowDialog(this);
     }
     
     private void SetParFrequency_Click(object? sender, EventArgs e)

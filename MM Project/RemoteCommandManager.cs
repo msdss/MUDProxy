@@ -22,6 +22,8 @@ public class RemoteCommandManager
     private readonly Action<bool> _setCureEnabled;
     private readonly Func<bool> _getBuffEnabled;
     private readonly Action<bool> _setBuffEnabled;
+    private Func<string, bool>? _isPartyMember;
+    public void SetPartyMemberCheck(Func<string, bool> isPartyMember) => _isPartyMember = isPartyMember;
     
     // Experience tracking delegates
     private readonly Func<int> _getLevel;
@@ -466,7 +468,9 @@ public class RemoteCommandManager
     
     private void HandleQueryHealth(string senderName, PlayerData? player)
     {
-        if (!HasPermission(player, p => p.QueryHealth, senderName))
+        // Allow @health if the player has the permission OR if they are a current party member
+        bool isPartyMember = _isPartyMember != null && _isPartyMember(senderName);
+        if (!isPartyMember && !HasPermission(player, p => p.QueryHealth, senderName))
             return;
         
         var hp = _getCurrentHp();

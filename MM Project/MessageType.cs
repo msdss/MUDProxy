@@ -7,5 +7,6 @@ public enum MessageType
 {
     Server,
     Client,
-    System
+    System,
+    RoomTracker
 }
