@@ -452,21 +452,9 @@ public class CureConfiguration
 
 public class ProxySettings
 {
-    public bool ParAutoEnabled { get; set; } = false;
-    public int ParFrequencySeconds { get; set; } = 15;
-    public bool ParAfterCombatTick { get; set; } = false;
-    public bool HealthRequestEnabled { get; set; } = false;
-    public int HealthRequestIntervalSeconds { get; set; } = 60;
-    public int ManaReservePercent { get; set; } = 20;
-    public bool BuffWhileResting { get; set; } = true;  // Allow buffing while resting
-    public bool BuffWhileInCombat { get; set; } = true;  // Allow buffing while in combat
-    public bool AutoStartProxy { get; set; } = false;  // Legacy - no longer used
-    public bool CombatAutoEnabled { get; set; } = false;  // Combat toggle state
-    public bool AutoLoadLastCharacter { get; set; } = false;  // Auto-load last character on startup
-    public string LastCharacterPath { get; set; } = string.Empty;  // Path to last loaded character
-    
-    // UI Settings (merged from ui_settings.json)
-    public bool DisplaySystemLog { get; set; } = true;  // Show/hide system log panel
+    public bool AutoLoadLastCharacter { get; set; } = false;
+    public string LastCharacterPath { get; set; } = string.Empty;
+    public bool DisplaySystemLog { get; set; } = true;
 }
 
 /// <summary>
@@ -571,7 +559,18 @@ public class CharacterProfile
     // Monster overrides (attack priorities, relationships, etc.)
     public List<MonsterOverride> MonsterOverrides { get; set; } = new();
     
-// Player database (friends, enemies, etc.)
+    // Automation settings (per-character)
+    public bool ParAutoEnabled { get; set; } = true;
+    public int ParFrequencySeconds { get; set; } = 15;
+    public bool ParAfterCombatTick { get; set; } = false;
+    public bool HealthRequestEnabled { get; set; } = true;
+    public int HealthRequestIntervalSeconds { get; set; } = 60;
+    public int ManaReservePercent { get; set; } = 20;
+    public bool BuffWhileResting { get; set; } = false;
+    public bool BuffWhileInCombat { get; set; } = true;
+    public bool CombatAutoEnabled { get; set; } = true;
+    
+    // Player database (friends, enemies, etc.)
     public List<PlayerData> Players { get; set; } = new();
     
     // Window layout (per-character)

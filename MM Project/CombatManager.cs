@@ -39,7 +39,7 @@ public class CombatManager
     // Regex to match complete "Also here:" with content ending in period
     // Uses Singleline mode so . matches newlines (for wrapped lines)
     private static readonly Regex AlsoHereRegex = new(@"Also here:\s*(.+?)\.", RegexOptions.Compiled | RegexOptions.Singleline);
-    private static readonly Regex EntityEnteredRoomRegex = new(@"in from the (north|south|east|west|northeast|southeast|northwest|southwest|above|below)!", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex EntityEnteredRoomRegex = new(@"from the (north|south|east|west|northeast|southeast|northwest|southwest|above|below)[.!]", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     
     public event Action<string>? OnLogMessage;
     public event Action<string>? OnSendCommand;
@@ -265,8 +265,13 @@ else
         // Track players detected in room for auto-invite
         var playersInRoom = new List<string>();
         
+        // Normalize line wraps: the server wraps long "Also here:" lines at the terminal width,
+        // embedding newlines in the middle of entity names (e.g., "Mayor\r\nGodfrey").
+        // Replace all newlines with spaces so entity names are intact.
+        var normalizedContent = alsoHereContent.Replace("\r\n", " ").Replace("\r", " ").Replace("\n", " ");
+
         // Parse entities in the room
-        var entities = alsoHereContent.Split(',')
+        var entities = normalizedContent.Split(',')
             .Select(e => e.Trim())
             .Where(e => !string.IsNullOrEmpty(e))
             .ToList();
@@ -359,9 +364,9 @@ else
         var monster = _monsterDatabase.FindMonsterByPartialName(entity);
         if (monster == null)
         {
-            // Unknown entity - assume hostile
-            OnLogMessage?.Invoke($"   ⚠️ Unknown entity (not in DB): {entity}");
-            return true;
+            // Unknown entity - do NOT attack. Could be a player or friendly NPC.
+            OnLogMessage?.Invoke($"   ⚠️ Unknown entity (not in DB, skipping): {entity}");
+            return false;
         }
         
         // Check the override for this monster
