@@ -18,6 +18,10 @@ public class SettingsDialog : Form
     private CheckBox _healthRequestCheckBox = null!;
     private NumericUpDown _healthRequestIntervalNumeric = null!;
     
+    // Buff tab controls
+    private CheckBox _buffWhileRestingCheckBox = null!;
+    private CheckBox _buffWhileInCombatCheckBox = null!;
+    
     // Combat tab controls
     private TextBox _attackCommandText = null!;
     private TextBox _backstabWeaponText = null!;
@@ -125,9 +129,12 @@ public class SettingsDialog : Form
     
     private void SaveButton_Click(object? sender, EventArgs e)
     {
-        // Save all settings to BuffManager
+        // Save all settings to managers
         SaveCombatSettings();
         SaveBbsSettings();
+        SaveBuffSettings();
+        SavePartySettings();
+        SaveCurePriorityOrder();
         
         // Save to character profile file
         var profilePath = _buffManager.CurrentProfilePath;
@@ -335,7 +342,7 @@ public class SettingsDialog : Form
         AddLabel(spellPanel, "Req Mana %", 365, sy);
         sy += 20;
         
-        int maxMana = _buffManager.MaxMana;
+        int maxMana = _buffManager.PlayerStateManager.MaxMana;
         
         // Multi-Attack row
         AddLabel(spellPanel, "Multi-Attack:", 10, sy + 2);
@@ -506,7 +513,7 @@ public class SettingsDialog : Form
     
     private void UpdateManaLabels()
     {
-        int maxMana = _buffManager.MaxMana;
+        int maxMana = _buffManager.PlayerStateManager.MaxMana;
         _multiAttackManaLabel.Text = $"({(int)_multiAttackReqManaNum.Value * maxMana / 100}/{maxMana})";
         _preAttackManaLabel.Text = $"({(int)_preAttackReqManaNum.Value * maxMana / 100}/{maxMana})";
         _attackManaLabel.Text = $"({(int)_attackReqManaNum.Value * maxMana / 100}/{maxMana})";
@@ -802,7 +809,7 @@ public class SettingsDialog : Form
         tab.Controls.Add(stateLabel);
         y += 25;
         
-        var buffWhileRestingCheckBox = new CheckBox
+        _buffWhileRestingCheckBox = new CheckBox
         {
             Text = "Buff while resting",
             Location = new Point(20, y),
@@ -810,11 +817,10 @@ public class SettingsDialog : Form
             ForeColor = Color.White,
             Checked = _buffManager.BuffWhileResting
         };
-        buffWhileRestingCheckBox.CheckedChanged += (s, e) => _buffManager.BuffWhileResting = buffWhileRestingCheckBox.Checked;
-        tab.Controls.Add(buffWhileRestingCheckBox);
+        tab.Controls.Add(_buffWhileRestingCheckBox);
         y += 28;
         
-        var buffWhileInCombatCheckBox = new CheckBox
+        _buffWhileInCombatCheckBox = new CheckBox
         {
             Text = "Buff while in combat",
             Location = new Point(20, y),
@@ -822,8 +828,7 @@ public class SettingsDialog : Form
             ForeColor = Color.White,
             Checked = _buffManager.BuffWhileInCombat
         };
-        buffWhileInCombatCheckBox.CheckedChanged += (s, e) => _buffManager.BuffWhileInCombat = buffWhileInCombatCheckBox.Checked;
-        tab.Controls.Add(buffWhileInCombatCheckBox);
+        tab.Controls.Add(_buffWhileInCombatCheckBox);
         y += 40;
         
         // Mana Reserve section
@@ -848,7 +853,6 @@ public class SettingsDialog : Form
             BackColor = Color.FromArgb(60, 60, 60),
             ForeColor = Color.White
         };
-        _manaReserveNumeric.ValueChanged += (s, e) => _buffManager.ManaReservePercent = (int)_manaReserveNumeric.Value;
         tab.Controls.Add(_manaReserveNumeric);
         
         var percentLabel = new Label
@@ -902,7 +906,7 @@ public class SettingsDialog : Form
             Location = new Point(20, y),
             AutoSize = true,
             ForeColor = Color.White,
-            Checked = _buffManager.ParAutoEnabled
+            Checked = _buffManager.PartyManager.ParAutoEnabled
         };
         tab.Controls.Add(_parAutoCheckBox);
         y += 30;
@@ -913,7 +917,7 @@ public class SettingsDialog : Form
             Location = new Point(40, y),
             AutoSize = true,
             ForeColor = Color.White,
-            Checked = _buffManager.ParAfterCombatTick
+            Checked = _buffManager.PartyManager.ParAfterCombatTick
         };
         tab.Controls.Add(_parAfterTickCheckBox);
         y += 30;
@@ -934,12 +938,11 @@ public class SettingsDialog : Form
             Size = new Size(60, 25),
             Minimum = 5,
             Maximum = 300,
-            Value = _buffManager.ParFrequencySeconds,
+            Value = _buffManager.PartyManager.ParFrequencySeconds,
             BackColor = Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
-            Enabled = !_buffManager.ParAfterCombatTick
+            Enabled = !_buffManager.PartyManager.ParAfterCombatTick
         };
-        _parFrequencyNumeric.ValueChanged += (s, e) => _buffManager.ParFrequencySeconds = (int)_parFrequencyNumeric.Value;
         tab.Controls.Add(_parFrequencyNumeric);
         
         var secondsLabel = new Label
@@ -956,13 +959,11 @@ public class SettingsDialog : Form
         // Update enabled state based on checkbox
         _parAutoCheckBox.CheckedChanged += (s, e) => 
         {
-            _buffManager.ParAutoEnabled = _parAutoCheckBox.Checked;
             UpdateParFrequencyEnabledState(freqLabel, secondsLabel);
         };
         
         _parAfterTickCheckBox.CheckedChanged += (s, e) => 
         {
-            _buffManager.ParAfterCombatTick = _parAfterTickCheckBox.Checked;
             UpdateParFrequencyEnabledState(freqLabel, secondsLabel);
         };
         
@@ -987,9 +988,8 @@ public class SettingsDialog : Form
             Location = new Point(20, y),
             AutoSize = true,
             ForeColor = Color.White,
-            Checked = _buffManager.HealthRequestEnabled
+            Checked = _buffManager.PartyManager.HealthRequestEnabled
         };
-        _healthRequestCheckBox.CheckedChanged += (s, e) => _buffManager.HealthRequestEnabled = _healthRequestCheckBox.Checked;
         tab.Controls.Add(_healthRequestCheckBox);
         y += 30;
         
@@ -1006,13 +1006,12 @@ public class SettingsDialog : Form
         {
             Location = new Point(145, y),
             Size = new Size(60, 25),
-            Minimum = 30,
+            Minimum = 15,
             Maximum = 300,
-            Value = _buffManager.HealthRequestIntervalSeconds,
+            Value = _buffManager.PartyManager.HealthRequestIntervalSeconds,
             BackColor = Color.FromArgb(60, 60, 60),
             ForeColor = Color.White
         };
-        _healthRequestIntervalNumeric.ValueChanged += (s, e) => _buffManager.HealthRequestIntervalSeconds = (int)_healthRequestIntervalNumeric.Value;
         tab.Controls.Add(_healthRequestIntervalNumeric);
         
         var healthSecondsLabel = new Label
@@ -1074,8 +1073,6 @@ public class SettingsDialog : Form
         _priorityListBox.Items.RemoveAt(index);
         _priorityListBox.Items.Insert(newIndex, item);
         _priorityListBox.SelectedIndex = newIndex;
-        
-        SavePriorityOrder();
     }
     
     private void PriorityListBox_MouseDown(object? sender, MouseEventArgs e)
@@ -1106,18 +1103,6 @@ public class SettingsDialog : Form
         _priorityListBox.Items.RemoveAt(oldIndex);
         _priorityListBox.Items.Insert(index, data);
         _priorityListBox.SelectedIndex = index;
-        
-        SavePriorityOrder();
-    }
-    
-    private void SavePriorityOrder()
-    {
-        var newOrder = new List<CastPriorityType>();
-        foreach (var item in _priorityListBox.Items)
-        {
-            newOrder.Add(GetPriorityFromDisplayName(item.ToString() ?? ""));
-        }
-        _buffManager.CureManager.PriorityOrder = newOrder;
     }
     
     private void UpdateParFrequencyEnabledState(Label freqLabel, Label secondsLabel)
@@ -1449,6 +1434,32 @@ public class SettingsDialog : Form
         _logonSequencesList.Items.RemoveAt(index);
         _logonSequencesList.Items.Insert(index + 1, item);
         item.Selected = true;
+    }
+    
+    private void SaveBuffSettings()
+    {
+        _buffManager.BuffWhileResting = _buffWhileRestingCheckBox.Checked;
+        _buffManager.BuffWhileInCombat = _buffWhileInCombatCheckBox.Checked;
+        _buffManager.ManaReservePercent = (int)_manaReserveNumeric.Value;
+    }
+    
+    private void SavePartySettings()
+    {
+        _buffManager.PartyManager.ParAutoEnabled = _parAutoCheckBox.Checked;
+        _buffManager.PartyManager.ParAfterCombatTick = _parAfterTickCheckBox.Checked;
+        _buffManager.PartyManager.ParFrequencySeconds = (int)_parFrequencyNumeric.Value;
+        _buffManager.PartyManager.HealthRequestEnabled = _healthRequestCheckBox.Checked;
+        _buffManager.PartyManager.HealthRequestIntervalSeconds = (int)_healthRequestIntervalNumeric.Value;
+    }
+    
+    private void SaveCurePriorityOrder()
+    {
+        var newOrder = new List<CastPriorityType>();
+        foreach (var item in _priorityListBox.Items)
+        {
+            newOrder.Add(GetPriorityFromDisplayName(item.ToString() ?? ""));
+        }
+        _buffManager.CureManager.PriorityOrder = newOrder;
     }
     
     private void SaveBbsSettings()

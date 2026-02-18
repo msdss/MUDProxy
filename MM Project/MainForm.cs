@@ -49,7 +49,6 @@ public partial class MainForm : Form
     private Label _statusLabel = null!;
     private Label _expStatusLabel = null!;  // Experience status on right side
     private Button _connectButton = null!;
-    private CheckBox _autoScrollCheckBox = null!;
     private CheckBox _autoScrollLogsCheckBox = null!;
     private CheckBox _showTimestampsCheckBox = null!;
     private Label _serverAddressLabel = null!;
@@ -221,17 +220,17 @@ public partial class MainForm : Form
         _manaType = manaType;
         
         // Get max values from BuffManager (set by stat command parsing)
-        if (_buffManager.MaxHp > 0)
+        if (_buffManager.PlayerStateManager.MaxHp > 0)
         {
-            _maxHp = _buffManager.MaxHp;
+            _maxHp = _buffManager.PlayerStateManager.MaxHp;
         }
-        if (_buffManager.MaxMana > 0)
+        if (_buffManager.PlayerStateManager.MaxMana > 0)
         {
-            _maxMana = _buffManager.MaxMana;
+            _maxMana = _buffManager.PlayerStateManager.MaxMana;
         }
         
         // Update the self status panel
-        var info = _buffManager.PlayerInfo;
+        var info = _buffManager.PlayerStateManager.PlayerInfo;
         _selfStatusPanel.UpdatePlayerExact(
             string.IsNullOrEmpty(info.Name) ? "(Unknown)" : info.Name,
             info.Class,
@@ -268,12 +267,12 @@ public partial class MainForm : Form
     private void MainForm_Shown(object? sender, EventArgs e)
     {
         // Check for auto-load last character
-        if (_buffManager.AutoLoadLastCharacter && !string.IsNullOrEmpty(_buffManager.LastCharacterPath))
+        if (_buffManager.AppSettings.AutoLoadLastCharacter && !string.IsNullOrEmpty(_buffManager.AppSettings.LastCharacterPath))
         {
-            if (File.Exists(_buffManager.LastCharacterPath))
+            if (File.Exists(_buffManager.AppSettings.LastCharacterPath))
             {
-                LogMessage($"Auto-loading last character: {Path.GetFileName(_buffManager.LastCharacterPath)}", MessageType.System);
-                var (success, message) = _buffManager.LoadCharacterProfile(_buffManager.LastCharacterPath);
+                LogMessage($"Auto-loading last character: {Path.GetFileName(_buffManager.AppSettings.LastCharacterPath)}", MessageType.System);
+                var (success, message) = _buffManager.LoadCharacterProfile(_buffManager.AppSettings.LastCharacterPath);
                 if (success)
                 {
                     RefreshPlayerInfo();
@@ -290,7 +289,7 @@ public partial class MainForm : Form
             }
             else
             {
-                LogMessage($"Last character file not found: {_buffManager.LastCharacterPath}", MessageType.System);
+                LogMessage($"Last character file not found: {_buffManager.AppSettings.LastCharacterPath}", MessageType.System);
             }
         }
         else
@@ -414,7 +413,7 @@ public partial class MainForm : Form
     {
         // Notify room tracker of outgoing command (must be BEFORE send, so tracker
         // knows the direction before the server's room response arrives)
-        _buffManager.TrackOutgoingCommand(command);
+        _buffManager.RoomTracker.OnPlayerCommand(command);
         // Send command to server
         SendCommandToServer(command);
         
@@ -549,9 +548,11 @@ public partial class MainForm : Form
             ForeColor = Color.White, 
             BackColor = Color.FromArgb(45, 45, 45),
             CheckOnClick = true,
-            Checked = _buffManager.AutoLoadLastCharacter
+            Checked = _buffManager.AppSettings.AutoLoadLastCharacter
         };
         fileMenu.DropDownItems.Add(autoLoadMenuItem);
+        
+        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Display Backscroll", null, DisplayBackscroll_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         
         var displaySystemLogMenuItem = new ToolStripMenuItem("Display System Log", null, ToggleDisplaySystemLog_Click) 
         { 
@@ -566,8 +567,8 @@ public partial class MainForm : Form
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("Import Game Database...", null, ImportGameDatabase_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         
         fileMenu.DropDownItems.Add(new ToolStripSeparator());
-        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Save Log...", null, SaveLog_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
-        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Clear Log", null, ClearLog_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Save System Log...", null, SaveLog_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
+        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Clear System Log", null, ClearLog_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         fileMenu.DropDownItems.Add(new ToolStripSeparator());
         fileMenu.DropDownItems.Add(new ToolStripMenuItem("Exit", null, (s, e) => this.Close()) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
 
@@ -718,15 +719,11 @@ public partial class MainForm : Form
         _cureToggleButton.FlatAppearance.BorderColor = Color.FromArgb(80, 80, 80);
         _cureToggleButton.Click += CureToggleButton_Click;
 
-        _autoScrollCheckBox = new CheckBox { Text = "Auto-scroll MUD", Checked = true, ForeColor = Color.White, AutoSize = true, Location = new Point(10, 35) };
-        _autoScrollLogsCheckBox = new CheckBox { Text = "Auto-scroll Logs", Checked = true, ForeColor = Color.White, AutoSize = true, Location = new Point(130, 35) };
-        _showTimestampsCheckBox = new CheckBox { Text = "Timestamps", Checked = true, ForeColor = Color.White, AutoSize = true, Location = new Point(260, 35) };
 
         settingsPanel.Controls.AddRange(new Control[] {
             _connectButton,
             _serverAddressLabel,
-            _pauseButton, _combatToggleButton, _healToggleButton, _buffToggleButton, _cureToggleButton,
-            _autoScrollCheckBox, _autoScrollLogsCheckBox, _showTimestampsCheckBox
+            _pauseButton, _combatToggleButton, _healToggleButton, _buffToggleButton, _cureToggleButton
         });
 
         // Combat info panel (right side - resizable via splitter)
@@ -986,13 +983,52 @@ public partial class MainForm : Form
         };
         var logHeaderLabel = new Label
         {
-            Text = "📋 System Log",
+            Text = "System Log",
             ForeColor = Color.White,
             Font = new Font("Segoe UI", 8, FontStyle.Bold),
             Location = new Point(5, 2),
             AutoSize = true
         };
+        _autoScrollLogsCheckBox = new CheckBox
+        {
+            Text = "Auto-Scroll",
+            Checked = true,
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 7),
+            AutoSize = true,
+            Location = new Point(90, 1)
+        };
+        _showTimestampsCheckBox = new CheckBox
+        {
+            Text = "Timestamps",
+            Checked = true,
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 7),
+            AutoSize = true,
+            Location = new Point(180, 1)
+        };
+        var clearLogLink = new Label
+        {
+            Text = "Clear",
+            Font = new Font("Segoe UI", 7, FontStyle.Underline),
+            ForeColor = Color.FromArgb(120, 120, 120),
+            AutoSize = true,
+            Cursor = Cursors.Hand,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right
+        };
+        clearLogLink.Click += ClearLog_Click;
+        clearLogLink.MouseEnter += (s, e) => clearLogLink.ForeColor = Color.FromArgb(255, 100, 100);
+        clearLogLink.MouseLeave += (s, e) => clearLogLink.ForeColor = Color.FromArgb(120, 120, 120);
+        // Position right-aligned
+        logHeaderPanel.Resize += (s, e) =>
+        {
+            clearLogLink.Location = new Point(logHeaderPanel.Width - clearLogLink.Width - 6, 3);
+        };
+        clearLogLink.Location = new Point(logHeaderPanel.Width - clearLogLink.Width - 6, 3);
         logHeaderPanel.Controls.Add(logHeaderLabel);
+        logHeaderPanel.Controls.Add(_autoScrollLogsCheckBox);
+        logHeaderPanel.Controls.Add(_showTimestampsCheckBox);
+        logHeaderPanel.Controls.Add(clearLogLink);
         
         // System log text box (bottom panel)
         _systemLogTextBox = new RichTextBox
@@ -1150,7 +1186,7 @@ public partial class MainForm : Form
         _inCombat = inCombat;
         
         // Notify BuffManager of combat state change
-        _buffManager.SetCombatState(inCombat);
+        _buffManager.PlayerStateManager.SetCombatState(inCombat);
 
         if (InvokeRequired)
             BeginInvoke(UpdateCombatStateUI);
@@ -1412,13 +1448,13 @@ private void LogMessage(string message, MessageType type)
     private void LoadUiSettings()
     {
         // Load from BuffManager's settings (stored in settings.json)
-        _displaySystemLog = _buffManager.DisplaySystemLog;
+        _displaySystemLog = _buffManager.AppSettings.DisplaySystemLog;
     }
     
     private void SaveUiSettings()
     {
-        // Save via BuffManager (stored in settings.json)
-        _buffManager.DisplaySystemLog = _displaySystemLog;
+        _buffManager.AppSettings.DisplaySystemLog = _displaySystemLog;
+        _buffManager.AppSettings.Save();
     }
 
 /// <summary>

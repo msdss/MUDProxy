@@ -26,6 +26,10 @@ public sealed class ScreenBuffer
 
     private TerminalCell[,] _cells;
 
+    // Scrollback buffer - stores lines that scroll off the top of the full screen
+    private const int MaxScrollbackLines = 500;
+    private readonly List<TerminalCell[]> _scrollback = new();
+
     public ScreenBuffer(int cols, int rows)
     {
         Cols = Math.Clamp(cols, 20, 400);
@@ -171,6 +175,13 @@ public sealed class ScreenBuffer
 
         for (int _ = 0; _ < lines; _++)
         {
+            // Capture the top row to scrollback before it's overwritten
+            // Only when using full-screen scroll region (skip partial regions like training screen)
+            if (ScrollTop == 0)
+            {
+                CaptureLineToScrollback(0);
+            }
+
             for (int r = ScrollTop; r < ScrollBottom; r++)
                 for (int c = 0; c < Cols; c++)
                     _cells[r, c] = _cells[r + 1, c];
@@ -332,4 +343,52 @@ public sealed class ScreenBuffer
         
         return sb.ToString();
     }
+
+    #region Scrollback Buffer
+
+    /// <summary>
+    /// Capture a row from the screen into the scrollback buffer, preserving colors.
+    /// </summary>
+    private void CaptureLineToScrollback(int row)
+    {
+        var line = new TerminalCell[Cols];
+        for (int c = 0; c < Cols; c++)
+            line[c] = _cells[row, c];
+
+        _scrollback.Add(line);
+
+        // Trim to max size
+        if (_scrollback.Count > MaxScrollbackLines)
+            _scrollback.RemoveAt(0);
+    }
+
+    /// <summary>
+    /// Get a snapshot of all game text: scrollback history plus current screen contents.
+    /// Returns a list of rows, each row being an array of TerminalCells.
+    /// </summary>
+    public List<TerminalCell[]> GetScrollbackSnapshot()
+    {
+        var result = new List<TerminalCell[]>(_scrollback.Count + Rows);
+        
+        // Add scrollback history
+        result.AddRange(_scrollback);
+        
+        // Add current screen contents
+        for (int r = 0; r < Rows; r++)
+        {
+            var line = new TerminalCell[Cols];
+            for (int c = 0; c < Cols; c++)
+                line[c] = _cells[r, c];
+            result.Add(line);
+        }
+        
+        return result;
+    }
+
+    /// <summary>
+    /// Get the number of lines currently in the scrollback buffer.
+    /// </summary>
+    public int ScrollbackLineCount => _scrollback.Count;
+
+    #endregion
 }

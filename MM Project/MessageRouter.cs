@@ -56,7 +56,7 @@ public class MessageRouter
     public void ResetLoginPhase()
     {
         _isInLoginPhase = true;
-        _buffManager.IsInLoginPhase = true;
+        _buffManager.PlayerStateManager.IsInLoginPhase = true;
     }
     
     /// <summary>
@@ -99,7 +99,7 @@ public class MessageRouter
             if (_isInLoginPhase)
             {
                 _isInLoginPhase = false;
-                _buffManager.IsInLoginPhase = false;
+                _buffManager.PlayerStateManager.IsInLoginPhase = false;
                 OnLoginComplete?.Invoke();
             }
         }

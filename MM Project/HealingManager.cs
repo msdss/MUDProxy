@@ -42,17 +42,14 @@ public class HealingManager
             "healing.json");
         
         LoadConfiguration();
+        _config.HealingEnabled = true; // Always default to ON on startup
     }
     
     public HealingConfiguration Configuration => _config;
     public bool HealingEnabled
     {
         get => _config.HealingEnabled;
-        set
-        {
-            _config.HealingEnabled = value;
-            SaveConfiguration();
-        }
+        set => _config.HealingEnabled = value;
     }
     
     public bool HasSelfHealRules => _config.SelfHealRules.Count > 0;

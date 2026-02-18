@@ -568,7 +568,6 @@ public class CharacterProfile
     public int ManaReservePercent { get; set; } = 20;
     public bool BuffWhileResting { get; set; } = false;
     public bool BuffWhileInCombat { get; set; } = true;
-    public bool CombatAutoEnabled { get; set; } = true;
     
     // Player database (friends, enemies, etc.)
     public List<PlayerData> Players { get; set; } = new();

@@ -603,6 +603,16 @@ else
     }
     
     /// <summary>
+    /// Reset the room scan deduplication so the next "Also here:" line is processed fresh.
+    /// Called when combat is toggled on to force a re-scan of the current room.
+    /// </summary>
+    public void ResetRoomScan()
+    {
+        _lastProcessedAlsoHere = string.Empty;
+        OnSendCommand?.Invoke("");
+    }
+    
+    /// <summary>
     /// Called on each combat tick to potentially send another attack spell
     /// if we're in combat and have regained enough mana after previously falling back to melee
     /// </summary>
