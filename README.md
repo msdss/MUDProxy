@@ -1,25 +1,25 @@
 # MUD Proxy Viewer - AI Knowledge Base
 
-> **Version:** 2.0.0  
-> **Last Updated:** February 2026  
+> **Version:** 2.1.0  
+> **Last Updated:** February 17, 2026  
 > **Purpose:** Combat automation client for MajorMUD, replacing the deprecated MegaMUD client  
 > **Platform:** Windows (.NET 8.0 WinForms)  
-> **Status:** Active Development - **Major Refactoring Complete** ✅
+> **Status:** Active Development - **BuffManager Refactoring In Progress**
 
 ---
 
-## 🎉 Recent Major Update (v2.0.0)
+## 🎉 Recent Major Update (v2.1.0)
 
-**MainForm.cs reduced from 4,552 lines to ~600 lines (87% reduction!)**
+**BuffManager.cs reduced from 2,237 lines to ~1,147 lines (49% reduction!) — ongoing refactoring**
 
-The codebase has been completely refactored for better maintainability and AI collaboration:
-- ✅ Extracted network layer into `TelnetConnection.cs`
-- ✅ Extracted message routing into `MessageRouter.cs`
-- ✅ Extracted terminal emulation into separate classes
-- ✅ Extracted log rendering into `LogRenderer.cs`
-- ✅ Split MainForm into partial classes for organization
-- ✅ Extracted UI helper classes
-- ✅ Zero build warnings, clean professional codebase
+BuffManager refactoring is decomposing the monolithic hub into focused, single-responsibility classes:
+- ✅ Extracted `PartyManager.cs` — party tracking, par automation, health requests
+- ✅ Extracted `PlayerStateManager.cs` — HP/mana, stats, exp, training screen, resting state
+- ✅ Extracted `AppSettings.cs` — app-level settings persistence
+- ✅ Removed 15+ pass-through properties, callers access sub-managers directly
+- ✅ Automation toggles (Combat/Heal/Buff/Cure) default ON, no longer persisted
+- ✅ Backscroll history viewer with ANSI color and search
+- 🔄 Next: Message routing extraction, profile management extraction, GameManager creation
 
 ---
 
@@ -81,11 +81,10 @@ MegaMUD was the traditional client used to play MajorMUD. It is **very old and d
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                      MainForm                           │
-│  (UI Orchestration, ~600 lines)                        │
+│  (UI Orchestration)                                    │
 │                                                         │
 │  ┌──────────────────────┐  ┌──────────────────────┐   │
 │  │ MenuHandlers.cs      │  │ DisplayUpdates.cs    │   │
-│  │ (~400 lines)         │  │ (~300 lines)         │   │
 │  └──────────────────────┘  └──────────────────────┘   │
 └─────────────────────────────────────────────────────────┘
            │               │               │
@@ -94,13 +93,25 @@ MegaMUD was the traditional client used to play MajorMUD. It is **very old and d
 │ Telnet       │  │ Message      │  │ Terminal     │
 │ Connection   │  │ Router       │  │ Control      │
 └──────────────┘  └──────────────┘  └──────────────┘
-           │               │               │
-           ▼               ▼               ▼
+                        │
+                        ▼
 ┌──────────────────────────────────────────────────────┐
-│                  BuffManager (Hub)                   │
+│              BuffManager (Hub — being refactored)    │
+│  ┌──────────────┐  ┌──────────────┐                 │
+│  │ PlayerState  │  │ PartyManager │                 │
+│  │ Manager      │  │              │                 │
+│  └──────────────┘  └──────────────┘                 │
 │  ┌────────────┐  ┌────────────┐  ┌────────────┐    │
 │  │ Combat Mgr │  │ Healing Mgr│  │  Cure Mgr  │    │
 │  └────────────┘  └────────────┘  └────────────┘    │
+│  ┌────────────┐  ┌──────────────┐ ┌────────────┐   │
+│  │ Remote Cmd │  │ Room Tracker │ │ AppSettings│   │
+│  │ Manager    │  │ + GraphMgr  │ │            │   │
+│  └────────────┘  └──────────────┘ └────────────┘   │
+│  ┌──────────────┐  ┌──────────────┐                 │
+│  │ PlayerDB Mgr │  │ MonsterDB   │                 │
+│  │              │  │ Manager     │                 │
+│  └──────────────┘  └──────────────┘                 │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -118,18 +129,23 @@ MainForm (Entry Point - Partial Class Split)
     │       └── Tick detection
     │
     ├── TerminalControl (VT100 Terminal)
-    │       ├── ScreenBuffer (2D character grid)
+    │       ├── ScreenBuffer (2D character grid + scrollback history)
     │       └── AnsiVtParser (ANSI/VT100 parsing)
     │
     ├── LogRenderer (Log Display)
     │       └── ANSI color rendering for logs
     │
-    ├── BuffManager (Central Hub)
-    │       ├── HealingManager
-    │       ├── CureManager
-    │       ├── PlayerDatabaseManager
-    │       ├── MonsterDatabaseManager
-    │       └── CombatManager
+    ├── BuffManager (Central Hub — being decomposed)
+    │       ├── PlayerStateManager (HP, mana, stats, exp, resting, training)
+    │       ├── PartyManager (party tracking, par, health requests)
+    │       ├── HealingManager (heal spells, HP threshold rules)
+    │       ├── CureManager (ailment detection, cure automation)
+    │       ├── CombatManager (enemy detection, attack automation)
+    │       ├── RemoteCommandManager (telepath-based remote control)
+    │       ├── PlayerDatabaseManager (friend/enemy tracking)
+    │       ├── MonsterDatabaseManager (monster data, overrides)
+    │       ├── RoomGraphManager + RoomTracker (room detection, mapping)
+    │       └── AppSettings (app-level persistence)
     │
     └── GameDataCache (Singleton)
             └── Game JSON files (Races, Classes, Items, etc.)
@@ -156,35 +172,45 @@ MainForm (Entry Point - Partial Class Split)
 MudProxyViewer/
 │
 ├── Core Application (Main UI)
-│   ├── MainForm.cs                    # UI orchestration (~600 lines)
-│   ├── MainForm.MenuHandlers.cs       # Menu/button event handlers (~400 lines)
-│   └── MainForm.DisplayUpdates.cs     # UI refresh methods (~300 lines)
+│   ├── MainForm.cs                    # UI orchestration
+│   ├── MainForm.MenuHandlers.cs       # Menu/button event handlers
+│   └── MainForm.DisplayUpdates.cs     # UI refresh methods
 │
 ├── Network Layer
-│   └── TelnetConnection.cs            # TCP, IAC, NAWS, reconnection (~400 lines)
+│   └── TelnetConnection.cs            # TCP, IAC, NAWS, reconnection
 │
 ├── Message Processing
-│   └── MessageRouter.cs               # Combat detection, HP parsing, ticks (~200 lines)
+│   └── MessageRouter.cs               # Combat detection, HP parsing, ticks
 │
 ├── Terminal Emulation
-│   ├── TerminalControl.cs             # VT100 terminal UserControl (~480 lines)
-│   ├── ScreenBuffer.cs                # 2D character buffer (~340 lines)
-│   ├── AnsiVtParser.cs                # ANSI escape sequence parser (~365 lines)
-│   └── TerminalCell.cs                # Terminal cell struct (~17 lines)
+│   ├── TerminalControl.cs             # VT100 terminal UserControl
+│   ├── ScreenBuffer.cs                # 2D character buffer + scrollback history
+│   ├── AnsiVtParser.cs                # ANSI escape sequence parser
+│   └── TerminalCell.cs                # Terminal cell struct
 │
 ├── UI Components
-│   ├── LogRenderer.cs                 # ANSI log rendering (~260 lines)
-│   ├── MessageType.cs                 # Log message type enum (~10 lines)
-│   ├── DarkMenuRenderer.cs            # Dark theme menu renderer (~55 lines)
-│   └── DarkColorTable.cs              # Dark theme color table (~22 lines)
+│   ├── LogRenderer.cs                 # ANSI log rendering
+│   ├── MessageType.cs                 # Log message type enum
+│   ├── DarkMenuRenderer.cs            # Dark theme menu renderer
+│   └── DarkColorTable.cs              # Dark theme color table
 │
 ├── Game Managers
-│   ├── BuffManager.cs                 # Central hub: buffs, party, settings, profiles
+│   ├── BuffManager.cs                 # Buff configs, auto-recast, cast priority (hub — being decomposed)
+│   ├── PlayerStateManager.cs          # HP/mana, stats, exp, resting/combat/training state
+│   ├── PartyManager.cs                # Party tracking, par automation, health requests
 │   ├── CombatManager.cs               # Combat automation, enemy detection, attacks
 │   ├── HealingManager.cs              # Heal spell management, HP monitoring
 │   ├── CureManager.cs                 # Ailment detection and cure automation
+│   ├── RemoteCommandManager.cs        # Telepath-based remote command handling
 │   ├── PlayerDatabaseManager.cs       # Player tracking (friends/enemies)
-│   └── MonsterDatabaseManager.cs      # Monster data, CSV parsing, overrides
+│   ├── MonsterDatabaseManager.cs      # Monster data, CSV parsing, overrides
+│   ├── RoomGraphManager.cs            # Room graph from game data
+│   ├── RoomTracker.cs                 # Current room detection from server output
+│   └── ExperienceTracker.cs           # Exp/hour calculation, time-to-level
+│
+├── Settings & Persistence
+│   ├── AppSettings.cs                 # App-level settings (settings.json)
+│   └── ProfileManager.cs             # Character profile file I/O (partial — not yet wired)
 │
 ├── Data & Models
 │   ├── Models.cs                      # All data models and enums
@@ -193,19 +219,23 @@ MudProxyViewer/
 │
 ├── Dialogs
 │   ├── SettingsDialog.cs              # Settings UI (tabbed configuration)
+│   ├── BackscrollDialog.cs            # Scrollback history viewer with search
+│   ├── BuffConfigDialog.cs            # Buff configuration editor
+│   ├── HealingConfigDialog.cs         # Healing rules configuration
+│   ├── CureConfigDialog.cs            # Cure/ailment configuration
 │   └── MonsterDatabaseDialog.cs       # Monster-specific list with overrides
 │
 ├── Controls/
 │   └── CombatStatusPanel.cs           # Combat panel UI component
 │
-├── GameData/                          # Game data viewers (Option A structure)
+├── GameData/                          # Game data viewers
 │   ├── AbilityNames.cs                # Ability ID → name lookup
 │   ├── GenericDetailDialog.cs         # Fallback detail dialog
 │   ├── RaceDialogs.cs                 # RaceViewerConfig + RaceDetailDialog
 │   ├── ClassDialogs.cs                # ClassViewerConfig + ClassDetailDialog
 │   ├── ItemDialogs.cs                 # ItemViewerConfig + ItemDetailDialog
 │   ├── SpellDialogs.cs                # SpellViewerConfig + SpellDetailDialog
-│   ├── MonsterDialogs.cs              # MonsterViewerConfig (stub)
+│   ├── MonsterDialogs.cs              # MonsterViewerConfig
 │   ├── RoomDialogs.cs                 # RoomViewerConfig + RoomDetailDialog
 │   ├── ShopDialogs.cs                 # ShopViewerConfig + ShopDetailDialog
 │   ├── LairDialogs.cs                 # LairViewerConfig + LairDetailDialog
@@ -218,16 +248,24 @@ MudProxyViewer/
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| **MainForm.cs** | ~600 | Core UI orchestration |
+| **BuffManager.cs** | ~1,147 | Buff management + hub (being decomposed) |
+| PlayerStateManager.cs | ~300 | Player state, stats, exp tracking |
+| PartyManager.cs | ~400 | Party tracking, automation |
+| CombatManager.cs | ~700 | Combat automation |
+| HealingManager.cs | ~450 | Heal spell management |
+| CureManager.cs | ~700 | Ailment/cure automation |
+| RemoteCommandManager.cs | ~400 | Telepath remote commands |
+| RoomTracker.cs | ~350 | Room detection from server output |
+| RoomGraphManager.cs | ~300 | Room graph from game data |
+| MainForm.cs | ~600 | Core UI orchestration |
 | MainForm.MenuHandlers.cs | ~400 | All menu/button handlers |
 | MainForm.DisplayUpdates.cs | ~300 | UI refresh methods |
 | TelnetConnection.cs | ~400 | Network layer |
-| MessageRouter.cs | ~200 | Message processing |
+| MessageRouter.cs | ~180 | Message processing |
 | TerminalControl.cs | ~480 | VT100 terminal |
-| ScreenBuffer.cs | ~340 | Terminal buffer |
+| ScreenBuffer.cs | ~400 | Terminal buffer + scrollback |
 | AnsiVtParser.cs | ~365 | ANSI parser |
-| LogRenderer.cs | ~260 | Log rendering |
-| **Total** | **~2,400** | **Down from 4,552!** |
+| SettingsDialog.cs | ~900 | Tabbed settings UI |
 
 ---
 
@@ -461,28 +499,64 @@ public class LogRenderer
 
 ### BuffManager.cs
 
-Central management hub (unchanged from previous version):
-- Buff configurations and tracking
-- Party management
-- Player info tracking
-- Settings persistence
-- Character profiles
+Central management hub (**currently being decomposed** — see Refactoring Plan):
+- Buff configurations CRUD, import/export
+- Active buff tracking (activate, expire, clear)
+- Auto-recast system with heal/cure/buff cast priority
+- Cast failure detection (blocked until next tick)
+- Still owns: constructor wiring, message dispatching, profile save/load (moving out in next phases)
+
+### PlayerStateManager.cs
+
+Player state tracking (extracted from BuffManager):
+- HP, Mana, MaxHP, MaxMana, ManaType
+- Resting, InCombat, InTrainingScreen, IsInLoginPhase states
+- PlayerInfo (name, race, class, level)
+- ExperienceTracker (exp/hour, time-to-level)
+- Stat and exp command parsing
+- Training screen detection
+
+### PartyManager.cs
+
+Party management (extracted from BuffManager):
+- Party member tracking from `par` output
+- Join/leave/disband detection
+- Auto `par` command on interval or after combat tick
+- Health request polling via telepath
+- Auto-invite players from room
 
 ### CombatManager.cs
 
-Combat automation (unchanged):
+Combat automation:
 - Enemy detection from "Also here:" lines
 - Attack automation (melee and spell)
-- Monster override support
-- Target tracking
+- Monster override support (attack/ignore/flee)
+- Target tracking, round management
+- Break command on disable, room rescan on enable
 
 ### HealingManager.cs & CureManager.cs
 
-Health management (unchanged):
-- Heal spell configurations
-- HP threshold monitoring
-- Ailment detection and curing
+Health management:
+- Heal spell configurations with self/party/party-wide targeting
+- HP threshold rules (combat vs resting states)
+- Ailment detection and cure automation
 - Party healing rules
+- Toggle state is runtime-only (defaults ON, not persisted)
+
+### RemoteCommandManager.cs
+
+Telepath-based remote control:
+- Permission-based command system via player database
+- Toggle automation (combat, heal, cure, buff) remotely
+- Query health, exp, location
+- Execute arbitrary commands, request party invite
+- Hangup/relog commands
+
+### AppSettings.cs
+
+App-level settings persistence (extracted from BuffManager):
+- `AutoLoadLastCharacter`, `LastCharacterPath`, `DisplaySystemLog`
+- Reads/writes `settings.json` (separate from character profiles)
 
 ---
 
@@ -810,12 +884,14 @@ private TelnetConnection _telnetConnection = null!;  // Initialized in construct
 
 ### Adding New Features
 
-1. **New Manager:** Create class, inject into BuffManager, wire events
+1. **New Manager:** Create class with delegate injection, wire into BuffManager constructor
 2. **New UI Component:** Extract to separate UserControl or Form
 3. **New Network Feature:** Add to TelnetConnection.cs
 4. **New Message Processing:** Add to MessageRouter.cs
 5. **New Display Logic:** Add to MainForm.DisplayUpdates.cs
-6. **New Menu Handler:** Add to MainForm.MenuHandlers.cs
+6. **New Player State:** Add to PlayerStateManager.cs
+7. **New Party Feature:** Add to PartyManager.cs
+8. **New Menu/Button:** Add to MainForm.MenuHandlers.cs **New Menu Handler:** Add to MainForm.MenuHandlers.cs
 
 ---
 
@@ -864,6 +940,45 @@ private void SomeMethod(string data)
 ---
 
 ## Refactoring History
+
+### Version 2.1.0 - BuffManager Decomposition (February 2026)
+
+**Objective:** Decompose BuffManager.cs from 2,237-line monolithic hub into focused single-responsibility classes.
+
+#### Phase 1: Extract PartyManager ✅
+- **Created:** `PartyManager.cs` (~400 lines)
+- **Removed from BuffManager:** ~350 lines (party tracking, par automation, health requests, regex patterns)
+- **Result:** BuffManager reduced to ~1,890 lines
+
+#### Phase 2: Extract PlayerStateManager ✅
+- **Created:** `PlayerStateManager.cs` (~300 lines)
+- **Removed from BuffManager:** ~250 lines (HP/mana, stats, exp, training screen, resting state)
+- **Result:** BuffManager reduced to ~1,640 lines
+
+#### Phase 3a: Extract AppSettings ✅
+- **Created:** `AppSettings.cs` (~75 lines)
+- **Removed from BuffManager:** ~69 lines (app-level settings persistence)
+- **Result:** BuffManager reduced to ~1,570 lines
+
+#### Phase 3b: Pass-Through Property Cleanup ✅
+- **Removed from BuffManager:** 15+ pass-through properties
+- **Updated:** 7 caller files to access sub-managers directly
+- **Result:** BuffManager reduced to ~1,147 lines
+
+#### Additional Fixes in v2.1.0
+- Automation toggles (Combat/Heal/Buff/Cure) default ON, no longer persisted
+- SettingsDialog no longer auto-saves on every change
+- Backscroll history viewer (`BackscrollDialog.cs`) with ANSI color and search
+- ScreenBuffer scrollback capture (500 line buffer)
+- Combat toggle sends `break` on disable, rescans room on enable
+- Race/class regex fix for hyphenated names (e.g., "Dark-Elf")
+- HealthRequestIntervalSeconds minimum lowered from 30 to 15
+- Removed `CombatAutoEnabled` from character profile persistence
+
+#### Remaining (Phases 4-6 — Planned)
+- **Phase 4:** Move message dispatching from BuffManager to MessageRouter
+- **Phase 5:** Move profile save/load/new to ProfileManager
+- **Phase 6:** Create GameManager as central coordinator, BuffManager becomes buff-only
 
 ### Version 2.0.0 - Major Refactoring (February 2026)
 
@@ -940,10 +1055,20 @@ _logRenderer.LogMessage("message", MessageType.System, _systemLogTextBox,
 // Process server message
 _messageRouter.ProcessMessage(text);
 
-// Check states
-_buffManager.InCombat
-_combatManager.CombatEnabled
-_isConnected
+// Access player state
+_buffManager.PlayerStateManager.CurrentHp
+_buffManager.PlayerStateManager.InCombat
+_buffManager.PlayerStateManager.PlayerInfo.Name
+
+// Access party
+_buffManager.PartyManager.PartyMembers
+_buffManager.PartyManager.IsInParty
+
+// Access automation toggles
+_buffManager.CombatAutoEnabled
+_buffManager.AutoRecastEnabled
+_buffManager.HealingManager.HealingEnabled
+_buffManager.CureManager.CuringEnabled
 
 // Access game data
 var table = GameDataCache.Instance.GetTable("Items");
@@ -968,8 +1093,9 @@ private AnsiVtParser _ansiParser;
 
 | Version | Changes |
 |---------|---------|
-| **2.0.0** | **Major refactoring complete** - Extracted network, message routing, terminal, logging into separate classes. MainForm reduced 87%. Zero warnings. |
-| 1.0.0 | Code reorganization (Option A), comprehensive knowledge base |
+| **2.1.0** | **BuffManager decomposition** — Extracted PartyManager, PlayerStateManager, AppSettings. Pass-through cleanup. Automation toggle fix. Backscroll viewer. Combat toggle improvements. |
+| **2.0.0** | **Major refactoring complete** — Extracted network, message routing, terminal, logging into separate classes. MainForm reduced 87%. Zero warnings. |
+| 1.0.0 | Code reorganization, comprehensive knowledge base |
 | 0.9.0 | Direct telnet, ANSI colors, logon automation, BBS settings |
 | 0.8.1 | Character profiles, monster/player DB in profiles |
 | 0.8.0 | Combat system, healing, curing |
@@ -979,21 +1105,25 @@ private AnsiVtParser _ansiParser;
 
 ## Important Notes for AI Assistants
 
-1. **Code is now highly modular** - Look for logic in appropriate extracted classes
-2. **MainForm is a partial class** - Check MenuHandlers.cs and DisplayUpdates.cs for methods
-3. **Network logic is in TelnetConnection** - Don't add network code to MainForm
-4. **Message processing is in MessageRouter** - Don't add parsing to MainForm
-5. **Terminal rendering is in TerminalControl** - Complete VT100 emulator
-6. **Log rendering is in LogRenderer** - ANSI color support for logs
-7. **Dark theme is mandatory** - All UI uses consistent color palette
-8. **Zero warnings policy** - All nullable references must be initialized or marked `= null!`
-9. **Combat ticks are critical** - Timing handled by MessageRouter
-10. **Character profiles are comprehensive** - ALL settings in one JSON file
+1. **BuffManager is being decomposed** — Sub-managers (PlayerStateManager, PartyManager, etc.) now own their data. Access via `_buffManager.PlayerStateManager`, `_buffManager.PartyManager`, etc.
+2. **No more pass-through properties** — Don't use `_buffManager.CurrentHp`, use `_buffManager.PlayerStateManager.CurrentHp`
+3. **MainForm is a partial class** — Check MenuHandlers.cs and DisplayUpdates.cs for methods
+4. **Network logic is in TelnetConnection** — Don't add network code to MainForm
+5. **Message processing is in MessageRouter** — Don't add parsing to MainForm
+6. **Terminal rendering is in TerminalControl** — Complete VT100 emulator with scrollback
+7. **Log rendering is in LogRenderer** — ANSI color support for logs
+8. **Dark theme is mandatory** — All UI uses consistent color palette
+9. **Zero warnings policy** — All nullable references must be initialized or marked `= null!`
+10. **Automation toggles are runtime-only** — Combat, Heal, Buff, Cure all default ON on launch, never persisted
+11. **Delegate injection pattern** — All managers receive dependencies as `Func<>` delegates, not direct references
+12. **Character profiles are comprehensive** — ALL character settings in one JSON file
 
 ### When Adding New Features
 
 - **Network features** → Add to `TelnetConnection.cs`
-- **Message processing** → Add to `MessageRouter.cs`
+- **Message processing** → Add to `MessageRouter.cs` (not BuffManager)
+- **Player state tracking** → Add to `PlayerStateManager.cs`
+- **Party features** → Add to `PartyManager.cs`
 - **UI event handlers** → Add to `MainForm.MenuHandlers.cs`
 - **Display updates** → Add to `MainForm.DisplayUpdates.cs`
 - **Core orchestration** → Add to `MainForm.cs`
@@ -1002,4 +1132,4 @@ private AnsiVtParser _ansiParser;
 
 ---
 
-*This document provides comprehensive context for AI assistants working on this project. Version 2.0.0 represents a complete refactoring focused on maintainability, clarity, and AI collaboration. Keep updated as features are added.*
+*This document provides comprehensive context for AI assistants working on this project. Version 2.1.0 continues the decomposition of BuffManager into focused, single-responsibility classes. See BuffManager_Refactoring_Plan_Revised.md for the full plan. Keep updated as features are added.*
