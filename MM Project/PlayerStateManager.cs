@@ -26,6 +26,7 @@ public class PlayerStateManager
     private bool _isInLoginPhase = true;
     private bool _inTrainingScreen = false;
     private bool _hasEnteredGame = false;
+    private bool _isExiting = false;
     
     // Dependencies
     private readonly Action<string> _logMessage;
@@ -34,11 +35,12 @@ public class PlayerStateManager
     // Events
     public event Action? OnPlayerInfoChanged;
     public event Action<bool>? OnTrainingScreenChanged;  // true = entered, false = exited
+    public event Action? OnGameExited;  // fired when player leaves the game (training screen)
     
     // Regex patterns for stat parsing
     private static readonly Regex StatNameRegex = new(@"Name:\s*(.+?)\s{2,}Lives", RegexOptions.Compiled);
-    private static readonly Regex StatRaceRegex = new(@"Race:\s*(\w-)", RegexOptions.Compiled);
-    private static readonly Regex StatClassRegex = new(@"Class:\s*(\w-)", RegexOptions.Compiled);
+    private static readonly Regex StatRaceRegex = new(@"Race:\s*([\w-]+)", RegexOptions.Compiled);
+    private static readonly Regex StatClassRegex = new(@"Class:\s*([\w-]+)", RegexOptions.Compiled);
     private static readonly Regex StatLevelRegex = new(@"Level:\s*(\d+)", RegexOptions.Compiled);
     private static readonly Regex StatHitsRegex = new(@"Hits:\s*(\d+)/(\d+)", RegexOptions.Compiled);
     private static readonly Regex StatManaRegex = new(@"Mana:\s*\*?\s*(\d+)/(\d+)", RegexOptions.Compiled);
@@ -82,6 +84,7 @@ public class PlayerStateManager
     public bool InCombat => _inCombat;
     public bool InTrainingScreen => _inTrainingScreen;
     public bool HasEnteredGame => _hasEnteredGame;
+    public bool IsExiting => _isExiting;
     
     public bool IsInLoginPhase
     {
@@ -111,7 +114,7 @@ public class PlayerStateManager
     
     /// <summary>
     /// Process incoming messages for player state changes.
-    /// Called by BuffManager.ProcessMessage().
+    /// Called by MessageRouter.ProcessMessage().
     /// </summary>
     public void ProcessMessage(string message)
     {
@@ -123,6 +126,26 @@ public class PlayerStateManager
                 _inTrainingScreen = true;
                 _logMessage("📋 Training screen detected - pass-through mode enabled");
                 OnTrainingScreenChanged?.Invoke(true);
+                OnGameExited?.Invoke();
+            }
+        }
+        
+        // Check for exit meditation interrupted by combat
+        if (_isExiting && message.Contains("Your meditation has been interrupted"))
+        {
+            _isExiting = false;
+            _logMessage("⚔️ Exit interrupted - still in game");
+            // Send enter to trigger HP bar and room display for combat detection
+            _sendCommand("");
+        }
+        
+        // Track the start of exit meditation
+        if (message.Contains("You will exit after a period of silent meditation."))
+        {
+            if (!_isExiting)
+            {
+                _isExiting = true;
+                _logMessage("🚪 Player exiting game - automation paused");
             }
         }
         
@@ -162,6 +185,12 @@ public class PlayerStateManager
     
     private void ProcessHpManaPrompt(Match promptMatch)
     {
+        // Ignore HP bars while exiting — the server continues to send prompts
+        // during and after exit meditation. Only OnDisconnected resets _isExiting.
+        if (_isExiting)
+        {
+            return;
+        }
         // If we see the HP prompt, we're back in the game
         if (_inTrainingScreen)
         {
@@ -375,6 +404,7 @@ public class PlayerStateManager
         _inTrainingScreen = false;
         _inCombat = false;
         _isResting = false;
+        _isExiting = false;
         _experienceTracker.Reset();
     }
     

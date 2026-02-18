@@ -9,8 +9,6 @@ public class BuffManager
     private readonly List<ActiveBuff> _activeBuffs = new();
     
     private readonly string _configFilePath;
-    private readonly string _characterProfilesPath;
-    private string _currentProfilePath = string.Empty;
     
     // Sub-managers
     private readonly PlayerStateManager _playerStateManager;
@@ -24,6 +22,7 @@ public class BuffManager
     private readonly RoomGraphManager _roomGraphManager;
     private readonly RoomTracker _roomTracker;
     private readonly AppSettings _appSettings;
+    private readonly ProfileManager _profileManager;
     
     // Events for UI updates
     public event Action? OnBuffsChanged;
@@ -41,7 +40,6 @@ public class BuffManager
     private bool _castBlockedUntilNextTick = false;
     private int _manaReservePercent = 20;
     private bool _commandsPaused = false;
-    private bool _isExiting = false;
     
     // Buff state settings (persisted)
     private bool _buffWhileResting = true;
@@ -120,7 +118,7 @@ public class BuffManager
         }
     }
 
-    public bool ShouldPauseCommands => _playerStateManager.InTrainingScreen || _isExiting || _commandsPaused || _playerStateManager.IsInLoginPhase;
+    public bool ShouldPauseCommands => _playerStateManager.InTrainingScreen || _playerStateManager.IsExiting || _commandsPaused || _playerStateManager.IsInLoginPhase;
 
     // Sub-manager accessors
     public PlayerStateManager PlayerStateManager => _playerStateManager;
@@ -133,6 +131,17 @@ public class BuffManager
     public RemoteCommandManager RemoteCommandManager => _remoteCommandManager;
     public RoomGraphManager RoomGraph => _roomGraphManager;
     public RoomTracker RoomTracker => _roomTracker;
+    public ProfileManager ProfileManager => _profileManager;
+    
+    /// <summary>
+    /// Public helper for MessageRouter to raise log messages.
+    /// </summary>
+    public void LogMessage(string message) => OnLogMessage?.Invoke(message);
+    
+    /// <summary>
+    /// Public helper for MessageRouter to send commands.
+    /// </summary>
+    public void SendCommand(string command) => OnSendCommand?.Invoke(command);
     
     // Profile data
     public BbsSettings BbsSettings => _bbsSettings;
@@ -155,15 +164,11 @@ public class BuffManager
             "MudProxyViewer");
             
         _configFilePath = Path.Combine(appDataPath, "buffs.json");
-        _characterProfilesPath = Path.Combine(appDataPath, "Characters");
         
         _appSettings = new AppSettings(appDataPath);
         _appSettings.Load();
         
-        if (!Directory.Exists(_characterProfilesPath))
-        {
-            Directory.CreateDirectory(_characterProfilesPath);
-        }
+        _profileManager = new ProfileManager(appDataPath, msg => OnLogMessage?.Invoke(msg));
         
         // Create PlayerStateManager first (others need player info)
         _playerStateManager = new PlayerStateManager(
@@ -172,6 +177,7 @@ public class BuffManager
         );
         _playerStateManager.OnPlayerInfoChanged += () => OnPlayerInfoChanged?.Invoke();
         _playerStateManager.OnTrainingScreenChanged += entered => OnTrainingScreenChanged?.Invoke(entered);
+        _playerStateManager.OnGameExited += () => _partyManager?.Clear();
         
         // Create PlayerDatabaseManager (PartyManager needs it)
         _playerDatabaseManager = new PlayerDatabaseManager();
@@ -269,6 +275,16 @@ public class BuffManager
         _roomTracker.OnLogMessage += msg => OnRoomTrackerLogMessage?.Invoke(msg);
         
         LoadConfigurations();
+        
+        // Ensure all automation toggles default to ON on fresh launch.
+        // Individual config files (cures.json, heals.json) may have persisted
+        // an OFF state from a previous session — override that here.
+        // Loading a profile also forces all toggles ON.
+        _combatAutoEnabled = true;
+        _combatManager.SetCombatEnabledFromSettings(true);
+        _autoRecastEnabled = true;
+        _healingManager.HealingEnabled = true;
+        _cureManager.CuringEnabled = true;
     }
     
     #endregion
@@ -419,55 +435,13 @@ public class BuffManager
     
     #region Message Processing
     
+    /// <summary>
+    /// Process a message for buff-specific detection only.
+    /// Cast failures, cast success, and buff expiration.
+    /// All other message dispatching is handled by MessageRouter.
+    /// </summary>
     public void ProcessMessage(string message)
     {
-        // Detect game exit meditation
-        bool justStartedExiting = false;
-        if (message.Contains("You will exit after a period of silent meditation."))
-        {
-            if (!_isExiting)
-            {
-                _isExiting = true;
-                justStartedExiting = true;
-                OnLogMessage?.Invoke("🚪 Player exiting game - automation paused");
-            }
-        }
-        
-        // Detect exit interrupted
-        if (_isExiting && message.Contains("Your meditation has been interrupted"))
-        {
-            _isExiting = false;
-            OnLogMessage?.Invoke("⚔️ Exit interrupted - automation resumed");
-            OnSendCommand?.Invoke("");
-        }
-        
-        // Player re-entered the game after exiting — HP bar means we're back
-        // Skip if we just started exiting (same chunk may contain trailing HP bar)
-        if (_isExiting && !justStartedExiting && message.Contains("[HP="))
-        {
-            _isExiting = false;
-            OnLogMessage?.Invoke("▶️ Player re-entered game - automation resumed");
-        }
-        
-        // Feed lines to room tracker for location detection
-        foreach (var line in message.Split('\n'))
-        {
-            _roomTracker.ProcessLine(line.TrimEnd('\r'));
-        }
-
-        // Check for remote commands first
-        _remoteCommandManager.ProcessMessage(message);
-        
-        // Delegate to sub-managers
-        _partyManager.ProcessMessage(message);
-        _playerStateManager.ProcessMessage(message);
-        
-        // Process cure-related messages
-        _cureManager.ProcessMessage(message, _partyManager.PartyMembers.ToList());
-        
-        // Process player database
-        _playerDatabaseManager.ProcessMessage(message);
-        
         // Check for cast failures (buff-specific)
         var failMatch = CastFailRegex.Match(message);
         if (failMatch.Success)
@@ -630,7 +604,6 @@ public class BuffManager
     /// </summary>
     public void OnDisconnected()
     {
-        _isExiting = false;
         _playerStateManager.OnDisconnected();
         _partyManager.OnDisconnected();
         OnLogMessage?.Invoke("📡 Disconnected - session state reset");
@@ -933,90 +906,69 @@ public class BuffManager
     
     #region Character Profile Management
     
-    public string CharacterProfilesPath => _characterProfilesPath;
-    public string CurrentProfilePath => _currentProfilePath;
-    public bool HasUnsavedChanges { get; private set; } = false;
+    // Delegate to ProfileManager
+    public string CharacterProfilesPath => _profileManager.CharacterProfilesPath;
+    public string CurrentProfilePath => _profileManager.CurrentProfilePath;
+    public bool HasUnsavedChanges => _profileManager.HasUnsavedChanges;
     
     public string GetDefaultProfileFilename()
     {
-        var playerInfo = _playerStateManager.PlayerInfo;
-        if (!string.IsNullOrEmpty(playerInfo.Name))
-        {
-            var safeName = string.Join("_", playerInfo.Name.Split(Path.GetInvalidFileNameChars()));
-            return $"{safeName}.json";
-        }
-        return "character.json";
+        return _profileManager.GetDefaultProfileFilename(_playerStateManager.PlayerInfo.Name);
     }
     
     public void UpdateBbsSettings(BbsSettings settings)
     {
         _bbsSettings = settings.Clone();
-        HasUnsavedChanges = true;
+        _profileManager.HasUnsavedChanges = true;
         OnBbsSettingsChanged?.Invoke();
         OnLogMessage?.Invoke("📡 BBS settings updated");
     }
     
+    /// <summary>
+    /// Assemble a CharacterProfile DTO from all sub-managers and save to disk.
+    /// DTO assembly stays here (BuffManager knows all sub-managers).
+    /// File I/O is delegated to ProfileManager.
+    /// </summary>
     public (bool success, string message) SaveCharacterProfile(string filePath)
     {
-        try
+        var playerInfo = _playerStateManager.PlayerInfo;
+        var profile = new CharacterProfile
         {
-            var playerInfo = _playerStateManager.PlayerInfo;
-            var profile = new CharacterProfile
-            {
-                ProfileVersion = "1.0",
-                SavedAt = DateTime.Now,
-                
-                CharacterName = playerInfo.Name,
-                CharacterClass = playerInfo.Class,
-                CharacterLevel = playerInfo.Level,
-                
-                BbsSettings = _bbsSettings.Clone(),
-                CombatSettings = _combatManager.GetCurrentSettings(),
-                Buffs = _buffConfigurations.Select(b => b.Clone()).ToList(),
-                
-                HealSpells = _healingManager.Configuration.HealSpells.Select(h => h.Clone()).ToList(),
-                SelfHealRules = _healingManager.Configuration.SelfHealRules.Select(r => r.Clone()).ToList(),
-                PartyHealRules = _healingManager.Configuration.PartyHealRules.Select(r => r.Clone()).ToList(),
-                PartyWideHealRules = _healingManager.Configuration.PartyWideHealRules.Select(r => r.Clone()).ToList(),
-                
-                Ailments = _cureManager.Configuration.Ailments.Select(a => a.Clone()).ToList(),
-                CureSpells = _cureManager.Configuration.CureSpells.Select(c => c.Clone()).ToList(),
-                
-                MonsterOverrides = _monsterDatabaseManager.GetOverridesForProfile(),
-                Players = _playerDatabaseManager.GetPlayersForProfile(),
-                
-                ParAutoEnabled = _partyManager.ParAutoEnabled,
-                ParFrequencySeconds = _partyManager.ParFrequencySeconds,
-                ParAfterCombatTick = _partyManager.ParAfterCombatTick,
-                HealthRequestEnabled = _partyManager.HealthRequestEnabled,
-                HealthRequestIntervalSeconds = _partyManager.HealthRequestIntervalSeconds,
-                
-                ManaReservePercent = _manaReservePercent,
-                BuffWhileResting = _buffWhileResting,
-                BuffWhileInCombat = _buffWhileInCombat,
-                WindowSettings = _windowSettings
-            };
+            ProfileVersion = "1.0",
+            SavedAt = DateTime.Now,
             
-            var directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
+            CharacterName = playerInfo.Name,
+            CharacterClass = playerInfo.Class,
+            CharacterLevel = playerInfo.Level,
             
-            var json = JsonSerializer.Serialize(profile, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(filePath, json);
+            BbsSettings = _bbsSettings.Clone(),
+            CombatSettings = _combatManager.GetCurrentSettings(),
+            Buffs = _buffConfigurations.Select(b => b.Clone()).ToList(),
             
-            _currentProfilePath = filePath;
-            HasUnsavedChanges = false;
+            HealSpells = _healingManager.Configuration.HealSpells.Select(h => h.Clone()).ToList(),
+            SelfHealRules = _healingManager.Configuration.SelfHealRules.Select(r => r.Clone()).ToList(),
+            PartyHealRules = _healingManager.Configuration.PartyHealRules.Select(r => r.Clone()).ToList(),
+            PartyWideHealRules = _healingManager.Configuration.PartyWideHealRules.Select(r => r.Clone()).ToList(),
             
-            OnLogMessage?.Invoke($"💾 Character profile saved: {Path.GetFileName(filePath)}");
-            return (true, "Character profile saved successfully.");
-        }
-        catch (Exception ex)
-        {
-            OnLogMessage?.Invoke($"Error saving character profile: {ex.Message}");
-            return (false, $"Error saving character profile: {ex.Message}");
-        }
+            Ailments = _cureManager.Configuration.Ailments.Select(a => a.Clone()).ToList(),
+            CureSpells = _cureManager.Configuration.CureSpells.Select(c => c.Clone()).ToList(),
+            
+            MonsterOverrides = _monsterDatabaseManager.GetOverridesForProfile(),
+            Players = _playerDatabaseManager.GetPlayersForProfile(),
+            
+            ParAutoEnabled = _partyManager.ParAutoEnabled,
+            ParFrequencySeconds = _partyManager.ParFrequencySeconds,
+            ParAfterCombatTick = _partyManager.ParAfterCombatTick,
+            HealthRequestEnabled = _partyManager.HealthRequestEnabled,
+            HealthRequestIntervalSeconds = _partyManager.HealthRequestIntervalSeconds,
+            
+            ManaReservePercent = _manaReservePercent,
+            BuffWhileResting = _buffWhileResting,
+            BuffWhileInCombat = _buffWhileInCombat,
+            WindowSettings = _windowSettings
+        };
+        
+        return _profileManager.SaveProfile(profile, filePath);
     }
     
     public void NewCharacterProfile()
@@ -1060,91 +1012,80 @@ public class BuffManager
         _combatAutoEnabled = true;
         _combatManager.SetCombatEnabledFromSettings(true);
         _windowSettings = null;
-        _currentProfilePath = string.Empty;
-        HasUnsavedChanges = false;
+        _profileManager.ResetForNewProfile();
     }
 
+    /// <summary>
+    /// Load a CharacterProfile from disk and distribute to all sub-managers.
+    /// File I/O is delegated to ProfileManager.
+    /// DTO distribution stays here (BuffManager knows all sub-managers).
+    /// </summary>
     public (bool success, string message) LoadCharacterProfile(string filePath)
     {
-        try
+        var (success, message, profile) = _profileManager.LoadProfile(filePath);
+        if (!success || profile == null)
+            return (success, message);
+        
+        _combatManager.LoadFromProfile(profile.CombatSettings);
+        if (!string.IsNullOrEmpty(profile.CharacterName))
+            _combatManager.CurrentCharacter = profile.CharacterName;
+        
+        if (profile.BbsSettings != null)
         {
-            if (!File.Exists(filePath))
-                return (false, "Character profile file not found.");
-            
-            var json = File.ReadAllText(filePath);
-            var profile = JsonSerializer.Deserialize<CharacterProfile>(json);
-            
-            if (profile == null)
-                return (false, "Invalid character profile format.");
-            
-            _combatManager.LoadFromProfile(profile.CombatSettings);
-            if (!string.IsNullOrEmpty(profile.CharacterName))
-                _combatManager.CurrentCharacter = profile.CharacterName;
-            
-            if (profile.BbsSettings != null)
-            {
-                _bbsSettings = profile.BbsSettings.Clone();
-                OnBbsSettingsChanged?.Invoke();
-            }
-            
-            _buffConfigurations.Clear();
-            if (profile.Buffs != null)
-                _buffConfigurations.AddRange(profile.Buffs);
-            SaveConfigurations();
-            OnBuffsChanged?.Invoke();
-            
-            _healingManager.ReplaceConfiguration(new HealingConfiguration
-            {
-                HealingEnabled = _healingManager.HealingEnabled,
-                HealSpells = profile.HealSpells ?? new List<HealSpellConfiguration>(),
-                SelfHealRules = profile.SelfHealRules ?? new List<HealRule>(),
-                PartyHealRules = profile.PartyHealRules ?? new List<HealRule>(),
-                PartyWideHealRules = profile.PartyWideHealRules ?? new List<HealRule>()
-            });
-            
-            _cureManager.ReplaceConfiguration(new CureConfiguration
-            {
-                CuringEnabled = _cureManager.CuringEnabled,
-                Ailments = profile.Ailments ?? new List<AilmentConfiguration>(),
-                CureSpells = profile.CureSpells ?? new List<CureSpellConfiguration>(),
-                PriorityOrder = _cureManager.PriorityOrder
-            });
-            
-            _monsterDatabaseManager.LoadOverridesFromProfile(profile.MonsterOverrides);
-            _playerDatabaseManager.LoadFromProfile(profile.Players);
-            
-            _playerStateManager.LoadFromProfile(profile.CharacterName, profile.CharacterClass, profile.CharacterLevel);
-            
-            _partyManager.LoadFromProfile(
-                profile.ParAutoEnabled, profile.ParFrequencySeconds, profile.ParAfterCombatTick,
-                profile.HealthRequestEnabled, profile.HealthRequestIntervalSeconds);
-            
-            _manaReservePercent = profile.ManaReservePercent;
-            _buffWhileResting = profile.BuffWhileResting;
-            _buffWhileInCombat = profile.BuffWhileInCombat;
-            
-            // All automation toggles default to ON when loading a profile
-            _combatAutoEnabled = true;
-            _combatManager.SetCombatEnabledFromSettings(true);
-            _autoRecastEnabled = true;
-            _healingManager.HealingEnabled = true;
-            _cureManager.CuringEnabled = true;
-            
-            _windowSettings = profile.WindowSettings;
-            
-            _currentProfilePath = filePath;
-            HasUnsavedChanges = false;
-            _appSettings.LastCharacterPath = filePath;
-            _appSettings.Save();
-            
-            OnLogMessage?.Invoke($"📂 Character profile loaded: {Path.GetFileName(filePath)}");
-            return (true, $"Character profile '{profile.CharacterName}' loaded successfully.");
+            _bbsSettings = profile.BbsSettings.Clone();
+            OnBbsSettingsChanged?.Invoke();
         }
-        catch (Exception ex)
+        
+        _buffConfigurations.Clear();
+        if (profile.Buffs != null)
+            _buffConfigurations.AddRange(profile.Buffs);
+        SaveConfigurations();
+        OnBuffsChanged?.Invoke();
+        
+        _healingManager.ReplaceConfiguration(new HealingConfiguration
         {
-            OnLogMessage?.Invoke($"Error loading character profile: {ex.Message}");
-            return (false, $"Error loading character profile: {ex.Message}");
-        }
+            HealingEnabled = _healingManager.HealingEnabled,
+            HealSpells = profile.HealSpells ?? new List<HealSpellConfiguration>(),
+            SelfHealRules = profile.SelfHealRules ?? new List<HealRule>(),
+            PartyHealRules = profile.PartyHealRules ?? new List<HealRule>(),
+            PartyWideHealRules = profile.PartyWideHealRules ?? new List<HealRule>()
+        });
+        
+        _cureManager.ReplaceConfiguration(new CureConfiguration
+        {
+            CuringEnabled = _cureManager.CuringEnabled,
+            Ailments = profile.Ailments ?? new List<AilmentConfiguration>(),
+            CureSpells = profile.CureSpells ?? new List<CureSpellConfiguration>(),
+            PriorityOrder = _cureManager.PriorityOrder
+        });
+        
+        _monsterDatabaseManager.LoadOverridesFromProfile(profile.MonsterOverrides);
+        _playerDatabaseManager.LoadFromProfile(profile.Players);
+        
+        _playerStateManager.LoadFromProfile(profile.CharacterName, profile.CharacterClass, profile.CharacterLevel);
+        
+        _partyManager.LoadFromProfile(
+            profile.ParAutoEnabled, profile.ParFrequencySeconds, profile.ParAfterCombatTick,
+            profile.HealthRequestEnabled, profile.HealthRequestIntervalSeconds);
+        
+        _manaReservePercent = profile.ManaReservePercent;
+        _buffWhileResting = profile.BuffWhileResting;
+        _buffWhileInCombat = profile.BuffWhileInCombat;
+        
+        // All automation toggles default to ON when loading a profile
+        _combatAutoEnabled = true;
+        _combatManager.SetCombatEnabledFromSettings(true);
+        _autoRecastEnabled = true;
+        _healingManager.HealingEnabled = true;
+        _cureManager.CuringEnabled = true;
+        
+        _windowSettings = profile.WindowSettings;
+        
+        // Sync AppSettings (will be consolidated in Phase 6)
+        _appSettings.LastCharacterPath = filePath;
+        _appSettings.Save();
+        
+        return (success, message);
     }
     
     #endregion

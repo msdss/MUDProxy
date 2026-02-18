@@ -3,8 +3,20 @@ using System.Text.RegularExpressions;
 namespace MudProxyViewer;
 
 /// <summary>
-/// Routes and processes messages from the MUD server
-/// Extracts message processing logic from MainForm for better organization
+/// Routes and processes all messages from the MUD server.
+/// Dispatches to sub-managers and detects game state changes.
+/// 
+/// Responsibilities:
+/// - Room tracker line feeding
+/// - Remote command dispatching
+/// - Sub-manager message dispatching (party, player state, cure, player DB)
+/// - Combat state detection (*Combat Engaged* / *Combat Off*)
+/// - HP/Mana parsing from HP bar
+/// - Combat tick detection from damage clustering
+/// - Death detection
+/// - Buff cast/expire detection (delegated to BuffManager)
+/// 
+/// Note: Exit meditation detection is handled by PlayerStateManager.ProcessMessage().
 /// </summary>
 public class MessageRouter
 {
@@ -60,24 +72,39 @@ public class MessageRouter
     }
     
     /// <summary>
-    /// Process a message from the MUD server
+    /// Process a message from the MUD server.
+    /// Routes to all sub-managers and detects game state changes.
     /// </summary>
     public void ProcessMessage(string text)
     {
-        // Pass to buff manager for processing
         var wasPaused = _buffManager.ShouldPauseCommands;
+        
+        // --- Feed lines to room tracker ---
+        foreach (var line in text.Split('\n'))
+        {
+            _buffManager.RoomTracker.ProcessLine(line.TrimEnd('\r'));
+        }
+        
+        // --- Dispatch to sub-managers ---
+        _buffManager.RemoteCommandManager.ProcessMessage(text);
+        _buffManager.PartyManager.ProcessMessage(text);
+        _buffManager.PlayerStateManager.ProcessMessage(text);
+        _buffManager.CureManager.ProcessMessage(text, _buffManager.PartyManager.PartyMembers.ToList());
+        _buffManager.PlayerDatabase.ProcessMessage(text);
+        
+        // --- Buff-specific message processing (cast success/failure/expire) ---
         _buffManager.ProcessMessage(text);
         
-        // Pass to combat manager for room parsing
+        // --- Combat manager room parsing ---
         _buffManager.CombatManager.ProcessMessage(text);
         
-        // Update pause button if state changed (e.g., training screen detected/exited)
+        // --- Check if pause state changed ---
         if (wasPaused != _buffManager.ShouldPauseCommands)
         {
             OnPauseStateChanged?.Invoke(_buffManager.ShouldPauseCommands);
         }
         
-        // Combat state changes
+        // --- Combat state changes ---
         if (CombatEngagedRegex.IsMatch(text))
         {
             OnCombatStateChanged?.Invoke(true);
@@ -89,7 +116,7 @@ public class MessageRouter
             _buffManager.CombatManager.OnCombatEnded();
         }
         
-        // HP/Mana updates
+        // --- HP/Mana updates ---
         var hpMatch = HpManaRegex.Match(text);
         if (hpMatch.Success)
         {
@@ -104,13 +131,13 @@ public class MessageRouter
             }
         }
         
-        // Damage detection for tick timing
+        // --- Damage detection for tick timing ---
         if (DamageRegex.IsMatch(text))
         {
             DetectCombatTick();
         }
         
-        // Death detection
+        // --- Death detection ---
         if (PlayerDeathRegex.IsMatch(text))
         {
             OnCombatStateChanged?.Invoke(false);
@@ -157,12 +184,9 @@ public class MessageRouter
         {
             _damageMessageCount = 1;
             
-            // Always detect tick when we see damage - combat state doesn't matter
-            // The global tick runs regardless of whether WE are in combat
             if (_nextTickTime.HasValue)
             {
                 var drift = Math.Abs((now - _nextTickTime.Value).TotalMilliseconds);
-                // If we're close to expected tick time, or way off, record it
                 if (drift < 1500 || drift > 3500)
                 {
                     OnCombatTickDetected?.Invoke();
@@ -171,7 +195,6 @@ public class MessageRouter
             }
             else
             {
-                // First tick detection - establish timing
                 OnCombatTickDetected?.Invoke();
                 _nextTickTime = now.AddMilliseconds(TICK_INTERVAL_MS);
             }
