@@ -1,27 +1,28 @@
 # MUD Proxy Viewer - AI Knowledge Base
 
-> **Version:** 2.3.0  
+> **Version:** 2.4.0  
 > **Last Updated:** February 19, 2026  
 > **Purpose:** Combat automation client for MajorMUD, replacing the deprecated MegaMUD client  
 > **Platform:** Windows (.NET 8.0 WinForms)  
-> **Status:** Active Development - **BuffManager Refactoring Complete (Phase 7)**
+> **Status:** Active Development - **BuffManager Refactoring Complete**
 
 ---
 
-## 🎉 Recent Major Update (v2.3.0)
+## 🎉 Recent Major Update (v2.4.0)
 
-**Phase 7 complete — CastCoordinator extracted from BuffManager**
+**BuffManager refactoring complete — all phases finished**
 
-BuffManager.cs reduced from 2,237 lines to ~622 lines (72% total reduction). The priority-based casting pipeline (heal/cure/buff) now lives in its own CastCoordinator class:
+BuffManager.cs reduced from 2,237 lines to ~622 lines (72% total reduction). The monolithic hub has been fully decomposed into focused, single-responsibility classes:
 - ✅ Extracted `PartyManager.cs` — party tracking, par automation, health requests
 - ✅ Extracted `PlayerStateManager.cs` — HP/mana, stats, exp, training screen, resting state, exit meditation
 - ✅ Extracted `MessageRouter.cs` — server message dispatching to all sub-managers
-- ✅ Extracted `ProfileManager.cs` — character profile file I/O
+- ✅ Extracted `ProfileManager.cs` — character profile file I/O and app-level settings
 - ✅ Created `GameManager.cs` — central coordinator owning all sub-managers
 - ✅ Extracted `CastCoordinator.cs` — priority loop, cast timing/cooldowns, failure detection
+- ✅ Consolidated `AppSettings.cs` into `ProfileManager.cs` — eliminated duplicate settings class
 - ✅ BuffManager is now **pure buff management**: config CRUD, active buff tracking, recast eligibility
 - ✅ Uniform cast interface: each manager returns data, CastCoordinator sends commands
-- 🔜 Optional: AppSettings consolidation, BbsSettings migration
+- ✅ Combat re-attack bug fixed: no longer sends redundant attacks when entities enter the room
 
 ---
 
@@ -107,7 +108,7 @@ MegaMUD was the traditional client used to play MajorMUD. It is **very old and d
 │  │ Combat Mgr │  │ Healing Mgr│  │  Cure Mgr  │    │
 │  └────────────┘  └────────────┘  └────────────┘    │
 │  ┌────────────┐  ┌──────────────┐ ┌────────────┐   │
-│  │ Remote Cmd │  │ Room Tracker │ │ AppSettings│   │
+│  │ Remote Cmd │  │ Room Tracker │                 │
 │  │ Manager    │  │ + GraphMgr  │ │            │   │
 │  └────────────┘  └──────────────┘ └────────────┘   │
 │  ┌──────────────┐  ┌──────────────┐                 │
@@ -159,8 +160,7 @@ MainForm (Entry Point - Partial Class Split)
     │       ├── PlayerDatabaseManager (friend/enemy tracking)
     │       ├── MonsterDatabaseManager (monster data, overrides)
     │       ├── RoomGraphManager + RoomTracker (room detection, mapping)
-    │       ├── ProfileManager (character profile file I/O)
-    │       └── AppSettings (app-level persistence)
+    │       └── ProfileManager (character profile file I/O, app-level settings)
     │
     └── GameDataCache (Singleton)
             └── Game JSON files (Races, Classes, Items, etc.)
@@ -226,8 +226,7 @@ MudProxyViewer/
 │   └── ExperienceTracker.cs           # Exp/hour calculation, time-to-level
 │
 ├── Settings & Persistence
-│   ├── AppSettings.cs                 # App-level settings (settings.json)
-│   └── ProfileManager.cs             # Character profile file I/O (wired into GameManager)
+│   └── ProfileManager.cs             # Character profile file I/O, app-level settings (settings.json)
 │
 ├── Data & Models
 │   ├── Models.cs                      # All data models and enums
@@ -276,7 +275,7 @@ MudProxyViewer/
 | RemoteCommandManager.cs | ~400 | Telepath remote commands |
 | RoomTracker.cs | ~350 | Room detection from server output |
 | RoomGraphManager.cs | ~300 | Room graph from game data |
-| ProfileManager.cs | ~224 | Character profile file I/O |
+| ProfileManager.cs | ~224 | Character profile file I/O, app-level settings |
 | MessageRouter.cs | ~205 | Server message routing and dispatching |
 | MainForm.cs | ~1,540 | Core UI orchestration |
 | MainForm.MenuHandlers.cs | ~898 | All menu/button handlers |
@@ -603,11 +602,15 @@ Telepath-based remote control:
 - Execute arbitrary commands, request party invite
 - Hangup/relog commands
 
-### AppSettings.cs
+### ProfileManager.cs
 
-App-level settings persistence (extracted from BuffManager):
-- `AutoLoadLastCharacter`, `LastCharacterPath`, `DisplaySystemLog`
-- Reads/writes `settings.json` (separate from character profiles)
+Character profile and app-level settings persistence:
+- Profile file I/O: `SaveProfile()`, `LoadProfile()`, `AutoSave()`
+- App-level settings: `AutoLoadLastCharacter`, `LastCharacterPath`, `DisplaySystemLog`
+- Reads/writes `settings.json` for app settings (auto-saves on property change)
+- Profile path tracking, unsaved changes detection
+- `GetDefaultProfileFilename()` for safe filename generation
+- GameManager assembles profile DTOs; ProfileManager handles serialization only
 
 ---
 
@@ -729,7 +732,7 @@ var items = GameDataCache.Instance.GetTable("Items");
 
 ```
 %AppData%\MudProxyViewer\
-├── settings.json              # Global application settings
+├── settings.json              # Global application settings (managed by ProfileManager)
 ├── buffs.json                 # Buff configurations
 ├── healing.json               # Heal spells and rules
 ├── cures.json                 # Ailments and cure spells
@@ -1017,7 +1020,7 @@ private void SomeMethod(string data)
 - **Removed from BuffManager:** ~250 lines (HP/mana, stats, exp, training screen, resting state)
 - **Result:** BuffManager reduced to ~1,640 lines
 
-#### Phase 3a: Extract AppSettings ✅
+#### Phase 3a: Extract AppSettings ✅ *(later consolidated into ProfileManager in v2.4.0)*
 - **Created:** `AppSettings.cs` (~75 lines)
 - **Removed from BuffManager:** ~69 lines (app-level settings persistence)
 - **Result:** BuffManager reduced to ~1,570 lines
@@ -1049,9 +1052,25 @@ private void SomeMethod(string data)
 - **Updated:** GameManager creates CastCoordinator, delegates `CheckAutoRecast()` and `OnCombatTick()` to it
 - **Result:** BuffManager reduced from ~737 to ~622 lines (72% total reduction from original 2,237)
 
-#### Remaining (Phases 8-9 — Optional)
-- **Phase 8:** Consolidate AppSettings into ProfileManager
-- **Phase 9:** Migrate BbsSettings/WindowSettings from GameManager to ProfileManager
+### Version 2.4.0 - AppSettings Consolidation & Bug Fix (February 2026)
+
+**Objective:** Eliminate duplicate settings class. Fix combat re-attack bug.
+
+#### Phase 8: AppSettings Consolidation ✅
+- **Deleted:** `AppSettings.cs` — ProfileManager already had identical properties and persistence
+- **Updated:** MainForm.cs, MainForm.MenuHandlers.cs — `_gameManager.AppSettings.X` → `_gameManager.ProfileManager.X`
+- **Removed:** Redundant `.Save()` calls (ProfileManager auto-saves on property set)
+- **Removed:** `_appSettings` field and `AppSettings` property from GameManager
+- **Result:** One fewer file, single source of truth for app-level settings
+
+#### Phase 9: Cancelled ✅
+- BbsSettings/WindowSettings stay in GameManager — they are runtime coordination state, not file I/O
+- Moving them to ProfileManager would blur its clean "serialization only" responsibility
+
+#### Bug Fix: Combat Re-Attack Loop
+- **Root cause:** `TryInitiateCombat()` had no guard for "already in combat" — when an entity entered the room, a room refresh triggered a redundant attack command, causing `*Combat Off*` / `*Combat Engaged*` cycling
+- **Fix:** Added `_isInCombat` check in `TryInitiateCombat()` — skips attack if already fighting the top-priority target, allows re-attack only if a higher-priority enemy has appeared
+- **Result:** Single attack per engagement, no more command spam
 
 ### Version 2.2.0 - GameManager & Phase 6 Completion (February 2026)
 
@@ -1201,6 +1220,7 @@ private AnsiVtParser _ansiParser = null!;
 
 | Version | Changes |
 |---------|---------|
+| **2.4.0** | **Refactoring complete** — Consolidated AppSettings into ProfileManager (deleted AppSettings.cs). Cancelled Phase 9 (current design correct). Fixed combat re-attack loop bug in CombatManager. |
 | **2.3.0** | **CastCoordinator extraction** — Priority casting pipeline extracted from BuffManager. BuffManager reduced to ~622 lines (72% total reduction). Uniform cast interface across heals/cures/buffs. |
 | **2.2.0** | **BuffManager refactoring complete** — Created GameManager as central coordinator. BuffManager reduced to buff-only (~737 lines). Extracted MessageRouter dispatching, ProfileManager, exit meditation state machine. |
 | **2.1.0** | **BuffManager decomposition** — Extracted PartyManager, PlayerStateManager, AppSettings. Pass-through cleanup. Automation toggle fix. Backscroll viewer. Combat toggle improvements. |
@@ -1249,4 +1269,4 @@ private AnsiVtParser _ansiParser = null!;
 
 ---
 
-*This document provides comprehensive context for AI assistants working on this project. Version 2.3.0 completes Phase 7 CastCoordinator extraction. BuffManager refactoring is functionally complete with optional consolidation phases remaining. Keep updated as features are added.*
+*This document provides comprehensive context for AI assistants working on this project. Version 2.4.0 completes the BuffManager refactoring — all phases finished. Keep updated as features are added.*
