@@ -2,6 +2,7 @@ namespace MudProxyViewer;
 
 public class SettingsDialog : Form
 {
+    private readonly GameManager _gameManager;
     private readonly BuffManager _buffManager;
     private readonly CombatManager _combatManager;
     private readonly string _currentCharacter;
@@ -59,9 +60,10 @@ public class SettingsDialog : Form
     private NumericUpDown _maxConnectionAttemptsNum = null!;
     private NumericUpDown _connectionRetryPauseNum = null!;
     
-    public SettingsDialog(BuffManager buffManager, CombatManager combatManager, string currentCharacter = "")
+    public SettingsDialog(GameManager gameManager, CombatManager combatManager, string currentCharacter = "")
     {
-        _buffManager = buffManager;
+        _gameManager = gameManager;
+        _buffManager = gameManager.BuffManager;
         _combatManager = combatManager;
         _currentCharacter = currentCharacter;
         InitializeComponent();
@@ -137,7 +139,7 @@ public class SettingsDialog : Form
         SaveCurePriorityOrder();
         
         // Save to character profile file
-        var profilePath = _buffManager.CurrentProfilePath;
+        var profilePath = _gameManager.CurrentProfilePath;
         if (string.IsNullOrEmpty(profilePath))
         {
             // No profile loaded - prompt user to save
@@ -145,8 +147,8 @@ public class SettingsDialog : Form
             {
                 Filter = "Character Profile (*.json)|*.json",
                 DefaultExt = "json",
-                FileName = _buffManager.GetDefaultProfileFilename(),
-                InitialDirectory = _buffManager.CharacterProfilesPath
+                FileName = _gameManager.GetDefaultProfileFilename(),
+                InitialDirectory = _gameManager.CharacterProfilesPath
             };
             
             if (dialog.ShowDialog() == DialogResult.OK)
@@ -159,7 +161,7 @@ public class SettingsDialog : Form
             }
         }
         
-        var (success, message) = _buffManager.SaveCharacterProfile(profilePath);
+        var (success, message) = _gameManager.SaveCharacterProfile(profilePath);
         if (!success)
         {
             MessageBox.Show(message, "Save Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -342,7 +344,7 @@ public class SettingsDialog : Form
         AddLabel(spellPanel, "Req Mana %", 365, sy);
         sy += 20;
         
-        int maxMana = _buffManager.PlayerStateManager.MaxMana;
+        int maxMana = _gameManager.PlayerStateManager.MaxMana;
         
         // Multi-Attack row
         AddLabel(spellPanel, "Multi-Attack:", 10, sy + 2);
@@ -513,7 +515,7 @@ public class SettingsDialog : Form
     
     private void UpdateManaLabels()
     {
-        int maxMana = _buffManager.PlayerStateManager.MaxMana;
+        int maxMana = _gameManager.PlayerStateManager.MaxMana;
         _multiAttackManaLabel.Text = $"({(int)_multiAttackReqManaNum.Value * maxMana / 100}/{maxMana})";
         _preAttackManaLabel.Text = $"({(int)_preAttackReqManaNum.Value * maxMana / 100}/{maxMana})";
         _attackManaLabel.Text = $"({(int)_attackReqManaNum.Value * maxMana / 100}/{maxMana})";
@@ -606,7 +608,7 @@ public class SettingsDialog : Form
         };
         
         // Populate priority list
-        foreach (var priority in _buffManager.CureManager.PriorityOrder)
+        foreach (var priority in _gameManager.CureManager.PriorityOrder)
         {
             _priorityListBox.Items.Add(GetPriorityDisplayName(priority));
         }
@@ -682,7 +684,7 @@ public class SettingsDialog : Form
         };
         configureButton.Click += (s, e) =>
         {
-            using var dialog = new HealingConfigDialog(_buffManager.HealingManager);
+            using var dialog = new HealingConfigDialog(_gameManager.HealingManager);
             dialog.ShowDialog(this);
         };
         tab.Controls.Add(configureButton);
@@ -727,7 +729,7 @@ public class SettingsDialog : Form
         };
         configureButton.Click += (s, e) =>
         {
-            using var dialog = new CureConfigDialog(_buffManager.CureManager);
+            using var dialog = new CureConfigDialog(_gameManager.CureManager);
             dialog.ShowDialog(this);
         };
         tab.Controls.Add(configureButton);
@@ -745,7 +747,7 @@ public class SettingsDialog : Form
         };
         clearAilmentsButton.Click += (s, e) =>
         {
-            _buffManager.CureManager.ClearAllAilments();
+            _gameManager.CureManager.ClearAllAilments();
             MessageBox.Show("All active ailments cleared.", "Ailments Cleared", MessageBoxButtons.OK, MessageBoxIcon.Information);
         };
         tab.Controls.Add(clearAilmentsButton);
@@ -906,7 +908,7 @@ public class SettingsDialog : Form
             Location = new Point(20, y),
             AutoSize = true,
             ForeColor = Color.White,
-            Checked = _buffManager.PartyManager.ParAutoEnabled
+            Checked = _gameManager.PartyManager.ParAutoEnabled
         };
         tab.Controls.Add(_parAutoCheckBox);
         y += 30;
@@ -917,7 +919,7 @@ public class SettingsDialog : Form
             Location = new Point(40, y),
             AutoSize = true,
             ForeColor = Color.White,
-            Checked = _buffManager.PartyManager.ParAfterCombatTick
+            Checked = _gameManager.PartyManager.ParAfterCombatTick
         };
         tab.Controls.Add(_parAfterTickCheckBox);
         y += 30;
@@ -938,10 +940,10 @@ public class SettingsDialog : Form
             Size = new Size(60, 25),
             Minimum = 5,
             Maximum = 300,
-            Value = _buffManager.PartyManager.ParFrequencySeconds,
+            Value = _gameManager.PartyManager.ParFrequencySeconds,
             BackColor = Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
-            Enabled = !_buffManager.PartyManager.ParAfterCombatTick
+            Enabled = !_gameManager.PartyManager.ParAfterCombatTick
         };
         tab.Controls.Add(_parFrequencyNumeric);
         
@@ -988,7 +990,7 @@ public class SettingsDialog : Form
             Location = new Point(20, y),
             AutoSize = true,
             ForeColor = Color.White,
-            Checked = _buffManager.PartyManager.HealthRequestEnabled
+            Checked = _gameManager.PartyManager.HealthRequestEnabled
         };
         tab.Controls.Add(_healthRequestCheckBox);
         y += 30;
@@ -1008,7 +1010,7 @@ public class SettingsDialog : Form
             Size = new Size(60, 25),
             Minimum = 15,
             Maximum = 300,
-            Value = _buffManager.PartyManager.HealthRequestIntervalSeconds,
+            Value = _gameManager.PartyManager.HealthRequestIntervalSeconds,
             BackColor = Color.FromArgb(60, 60, 60),
             ForeColor = Color.White
         };
@@ -1123,7 +1125,7 @@ public class SettingsDialog : Form
             BackColor = Color.FromArgb(45, 45, 45)
         };
         
-        var settings = _buffManager.BbsSettings;
+        var settings = _gameManager.BbsSettings;
         
         // ── Telnet Section ──
         var telnetPanel = new Panel
@@ -1445,11 +1447,11 @@ public class SettingsDialog : Form
     
     private void SavePartySettings()
     {
-        _buffManager.PartyManager.ParAutoEnabled = _parAutoCheckBox.Checked;
-        _buffManager.PartyManager.ParAfterCombatTick = _parAfterTickCheckBox.Checked;
-        _buffManager.PartyManager.ParFrequencySeconds = (int)_parFrequencyNumeric.Value;
-        _buffManager.PartyManager.HealthRequestEnabled = _healthRequestCheckBox.Checked;
-        _buffManager.PartyManager.HealthRequestIntervalSeconds = (int)_healthRequestIntervalNumeric.Value;
+        _gameManager.PartyManager.ParAutoEnabled = _parAutoCheckBox.Checked;
+        _gameManager.PartyManager.ParAfterCombatTick = _parAfterTickCheckBox.Checked;
+        _gameManager.PartyManager.ParFrequencySeconds = (int)_parFrequencyNumeric.Value;
+        _gameManager.PartyManager.HealthRequestEnabled = _healthRequestCheckBox.Checked;
+        _gameManager.PartyManager.HealthRequestIntervalSeconds = (int)_healthRequestIntervalNumeric.Value;
     }
     
     private void SaveCurePriorityOrder()
@@ -1459,7 +1461,7 @@ public class SettingsDialog : Form
         {
             newOrder.Add(GetPriorityFromDisplayName(item.ToString() ?? ""));
         }
-        _buffManager.CureManager.PriorityOrder = newOrder;
+        _gameManager.CureManager.PriorityOrder = newOrder;
     }
     
     private void SaveBbsSettings()
@@ -1487,7 +1489,7 @@ public class SettingsDialog : Form
             ));
         }
         
-        _buffManager.UpdateBbsSettings(settings);
+        _gameManager.UpdateBbsSettings(settings);
     }
     
     #endregion

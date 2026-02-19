@@ -11,7 +11,7 @@ public partial class MainForm
     /// </summary>
     private void RefreshBbsSettingsDisplay()
     {
-        var settings = _buffManager.BbsSettings;
+        var settings = _gameManager.BbsSettings;
         _serverAddress = settings.Address;
         _serverPort = settings.Port;
         
@@ -53,7 +53,7 @@ public partial class MainForm
                 // OnCombatTick has internal duplicate prevention via _lastParSent
                 if (!_inCombat)
                 {
-                    _buffManager.OnCombatTick();
+                    _gameManager.OnCombatTick();
                 }
                 
                 timeUntilTick = (_nextTickTime.Value - now).TotalMilliseconds;
@@ -89,8 +89,8 @@ public partial class MainForm
 
     private void RefreshPartyDisplay()
     {
-        var partyMembers = _buffManager.PartyManager.PartyMembers
-            .Where(m => !_buffManager.IsTargetSelf(m.Name))
+        var partyMembers = _gameManager.PartyManager.PartyMembers
+            .Where(m => !_gameManager.IsTargetSelf(m.Name))
             .ToList();
         
         var partyBuffs = _buffManager.GetPartyBuffs().ToList();
@@ -209,10 +209,10 @@ public partial class MainForm
         var pausedColor = Color.FromArgb(180, 100, 50);   // Orange when paused
         
         // Auto-all button: blue when all automation is on, grey with play icon when off
-        bool anyAutomationOn = _buffManager.CombatManager.CombatEnabled ||
-                               _buffManager.HealingManager.HealingEnabled ||
+        bool anyAutomationOn = _gameManager.CombatManager.CombatEnabled ||
+                               _gameManager.HealingManager.HealingEnabled ||
                                _buffManager.AutoRecastEnabled ||
-                               _buffManager.CureManager.CuringEnabled;
+                               _gameManager.CureManager.CuringEnabled;
         if (anyAutomationOn)
         {
             _pauseButton.BackColor = enabledColor;
@@ -224,15 +224,15 @@ public partial class MainForm
             _pauseButton.Text = ">";  // Play icon to indicate "click to turn all on"
         }
         
-        _combatToggleButton.BackColor = _buffManager.CombatManager.CombatEnabled ? enabledColor : disabledColor;
-        _healToggleButton.BackColor = _buffManager.HealingManager.HealingEnabled ? enabledColor : disabledColor;
+        _combatToggleButton.BackColor = _gameManager.CombatManager.CombatEnabled ? enabledColor : disabledColor;
+        _healToggleButton.BackColor = _gameManager.HealingManager.HealingEnabled ? enabledColor : disabledColor;
         _buffToggleButton.BackColor = _buffManager.AutoRecastEnabled ? enabledColor : disabledColor;
-        _cureToggleButton.BackColor = _buffManager.CureManager.CuringEnabled ? enabledColor : disabledColor;
+        _cureToggleButton.BackColor = _gameManager.CureManager.CuringEnabled ? enabledColor : disabledColor;
     }
 
     private void RefreshPlayerInfo()
     {
-        var info = _buffManager.PlayerStateManager.PlayerInfo;
+        var info = _gameManager.PlayerStateManager.PlayerInfo;
         if (!string.IsNullOrEmpty(info.Name))
         {
             _selfStatusPanel.UpdatePlayerExact(
@@ -251,8 +251,8 @@ public partial class MainForm
 
     private void UpdateExpStatusBar()
     {
-        var info = _buffManager.PlayerStateManager.PlayerInfo;
-        var tracker = _buffManager.PlayerStateManager.ExperienceTracker;
+        var info = _gameManager.PlayerStateManager.PlayerInfo;
+        var tracker = _gameManager.PlayerStateManager.ExperienceTracker;
         
         if (info.Level <= 0)
         {
@@ -323,13 +323,13 @@ public partial class MainForm
     private void UpdateTitle()
     {
         var title = "MUD Proxy Viewer";
-        if (!string.IsNullOrEmpty(_buffManager.PlayerStateManager.PlayerInfo.Name))
+        if (!string.IsNullOrEmpty(_gameManager.PlayerStateManager.PlayerInfo.Name))
         {
-            title += $" - {_buffManager.PlayerStateManager.PlayerInfo.Name}";
+            title += $" - {_gameManager.PlayerStateManager.PlayerInfo.Name}";
         }
-        if (!string.IsNullOrEmpty(_buffManager.CurrentProfilePath))
+        if (!string.IsNullOrEmpty(_gameManager.CurrentProfilePath))
         {
-            title += $" [{Path.GetFileName(_buffManager.CurrentProfilePath)}]";
+            title += $" [{Path.GetFileName(_gameManager.CurrentProfilePath)}]";
         }
         this.Text = title;
     }

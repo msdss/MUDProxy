@@ -9,7 +9,7 @@ public partial class MainForm
     private void NewCharacter_Click(object? sender, EventArgs e)
     {
         // Warn if there are unsaved changes
-        if (_buffManager.HasUnsavedChanges)
+        if (_gameManager.HasUnsavedChanges)
         {
             var result = MessageBox.Show(
                 "You have unsaved changes. Do you want to save before creating a new character?",
@@ -24,7 +24,7 @@ public partial class MainForm
                 SaveCharacter_Click(sender, e);
         }
 
-        _buffManager.NewCharacterProfile();
+        _gameManager.NewCharacterProfile();
         UpdateTitle();
         LogMessage("📄 New character profile created. Configure settings and use Save As to save.", MessageType.System);
     }
@@ -35,13 +35,13 @@ public partial class MainForm
         {
             Filter = "Character Profile (*.json)|*.json|All Files (*.*)|*.*",
             DefaultExt = "json",
-            InitialDirectory = _buffManager.CharacterProfilesPath,
+            InitialDirectory = _gameManager.CharacterProfilesPath,
             Title = "Load Character Profile"
         };
 
         if (dialog.ShowDialog() == DialogResult.OK)
         {
-            var (success, message) = _buffManager.LoadCharacterProfile(dialog.FileName);
+            var (success, message) = _gameManager.LoadCharacterProfile(dialog.FileName);
             if (success)
             {
                 ApplyWindowSettings();
@@ -60,8 +60,8 @@ public partial class MainForm
     {
         if (sender is ToolStripMenuItem item)
         {
-            _buffManager.AppSettings.AutoLoadLastCharacter = item.Checked;
-            _buffManager.AppSettings.Save();
+            _gameManager.AppSettings.AutoLoadLastCharacter = item.Checked;
+            _gameManager.AppSettings.Save();
             LogMessage($"Auto-load last character: {(item.Checked ? "ENABLED" : "DISABLED")}", MessageType.System);
         }
     }
@@ -94,9 +94,9 @@ public partial class MainForm
     private void SaveCharacter_Click(object? sender, EventArgs e)
     {
         // If we have a current profile path, save to it; otherwise prompt for location
-        if (!string.IsNullOrEmpty(_buffManager.CurrentProfilePath))
+        if (!string.IsNullOrEmpty(_gameManager.CurrentProfilePath))
         {
-            var (success, message) = _buffManager.SaveCharacterProfile(_buffManager.CurrentProfilePath);
+            var (success, message) = _gameManager.SaveCharacterProfile(_gameManager.CurrentProfilePath);
             if (!success)
             {
                 MessageBox.Show(message, "Save Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -116,14 +116,14 @@ public partial class MainForm
         {
             Filter = "Character Profile (*.json)|*.json|All Files (*.*)|*.*",
             DefaultExt = "json",
-            InitialDirectory = _buffManager.CharacterProfilesPath,
-            FileName = _buffManager.GetDefaultProfileFilename(),
+            InitialDirectory = _gameManager.CharacterProfilesPath,
+            FileName = _gameManager.GetDefaultProfileFilename(),
             Title = "Save Character Profile"
         };
 
         if (dialog.ShowDialog() == DialogResult.OK)
         {
-            var (success, message) = _buffManager.SaveCharacterProfile(dialog.FileName);
+            var (success, message) = _gameManager.SaveCharacterProfile(dialog.FileName);
             if (success)
             {
                 MessageBox.Show(message, "Character Saved", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -272,8 +272,8 @@ public partial class MainForm
     
     private void OpenSettings_Click(object? sender, EventArgs e)
     {
-        var currentCharacter = _buffManager.PlayerStateManager.PlayerInfo.Name;
-        using var dialog = new SettingsDialog(_buffManager, _buffManager.CombatManager, currentCharacter);
+        var currentCharacter = _gameManager.PlayerStateManager.PlayerInfo.Name;
+        using var dialog = new SettingsDialog(_gameManager, _gameManager.CombatManager, currentCharacter);
         dialog.ShowDialog(this);
         // Refresh toggle button states after settings close
         UpdateToggleButtonStates();
@@ -281,16 +281,16 @@ public partial class MainForm
     
     private void CombatToggleButton_Click(object? sender, EventArgs e)
     {
-        _buffManager.CombatManager.CombatEnabled = !_buffManager.CombatManager.CombatEnabled;
+        _gameManager.CombatManager.CombatEnabled = !_gameManager.CombatManager.CombatEnabled;
         UpdateToggleButtonStates();
-        LogMessage($"Auto-combat {(_buffManager.CombatManager.CombatEnabled ? "ENABLED" : "DISABLED")}", MessageType.System);
+        LogMessage($"Auto-combat {(_gameManager.CombatManager.CombatEnabled ? "ENABLED" : "DISABLED")}", MessageType.System);
         
         if (_isConnected && !_isInLoginPhase)
         {
-            if (_buffManager.CombatManager.CombatEnabled)
+            if (_gameManager.CombatManager.CombatEnabled)
             {
                 // Reset room scan so "Also here:" is not deduplicated, then refresh room
-                _buffManager.CombatManager.ResetRoomScan();
+                _gameManager.CombatManager.ResetRoomScan();
             }
             else if (_inCombat)
             {
@@ -302,9 +302,9 @@ public partial class MainForm
     
     private void HealToggleButton_Click(object? sender, EventArgs e)
     {
-        _buffManager.HealingManager.HealingEnabled = !_buffManager.HealingManager.HealingEnabled;
+        _gameManager.HealingManager.HealingEnabled = !_gameManager.HealingManager.HealingEnabled;
         UpdateToggleButtonStates();
-        LogMessage($"Auto-healing {(_buffManager.HealingManager.HealingEnabled ? "ENABLED" : "DISABLED")}", MessageType.System);
+        LogMessage($"Auto-healing {(_gameManager.HealingManager.HealingEnabled ? "ENABLED" : "DISABLED")}", MessageType.System);
     }
     
     private void BuffToggleButton_Click(object? sender, EventArgs e)
@@ -316,24 +316,24 @@ public partial class MainForm
     
     private void CureToggleButton_Click(object? sender, EventArgs e)
     {
-        _buffManager.CureManager.CuringEnabled = !_buffManager.CureManager.CuringEnabled;
+        _gameManager.CureManager.CuringEnabled = !_gameManager.CureManager.CuringEnabled;
         UpdateToggleButtonStates();
-        LogMessage($"Auto-curing {(_buffManager.CureManager.CuringEnabled ? "ENABLED" : "DISABLED")}", MessageType.System);
+        LogMessage($"Auto-curing {(_gameManager.CureManager.CuringEnabled ? "ENABLED" : "DISABLED")}", MessageType.System);
     }
     
     private void PauseButton_Click(object? sender, EventArgs e)
     {
         // Determine new state: if ANY automation is on, turn all off; otherwise turn all on
-        bool anyOn = _buffManager.CombatManager.CombatEnabled ||
-                     _buffManager.HealingManager.HealingEnabled ||
+        bool anyOn = _gameManager.CombatManager.CombatEnabled ||
+                     _gameManager.HealingManager.HealingEnabled ||
                      _buffManager.AutoRecastEnabled ||
-                     _buffManager.CureManager.CuringEnabled;
+                     _gameManager.CureManager.CuringEnabled;
         bool newState = !anyOn;
 
-        _buffManager.CombatManager.CombatEnabled = newState;
-        _buffManager.HealingManager.HealingEnabled = newState;
+        _gameManager.CombatManager.CombatEnabled = newState;
+        _gameManager.HealingManager.HealingEnabled = newState;
         _buffManager.AutoRecastEnabled = newState;
-        _buffManager.CureManager.CuringEnabled = newState;
+        _gameManager.CureManager.CuringEnabled = newState;
 
         UpdateToggleButtonStates();
         LogMessage($"All automation {(newState ? "ENABLED" : "DISABLED")}", MessageType.System);
@@ -343,7 +343,7 @@ public partial class MainForm
             if (newState)
             {
                 // Reset room scan so "Also here:" is not deduplicated, then refresh room
-                _buffManager.CombatManager.ResetRoomScan();
+                _gameManager.CombatManager.ResetRoomScan();
             }
             else if (_inCombat)
             {
@@ -365,7 +365,7 @@ public partial class MainForm
     
     private void ConfigureHealing_Click(object? sender, EventArgs e)
     {
-        using var dialog = new HealingConfigDialog(_buffManager.HealingManager);
+        using var dialog = new HealingConfigDialog(_gameManager.HealingManager);
         dialog.ShowDialog(this);
     }
     
@@ -373,14 +373,14 @@ public partial class MainForm
     {
         if (sender is ToolStripMenuItem item)
         {
-            _buffManager.HealingManager.HealingEnabled = item.Checked;
+            _gameManager.HealingManager.HealingEnabled = item.Checked;
             LogMessage($"Auto-healing {(item.Checked ? "ENABLED" : "DISABLED")}", MessageType.System);
         }
     }
     
     private void ConfigureCures_Click(object? sender, EventArgs e)
     {
-        using var dialog = new CureConfigDialog(_buffManager.CureManager);
+        using var dialog = new CureConfigDialog(_gameManager.CureManager);
         dialog.ShowDialog(this);
     }
     
@@ -388,14 +388,14 @@ public partial class MainForm
     {
         if (sender is ToolStripMenuItem item)
         {
-            _buffManager.CureManager.CuringEnabled = item.Checked;
+            _gameManager.CureManager.CuringEnabled = item.Checked;
             LogMessage($"Auto-curing {(item.Checked ? "ENABLED" : "DISABLED")}", MessageType.System);
         }
     }
     
     private void ClearAilments_Click(object? sender, EventArgs e)
     {
-        _buffManager.CureManager.ClearAllAilments();
+        _gameManager.CureManager.ClearAllAilments();
         LogMessage("All active ailments cleared.", MessageType.System);
     }
     
@@ -443,7 +443,7 @@ public partial class MainForm
         {
             try
             {
-                var json = _buffManager.HealingManager.ExportHeals();
+                var json = _gameManager.HealingManager.ExportHeals();
                 File.WriteAllText(dialog.FileName, json);
                 LogMessage($"Exported heals to {dialog.FileName}", MessageType.System);
                 MessageBox.Show("Successfully exported heal spells and rules.", 
@@ -471,7 +471,7 @@ public partial class MainForm
         {
             try
             {
-                var json = _buffManager.CureManager.ExportCures();
+                var json = _gameManager.CureManager.ExportCures();
                 File.WriteAllText(dialog.FileName, json);
                 LogMessage($"Exported cures to {dialog.FileName}", MessageType.System);
                 MessageBox.Show("Successfully exported ailments and cure spells.", 
@@ -542,7 +542,7 @@ public partial class MainForm
                 
                 if (replaceResult == DialogResult.Cancel) return;
                 
-                var (imported, skipped, message) = _buffManager.HealingManager.ImportHeals(json, replaceResult == DialogResult.Yes);
+                var (imported, skipped, message) = _gameManager.HealingManager.ImportHeals(json, replaceResult == DialogResult.Yes);
                 LogMessage(message, MessageType.System);
                 MessageBox.Show(message, "Import Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -576,7 +576,7 @@ public partial class MainForm
                 
                 if (replaceResult == DialogResult.Cancel) return;
                 
-                var (imported, skipped, message) = _buffManager.CureManager.ImportCures(json, replaceResult == DialogResult.Yes);
+                var (imported, skipped, message) = _gameManager.CureManager.ImportCures(json, replaceResult == DialogResult.Yes);
                 LogMessage(message, MessageType.System);
                 MessageBox.Show(message, "Import Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
@@ -594,14 +594,14 @@ public partial class MainForm
     {
         if (sender is ToolStripMenuItem item)
         {
-            _buffManager.PartyManager.ParAutoEnabled = item.Checked;
+            _gameManager.PartyManager.ParAutoEnabled = item.Checked;
             LogMessage($"Auto 'par' command {(item.Checked ? "ENABLED" : "DISABLED")}", MessageType.System);
         }
     }
     
     private void OpenPlayerDB_Click(object? sender, EventArgs e)
     {
-        using var dialog = new PlayerDatabaseDialog(_buffManager.PlayerDatabase);
+        using var dialog = new PlayerDatabaseDialog(_gameManager.PlayerDatabase);
         dialog.ShowDialog(this);
     }
     
@@ -637,7 +637,7 @@ public partial class MainForm
             // Clear and reload the cache with new data
             GameDataCache.Instance.ClearCache();
             GameDataCache.Instance.StartPreload();
-            _buffManager.RoomGraph.Reload();
+            _gameManager.RoomGraph.Reload();
         }
     }
     
@@ -663,7 +663,7 @@ public partial class MainForm
     
     private void OpenGameDataMonsters_Click(object? sender, EventArgs e)
     {
-        using var dialog = new MonsterDatabaseDialog(_buffManager.MonsterDatabase);
+        using var dialog = new MonsterDatabaseDialog(_gameManager.MonsterDatabase);
         dialog.ShowDialog(this);
     }
     
@@ -689,7 +689,7 @@ public partial class MainForm
 
     private void OpenPathfindingTest_Click(object? sender, EventArgs e)
     {
-        using var dialog = new PathfindingTestDialog(_buffManager.RoomGraph);
+        using var dialog = new PathfindingTestDialog(_gameManager.RoomGraph);
         dialog.ShowDialog(this);
     }
     
@@ -721,7 +721,7 @@ public partial class MainForm
             Width = 60,
             Minimum = 5,
             Maximum = 300,
-            Value = _buffManager.PartyManager.ParFrequencySeconds,
+            Value = _gameManager.PartyManager.ParFrequencySeconds,
             BackColor = Color.FromArgb(60, 60, 60),
             ForeColor = Color.White
         };
@@ -751,8 +751,8 @@ public partial class MainForm
         
         if (dialog.ShowDialog(this) == DialogResult.OK)
         {
-            _buffManager.PartyManager.ParFrequencySeconds = (int)numeric.Value;
-            LogMessage($"Par frequency set to {_buffManager.PartyManager.ParFrequencySeconds} seconds", MessageType.System);
+            _gameManager.PartyManager.ParFrequencySeconds = (int)numeric.Value;
+            LogMessage($"Par frequency set to {_gameManager.PartyManager.ParFrequencySeconds} seconds", MessageType.System);
         }
     }
     
@@ -760,7 +760,7 @@ public partial class MainForm
     {
         if (sender is ToolStripMenuItem item)
         {
-            _buffManager.PartyManager.ParAfterCombatTick = item.Checked;
+            _gameManager.PartyManager.ParAfterCombatTick = item.Checked;
             LogMessage($"Send 'par' after combat tick: {(item.Checked ? "YES" : "NO")}", MessageType.System);
         }
     }
@@ -775,7 +775,7 @@ public partial class MainForm
     {
         if (sender is ToolStripMenuItem item)
         {
-            _buffManager.PartyManager.HealthRequestEnabled = item.Checked;
+            _gameManager.PartyManager.HealthRequestEnabled = item.Checked;
             LogMessage($"Auto-request health data: {(item.Checked ? "ENABLED" : "DISABLED")}", MessageType.System);
         }
     }
@@ -808,7 +808,7 @@ public partial class MainForm
             Width = 60,
             Minimum = 15,
             Maximum = 300,
-            Value = _buffManager.PartyManager.HealthRequestIntervalSeconds,
+            Value = _gameManager.PartyManager.HealthRequestIntervalSeconds,
             BackColor = Color.FromArgb(60, 60, 60),
             ForeColor = Color.White
         };
@@ -838,8 +838,8 @@ public partial class MainForm
         
         if (dialog.ShowDialog(this) == DialogResult.OK)
         {
-            _buffManager.PartyManager.HealthRequestIntervalSeconds = (int)numeric.Value;
-            LogMessage($"Health request interval set to {_buffManager.PartyManager.HealthRequestIntervalSeconds} seconds", MessageType.System);
+            _gameManager.PartyManager.HealthRequestIntervalSeconds = (int)numeric.Value;
+            LogMessage($"Health request interval set to {_gameManager.PartyManager.HealthRequestIntervalSeconds} seconds", MessageType.System);
         }
     }
 
@@ -868,7 +868,7 @@ public partial class MainForm
         }
 
         // Get connection settings from BuffManager
-        var bbsSettings = _buffManager.BbsSettings;
+        var bbsSettings = _gameManager.BbsSettings;
         
         if (string.IsNullOrEmpty(bbsSettings.Address))
         {

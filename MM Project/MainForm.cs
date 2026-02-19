@@ -34,7 +34,8 @@ public partial class MainForm : Form
     private System.Windows.Forms.Timer _renderTimer = null!;
 
     // Buff Manager
-    private readonly BuffManager _buffManager = new();
+    private readonly GameManager _gameManager = new();
+    private BuffManager _buffManager = null!;  // Shortcut to _gameManager.BuffManager for buff-specific calls
     
 // Message Router
     private MessageRouter _messageRouter = null!;
@@ -111,8 +112,11 @@ public partial class MainForm : Form
         _telnetConnection.OnStatusChanged += TelnetConnection_OnStatusChanged;
         _telnetConnection.OnLogMessage += TelnetConnection_OnLogMessage;
         
+        // Initialize shortcut to BuffManager for buff-specific calls
+        _buffManager = _gameManager.BuffManager;
+        
         // Initialize message router
-        _messageRouter = new MessageRouter(_buffManager);
+        _messageRouter = new MessageRouter(_gameManager);
         _messageRouter.OnCombatStateChanged += MessageRouter_OnCombatStateChanged;
         _messageRouter.OnPlayerStatsUpdated += MessageRouter_OnPlayerStatsUpdated;
         _messageRouter.OnCombatTickDetected += MessageRouter_OnCombatTickDetected;
@@ -187,7 +191,7 @@ public partial class MainForm : Form
         {
             UpdateConnectionUI(false);
             UpdateStatus("Disconnected", Color.White);
-            _buffManager.OnDisconnected();
+            _gameManager.OnDisconnected();
             
             // Reset terminal state
             _userInputBuffer.Clear();
@@ -220,17 +224,17 @@ public partial class MainForm : Form
         _manaType = manaType;
         
         // Get max values from BuffManager (set by stat command parsing)
-        if (_buffManager.PlayerStateManager.MaxHp > 0)
+        if (_gameManager.PlayerStateManager.MaxHp > 0)
         {
-            _maxHp = _buffManager.PlayerStateManager.MaxHp;
+            _maxHp = _gameManager.PlayerStateManager.MaxHp;
         }
-        if (_buffManager.PlayerStateManager.MaxMana > 0)
+        if (_gameManager.PlayerStateManager.MaxMana > 0)
         {
-            _maxMana = _buffManager.PlayerStateManager.MaxMana;
+            _maxMana = _gameManager.PlayerStateManager.MaxMana;
         }
         
         // Update the self status panel
-        var info = _buffManager.PlayerStateManager.PlayerInfo;
+        var info = _gameManager.PlayerStateManager.PlayerInfo;
         _selfStatusPanel.UpdatePlayerExact(
             string.IsNullOrEmpty(info.Name) ? "(Unknown)" : info.Name,
             info.Class,
@@ -267,18 +271,18 @@ public partial class MainForm : Form
     private void MainForm_Shown(object? sender, EventArgs e)
     {
         // Check for auto-load last character
-        if (_buffManager.AppSettings.AutoLoadLastCharacter && !string.IsNullOrEmpty(_buffManager.AppSettings.LastCharacterPath))
+        if (_gameManager.AppSettings.AutoLoadLastCharacter && !string.IsNullOrEmpty(_gameManager.AppSettings.LastCharacterPath))
         {
-            if (File.Exists(_buffManager.AppSettings.LastCharacterPath))
+            if (File.Exists(_gameManager.AppSettings.LastCharacterPath))
             {
-                LogMessage($"Auto-loading last character: {Path.GetFileName(_buffManager.AppSettings.LastCharacterPath)}", MessageType.System);
-                var (success, message) = _buffManager.LoadCharacterProfile(_buffManager.AppSettings.LastCharacterPath);
+                LogMessage($"Auto-loading last character: {Path.GetFileName(_gameManager.AppSettings.LastCharacterPath)}", MessageType.System);
+                var (success, message) = _gameManager.LoadCharacterProfile(_gameManager.AppSettings.LastCharacterPath);
                 if (success)
                 {
                     RefreshPlayerInfo();
                     RefreshBuffDisplay();
                     UpdateToggleButtonStates();
-                    LogMessage($"DEBUG: CombatEnabled={_buffManager.CombatManager.CombatEnabled}, CombatAutoEnabled={_buffManager.CombatAutoEnabled}", MessageType.System);
+                    LogMessage($"DEBUG: CombatEnabled={_gameManager.CombatManager.CombatEnabled}, CombatAutoEnabled={_gameManager.CombatAutoEnabled}", MessageType.System);
                     ApplyWindowSettings();
                     LogMessage("Character loaded. Click Connect to connect to the server.", MessageType.System);
                 }
@@ -289,7 +293,7 @@ public partial class MainForm : Form
             }
             else
             {
-                LogMessage($"Last character file not found: {_buffManager.AppSettings.LastCharacterPath}", MessageType.System);
+                LogMessage($"Last character file not found: {_gameManager.AppSettings.LastCharacterPath}", MessageType.System);
             }
         }
         else
@@ -341,17 +345,17 @@ public partial class MainForm : Form
 
     private void InitializeBuffManagerEvents()
     {
-        _buffManager.OnBuffsChanged += () => BeginInvoke(RefreshBuffDisplay);
-        _buffManager.OnPartyChanged += () => BeginInvoke(RefreshPartyDisplay);
-        _buffManager.OnPlayerInfoChanged += () => BeginInvoke(RefreshPlayerInfo);
-        _buffManager.OnBbsSettingsChanged += () => BeginInvoke(RefreshBbsSettingsDisplay);
-        _buffManager.OnLogMessage += (msg) => LogMessage(msg, MessageType.System);
-        _buffManager.OnRoomTrackerLogMessage += (msg) => LogMessage(msg, MessageType.RoomTracker);
-        _buffManager.OnSendCommand += SendCommandToServer;
-        _buffManager.OnHangupRequested += () => BeginInvoke(HandleRemoteHangup);
-        _buffManager.OnRelogRequested += () => BeginInvoke(HandleRemoteRelog);
-        _buffManager.OnAutomationStateChanged += () => BeginInvoke(RefreshAutomationButtons);
-        _buffManager.OnTrainingScreenChanged += (inTraining) => BeginInvoke(() => 
+        _gameManager.OnBuffsChanged += () => BeginInvoke(RefreshBuffDisplay);
+        _gameManager.OnPartyChanged += () => BeginInvoke(RefreshPartyDisplay);
+        _gameManager.OnPlayerInfoChanged += () => BeginInvoke(RefreshPlayerInfo);
+        _gameManager.OnBbsSettingsChanged += () => BeginInvoke(RefreshBbsSettingsDisplay);
+        _gameManager.OnLogMessage += (msg) => LogMessage(msg, MessageType.System);
+        _gameManager.OnRoomTrackerLogMessage += (msg) => LogMessage(msg, MessageType.RoomTracker);
+        _gameManager.OnSendCommand += SendCommandToServer;
+        _gameManager.OnHangupRequested += () => BeginInvoke(HandleRemoteHangup);
+        _gameManager.OnRelogRequested += () => BeginInvoke(HandleRemoteRelog);
+        _gameManager.OnAutomationStateChanged += () => BeginInvoke(RefreshAutomationButtons);
+        _gameManager.OnTrainingScreenChanged += (inTraining) => BeginInvoke(() => 
         {
             _terminalControl.PassThroughMode = inTraining;
             if (inTraining)
@@ -361,13 +365,13 @@ public partial class MainForm : Form
         });
         
         // Initialize CombatManager with dependencies
-        _buffManager.CombatManager.Initialize(
-            _buffManager.PlayerDatabase,
-            _buffManager.MonsterDatabase,
+        _gameManager.CombatManager.Initialize(
+            _gameManager.PlayerDatabase,
+            _gameManager.MonsterDatabase,
             () => _inCombat,
             () => _maxMana > 0 ? (_currentMana * 100 / _maxMana) : 100
         );
-        _buffManager.CombatManager.OnSendCommand += SendCommandToServer;
+        _gameManager.CombatManager.OnSendCommand += SendCommandToServer;
     }
         
     private void SendCommandToServer(string command)
@@ -402,8 +406,8 @@ public partial class MainForm : Form
         // Only check when connected AND in-game (not during login)
         if (!_isConnected || _isInLoginPhase) return;
         
-        _buffManager.CheckParCommand();
-        _buffManager.CheckHealthRequests();
+        _gameManager.CheckParCommand();
+        _gameManager.CheckHealthRequests();
     }
     
     /// <summary>
@@ -413,7 +417,7 @@ public partial class MainForm : Form
     {
         // Notify room tracker of outgoing command (must be BEFORE send, so tracker
         // knows the direction before the server's room response arrives)
-        _buffManager.RoomTracker.OnPlayerCommand(command);
+        _gameManager.RoomTracker.OnPlayerCommand(command);
         // Send command to server
         SendCommandToServer(command);
         
@@ -518,7 +522,7 @@ public partial class MainForm : Form
         // If tick time is unknown, the buff manager's internal cooldown will prevent spam
         
         // Safe to check for recasts
-        _buffManager.CheckAutoRecast();
+        _gameManager.CheckAutoRecast();
     }
 
 
@@ -548,7 +552,7 @@ public partial class MainForm : Form
             ForeColor = Color.White, 
             BackColor = Color.FromArgb(45, 45, 45),
             CheckOnClick = true,
-            Checked = _buffManager.AppSettings.AutoLoadLastCharacter
+            Checked = _gameManager.AppSettings.AutoLoadLastCharacter
         };
         fileMenu.DropDownItems.Add(autoLoadMenuItem);
         
@@ -672,7 +676,7 @@ public partial class MainForm : Form
             Width = 55,
             Height = 28,
             Location = new Point(390, 5),
-            BackColor = _buffManager.CombatManager.CombatEnabled ? Color.FromArgb(70, 130, 180) : Color.FromArgb(60, 60, 60),
+            BackColor = _gameManager.CombatManager.CombatEnabled ? Color.FromArgb(70, 130, 180) : Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat
         };
@@ -686,7 +690,7 @@ public partial class MainForm : Form
             Width = 55,
             Height = 28,
             Location = new Point(450, 5),
-            BackColor = _buffManager.HealingManager.HealingEnabled ? Color.FromArgb(70, 130, 180) : Color.FromArgb(60, 60, 60),
+            BackColor = _gameManager.HealingManager.HealingEnabled ? Color.FromArgb(70, 130, 180) : Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat
         };
@@ -712,7 +716,7 @@ public partial class MainForm : Form
             Width = 55,
             Height = 28,
             Location = new Point(570, 5),
-            BackColor = _buffManager.CureManager.CuringEnabled ? Color.FromArgb(70, 130, 180) : Color.FromArgb(60, 60, 60),
+            BackColor = _gameManager.CureManager.CuringEnabled ? Color.FromArgb(70, 130, 180) : Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat
         };
@@ -1165,14 +1169,14 @@ public partial class MainForm : Form
             _lastTickTimeLabel.Text = $"Last Tick: {_lastTickTime:HH:mm:ss.f}";
         
         // Unblock casting since a new tick just happened
-        _buffManager.OnCombatTick();
+        _gameManager.OnCombatTick();
         
         // Check if we should send an attack spell on this tick (mana may have regenerated)
-        _buffManager.CombatManager.OnCombatTick();
+        _gameManager.CombatManager.OnCombatTick();
         
         // Check for auto-recast after each tick (this is the mid-round window)
         // Small delay to let the tick fully process before recasting
-        Task.Delay(100).ContinueWith(_ => _buffManager.CheckAutoRecast());
+        Task.Delay(100).ContinueWith(_ => _gameManager.CheckAutoRecast());
     }
 
     private void ProcessServerMessage(string text)
@@ -1186,7 +1190,7 @@ public partial class MainForm : Form
         _inCombat = inCombat;
         
         // Notify BuffManager of combat state change
-        _buffManager.PlayerStateManager.SetCombatState(inCombat);
+        _gameManager.PlayerStateManager.SetCombatState(inCombat);
 
         if (InvokeRequired)
             BeginInvoke(UpdateCombatStateUI);
@@ -1354,7 +1358,7 @@ public partial class MainForm : Form
     /// </summary>
     private void CheckLogonAutomation(string text)
     {
-        var sequences = _buffManager.BbsSettings.LogonSequences;
+        var sequences = _gameManager.BbsSettings.LogonSequences;
         
         foreach (var seq in sequences)
         {
@@ -1448,13 +1452,13 @@ private void LogMessage(string message, MessageType type)
     private void LoadUiSettings()
     {
         // Load from BuffManager's settings (stored in settings.json)
-        _displaySystemLog = _buffManager.AppSettings.DisplaySystemLog;
+        _displaySystemLog = _gameManager.AppSettings.DisplaySystemLog;
     }
     
     private void SaveUiSettings()
     {
-        _buffManager.AppSettings.DisplaySystemLog = _displaySystemLog;
-        _buffManager.AppSettings.Save();
+        _gameManager.AppSettings.DisplaySystemLog = _displaySystemLog;
+        _gameManager.AppSettings.Save();
     }
 
 /// <summary>
@@ -1463,7 +1467,7 @@ private void LogMessage(string message, MessageType type)
     /// </summary>
     private void ApplyWindowSettings()
     {
-        var ws = _buffManager.WindowSettings;
+        var ws = _gameManager.WindowSettings;
         if (ws == null)
             return;
         
@@ -1497,13 +1501,13 @@ private void LogMessage(string message, MessageType type)
     private void CaptureWindowSettings()
     {
         // Only save if a character profile is loaded
-        if (string.IsNullOrEmpty(_buffManager.CurrentProfilePath))
+        if (string.IsNullOrEmpty(_gameManager.CurrentProfilePath))
             return;
         
         var isMaximized = this.WindowState == FormWindowState.Maximized;
         var bounds = isMaximized ? this.RestoreBounds : this.Bounds;
         
-        _buffManager.WindowSettings = new WindowSettings
+        _gameManager.WindowSettings = new WindowSettings
         {
             X = bounds.X,
             Y = bounds.Y,
@@ -1513,9 +1517,9 @@ private void LogMessage(string message, MessageType type)
         };
         
         // Auto-save the profile so window settings persist
-        if (!string.IsNullOrEmpty(_buffManager.CurrentProfilePath))
+        if (!string.IsNullOrEmpty(_gameManager.CurrentProfilePath))
         {
-            _buffManager.SaveCharacterProfile(_buffManager.CurrentProfilePath);
+            _gameManager.SaveCharacterProfile(_gameManager.CurrentProfilePath);
         }
     }
 

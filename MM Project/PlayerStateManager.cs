@@ -27,6 +27,8 @@ public class PlayerStateManager
     private bool _inTrainingScreen = false;
     private bool _hasEnteredGame = false;
     private bool _isExiting = false;
+    private DateTime _exitStartedAt = DateTime.MinValue;
+    private const int EXIT_MEDITATION_WINDOW_SECONDS = 10;
     
     // Dependencies
     private readonly Action<string> _logMessage;
@@ -145,6 +147,7 @@ public class PlayerStateManager
             if (!_isExiting)
             {
                 _isExiting = true;
+                _exitStartedAt = DateTime.Now;
                 _logMessage("🚪 Player exiting game - automation paused");
             }
         }
@@ -185,11 +188,29 @@ public class PlayerStateManager
     
     private void ProcessHpManaPrompt(Match promptMatch)
     {
-        // Ignore HP bars while exiting — the server continues to send prompts
-        // during and after exit meditation. Only OnDisconnected resets _isExiting.
+        // During exit meditation (~8s), the server continues to send HP bars — ignore them.
+        // After the meditation window, an HP bar means the player re-entered the game.
         if (_isExiting)
         {
-            return;
+            var secondsSinceExit = (DateTime.Now - _exitStartedAt).TotalSeconds;
+            if (secondsSinceExit < EXIT_MEDITATION_WINDOW_SECONDS)
+            {
+                // Still in meditation window — ignore this HP bar
+                return;
+            }
+            
+            // Past meditation window — player has re-entered the game
+            _isExiting = false;
+            _logMessage("🎮 Player re-entered game - automation resumed");
+            
+            // Refresh character state (party, stats, exp may have changed)
+            Task.Run(async () =>
+            {
+                await Task.Delay(500);
+                _sendCommand("stat");
+                await Task.Delay(500);
+                _sendCommand("exp");
+            });
         }
         // If we see the HP prompt, we're back in the game
         if (_inTrainingScreen)
@@ -405,6 +426,7 @@ public class PlayerStateManager
         _inCombat = false;
         _isResting = false;
         _isExiting = false;
+        _exitStartedAt = DateTime.MinValue;
         _experienceTracker.Reset();
     }
     

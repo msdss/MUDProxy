@@ -29,7 +29,7 @@ public class MessageRouter
     public event Action<bool>? OnPauseStateChanged;             // Commands paused state changed
     
     // References to managers
-    private readonly BuffManager _buffManager;
+    private readonly GameManager _gameManager;
     
     // State tracking
     private bool _isInLoginPhase = true;
@@ -49,9 +49,9 @@ public class MessageRouter
     private static readonly Regex CombatOffRegex = new(@"\*Combat Off\*", RegexOptions.Compiled);
     private static readonly Regex PlayerDeathRegex = new(@"due to a miracle, you have been saved", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     
-    public MessageRouter(BuffManager buffManager)
+    public MessageRouter(GameManager gameManager)
     {
-        _buffManager = buffManager;
+        _gameManager = gameManager;
     }
     
     /// <summary>
@@ -68,7 +68,7 @@ public class MessageRouter
     public void ResetLoginPhase()
     {
         _isInLoginPhase = true;
-        _buffManager.PlayerStateManager.IsInLoginPhase = true;
+        _gameManager.PlayerStateManager.IsInLoginPhase = true;
     }
     
     /// <summary>
@@ -77,43 +77,43 @@ public class MessageRouter
     /// </summary>
     public void ProcessMessage(string text)
     {
-        var wasPaused = _buffManager.ShouldPauseCommands;
+        var wasPaused = _gameManager.ShouldPauseCommands;
         
         // --- Feed lines to room tracker ---
         foreach (var line in text.Split('\n'))
         {
-            _buffManager.RoomTracker.ProcessLine(line.TrimEnd('\r'));
+            _gameManager.RoomTracker.ProcessLine(line.TrimEnd('\r'));
         }
         
         // --- Dispatch to sub-managers ---
-        _buffManager.RemoteCommandManager.ProcessMessage(text);
-        _buffManager.PartyManager.ProcessMessage(text);
-        _buffManager.PlayerStateManager.ProcessMessage(text);
-        _buffManager.CureManager.ProcessMessage(text, _buffManager.PartyManager.PartyMembers.ToList());
-        _buffManager.PlayerDatabase.ProcessMessage(text);
+        _gameManager.RemoteCommandManager.ProcessMessage(text);
+        _gameManager.PartyManager.ProcessMessage(text);
+        _gameManager.PlayerStateManager.ProcessMessage(text);
+        _gameManager.CureManager.ProcessMessage(text, _gameManager.PartyManager.PartyMembers.ToList());
+        _gameManager.PlayerDatabase.ProcessMessage(text);
         
         // --- Buff-specific message processing (cast success/failure/expire) ---
-        _buffManager.ProcessMessage(text);
+        _gameManager.BuffManager.ProcessMessage(text);
         
         // --- Combat manager room parsing ---
-        _buffManager.CombatManager.ProcessMessage(text);
+        _gameManager.CombatManager.ProcessMessage(text);
         
         // --- Check if pause state changed ---
-        if (wasPaused != _buffManager.ShouldPauseCommands)
+        if (wasPaused != _gameManager.ShouldPauseCommands)
         {
-            OnPauseStateChanged?.Invoke(_buffManager.ShouldPauseCommands);
+            OnPauseStateChanged?.Invoke(_gameManager.ShouldPauseCommands);
         }
         
         // --- Combat state changes ---
         if (CombatEngagedRegex.IsMatch(text))
         {
             OnCombatStateChanged?.Invoke(true);
-            _buffManager.CombatManager.OnCombatEngaged();
+            _gameManager.CombatManager.OnCombatEngaged();
         }
         else if (CombatOffRegex.IsMatch(text))
         {
             OnCombatStateChanged?.Invoke(false);
-            _buffManager.CombatManager.OnCombatEnded();
+            _gameManager.CombatManager.OnCombatEnded();
         }
         
         // --- HP/Mana updates ---
@@ -126,7 +126,7 @@ public class MessageRouter
             if (_isInLoginPhase)
             {
                 _isInLoginPhase = false;
-                _buffManager.PlayerStateManager.IsInLoginPhase = false;
+                _gameManager.PlayerStateManager.IsInLoginPhase = false;
                 OnLoginComplete?.Invoke();
             }
         }
