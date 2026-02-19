@@ -439,6 +439,25 @@ else
             }
         }
         
+        // Don't re-attack if we're already in combat with the top-priority enemy.
+        // Only allow re-attack if a higher-priority enemy has appeared at position 0.
+        if (_isInCombat != null && _isInCombat() && !string.IsNullOrEmpty(_currentTarget))
+        {
+            if (_currentRoomEnemies.Count > 0)
+            {
+                var topEnemy = _currentRoomEnemies[0];
+                if (topEnemy.Equals(_currentTarget, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Already fighting the highest-priority target — no action needed
+                    return;
+                }
+                // A different (higher-priority) enemy is now first — re-attack is justified
+                OnLogMessage?.Invoke($"🎯 Higher priority target detected: {topEnemy} (was fighting: {_currentTarget})");
+                _attackSpellCastCount = 0;
+                _usedMeleeThisRound = false;
+            }
+        }
+
         if (_currentRoomEnemies.Count == 0)
         {
             OnLogMessage?.Invoke("✓ No enemies remaining");

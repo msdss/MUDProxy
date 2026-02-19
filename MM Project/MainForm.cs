@@ -271,12 +271,12 @@ public partial class MainForm : Form
     private void MainForm_Shown(object? sender, EventArgs e)
     {
         // Check for auto-load last character
-        if (_gameManager.AppSettings.AutoLoadLastCharacter && !string.IsNullOrEmpty(_gameManager.AppSettings.LastCharacterPath))
+        if (_gameManager.ProfileManager.AutoLoadLastCharacter && !string.IsNullOrEmpty(_gameManager.ProfileManager.LastCharacterPath))
         {
-            if (File.Exists(_gameManager.AppSettings.LastCharacterPath))
+            if (File.Exists(_gameManager.ProfileManager.LastCharacterPath))
             {
-                LogMessage($"Auto-loading last character: {Path.GetFileName(_gameManager.AppSettings.LastCharacterPath)}", MessageType.System);
-                var (success, message) = _gameManager.LoadCharacterProfile(_gameManager.AppSettings.LastCharacterPath);
+                LogMessage($"Auto-loading last character: {Path.GetFileName(_gameManager.ProfileManager.LastCharacterPath)}", MessageType.System);
+                var (success, message) = _gameManager.LoadCharacterProfile(_gameManager.ProfileManager.LastCharacterPath);
                 if (success)
                 {
                     RefreshPlayerInfo();
@@ -293,7 +293,7 @@ public partial class MainForm : Form
             }
             else
             {
-                LogMessage($"Last character file not found: {_gameManager.AppSettings.LastCharacterPath}", MessageType.System);
+                LogMessage($"Last character file not found: {_gameManager.ProfileManager.LastCharacterPath}", MessageType.System);
             }
         }
         else
@@ -552,7 +552,7 @@ public partial class MainForm : Form
             ForeColor = Color.White, 
             BackColor = Color.FromArgb(45, 45, 45),
             CheckOnClick = true,
-            Checked = _gameManager.AppSettings.AutoLoadLastCharacter
+            Checked = _gameManager.ProfileManager.AutoLoadLastCharacter
         };
         fileMenu.DropDownItems.Add(autoLoadMenuItem);
         
@@ -1452,13 +1452,12 @@ private void LogMessage(string message, MessageType type)
     private void LoadUiSettings()
     {
         // Load from BuffManager's settings (stored in settings.json)
-        _displaySystemLog = _gameManager.AppSettings.DisplaySystemLog;
+        _displaySystemLog = _gameManager.ProfileManager.DisplaySystemLog;
     }
     
     private void SaveUiSettings()
     {
-        _gameManager.AppSettings.DisplaySystemLog = _displaySystemLog;
-        _gameManager.AppSettings.Save();
+        _gameManager.ProfileManager.DisplaySystemLog = _displaySystemLog;
     }
 
 /// <summary>

@@ -60,8 +60,7 @@ public partial class MainForm
     {
         if (sender is ToolStripMenuItem item)
         {
-            _gameManager.AppSettings.AutoLoadLastCharacter = item.Checked;
-            _gameManager.AppSettings.Save();
+            _gameManager.ProfileManager.AutoLoadLastCharacter = item.Checked;
             LogMessage($"Auto-load last character: {(item.Checked ? "ENABLED" : "DISABLED")}", MessageType.System);
         }
     }

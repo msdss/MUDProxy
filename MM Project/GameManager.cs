@@ -18,7 +18,6 @@ public class GameManager
     private readonly RemoteCommandManager _remoteCommandManager;
     private readonly RoomGraphManager _roomGraphManager;
     private readonly RoomTracker _roomTracker;
-    private readonly AppSettings _appSettings;
     private readonly ProfileManager _profileManager;
     private readonly BuffManager _buffManager;
     private readonly CastCoordinator _castCoordinator;
@@ -75,9 +74,6 @@ public class GameManager
         }
     }
     
-    // App settings (persisted in settings.json, not character profile)
-    public AppSettings AppSettings => _appSettings;
-    
     // Sub-manager accessors
     public PlayerStateManager PlayerStateManager => _playerStateManager;
     public PartyManager PartyManager => _partyManager;
@@ -121,9 +117,6 @@ public class GameManager
         var appDataPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "MudProxyViewer");
-        
-        _appSettings = new AppSettings(appDataPath);
-        _appSettings.Load();
         
         _profileManager = new ProfileManager(appDataPath, msg => OnLogMessage?.Invoke(msg));
         
@@ -477,10 +470,6 @@ public class GameManager
         _cureManager.CuringEnabled = true;
         
         _windowSettings = profile.WindowSettings;
-        
-        // Sync AppSettings (will be consolidated in Phase 8)
-        _appSettings.LastCharacterPath = filePath;
-        _appSettings.Save();
         
         return (success, message);
     }
