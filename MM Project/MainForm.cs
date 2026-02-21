@@ -193,6 +193,12 @@ public partial class MainForm : Form
             UpdateStatus("Disconnected", Color.White);
             _gameManager.OnDisconnected();
             
+            // Auto-save profile on disconnect to preserve last known room
+            if (!string.IsNullOrEmpty(_gameManager.CurrentProfilePath))
+            {
+                _gameManager.SaveCharacterProfile(_gameManager.CurrentProfilePath);
+            }
+            
             // Reset terminal state
             _userInputBuffer.Clear();
             _serverOutputBuffer.Clear();
@@ -208,6 +214,7 @@ public partial class MainForm : Form
     private void MessageRouter_OnCombatStateChanged(bool inCombat)
     {
         SetCombatState(inCombat);
+        _gameManager.AutoWalkManager.OnCombatStateChanged(inCombat);
     }
     
     private void MessageRouter_OnPlayerStatsUpdated(int currentHp, int currentMana, string manaType)
@@ -253,6 +260,7 @@ public partial class MainForm : Form
     private void MessageRouter_OnPlayerDeath()
     {
         LogMessage("☠️ YOU DIED!", MessageType.System);
+        _gameManager.AutoWalkManager.OnPlayerDeath();
     }
     
     private void MessageRouter_OnLoginComplete()
@@ -593,6 +601,10 @@ public partial class MainForm : Form
         importMenu.DropDownItems.Add(new ToolStripMenuItem("Import Heals...", null, ImportHeals_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         importMenu.DropDownItems.Add(new ToolStripMenuItem("Import Cures...", null, ImportCures_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
         optionsMenu.DropDownItems.Add(importMenu);
+
+        // Walk To menu
+        optionsMenu.DropDownItems.Add(new ToolStripSeparator());
+        optionsMenu.DropDownItems.Add(new ToolStripMenuItem("Walk To...", null, WalkTo_Click) { ForeColor = Color.White, BackColor = Color.FromArgb(45, 45, 45) });
 
         // Game Data menu
         var gameDataMenu = new ToolStripMenuItem("Game Data") { ForeColor = Color.White };
