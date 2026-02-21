@@ -41,6 +41,13 @@ public class MessageRouter
     private const int TICK_INTERVAL_MS = 5000;
     private const int DAMAGE_CLUSTER_THRESHOLD = 2;
     private const int DAMAGE_CLUSTER_WINDOW_MS = 500;
+    // Partial line buffer for RoomTracker line-by-line feeding.
+    // TCP chunks can split a line mid-content (e.g., "Slum Street" in one chunk,
+    // ", Crossroads\r\n..." in the next). The last element from Split('\n') is
+    // held back if the chunk didn't end with a newline, then prepended to the
+    // next chunk to reassemble the complete line.
+    private string _partialLine = string.Empty;
+
     
     // Pattern Detection
     private static readonly Regex HpManaRegex = new(@"\[HP=(\d+)(?:/(\d+))?/(MA|KAI)=(\d+)(?:/(\d+))?\]", RegexOptions.Compiled);
@@ -79,10 +86,32 @@ public class MessageRouter
     {
         var wasPaused = _gameManager.ShouldPauseCommands;
         
+        // --- Combat manager room parsing (MUST run before RoomTracker) ---
+        // CombatManager parses "Also here:" to populate the enemy list.
+        // RoomTracker parses "Obvious exits:" which fires OnRoomChanged,
+        // triggering AutoWalkManager to send the next move command.
+        // Both lines arrive in the same text chunk. If CombatManager runs
+        // after RoomTracker, the walker moves before enemies are detected,
+        // causing attack commands to be sent to the wrong room.
+        _gameManager.CombatManager.ProcessMessage(text);
+        
         // --- Feed lines to room tracker ---
-        foreach (var line in text.Split('\n'))
+        // --- Feed complete lines to room tracker ---
+        // TCP can split a line across chunks (e.g., "Slum Street" + ", Crossroads\r\n").
+        // Hold back the last fragment if the chunk didn't end with a newline.
+        var roomText = _partialLine + text;
+        _partialLine = string.Empty;
+
+        var lines = roomText.Split('\n');
+        for (int i = 0; i < lines.Length; i++)
         {
-            _gameManager.RoomTracker.ProcessLine(line.TrimEnd('\r'));
+            if (i == lines.Length - 1 && !roomText.EndsWith('\n'))
+            {
+                // Last element and chunk didn't end with newline — incomplete line
+                _partialLine = lines[i];
+                break;
+            }
+            _gameManager.RoomTracker.ProcessLine(lines[i].TrimEnd('\r'));
         }
         
         // --- Dispatch to sub-managers ---
@@ -94,9 +123,6 @@ public class MessageRouter
         
         // --- Buff-specific message processing (cast success/failure/expire) ---
         _gameManager.BuffManager.ProcessMessage(text);
-        
-        // --- Combat manager room parsing ---
-        _gameManager.CombatManager.ProcessMessage(text);
         
         // --- Check if pause state changed ---
         if (wasPaused != _gameManager.ShouldPauseCommands)

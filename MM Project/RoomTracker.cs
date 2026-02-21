@@ -57,7 +57,13 @@ public class RoomTracker
     // ── Current state ──
     private RoomNode? _currentRoom;
     private string _currentRoomName = "";
+    private DateTime _lastDetectionTime = DateTime.MinValue;
     private List<VisibleExit> _currentVisibleExits = new();
+    private string? _lastSentCommand = null;
+
+    // ── Room history for disambiguation ──
+    private readonly List<RoomTransition> _roomHistory = new();
+    private const int MaxRoomHistory = 10;
 
     // ── Known direction words ──
     private static readonly string[] DirectionWords =
@@ -107,6 +113,7 @@ public class RoomTracker
     private static readonly Regex YouNoticeRegex = new(@"^You notice\s", RegexOptions.Compiled);
     private static readonly Regex AlsoHereRegex = new(@"^Also here:\s", RegexOptions.Compiled);
     private static readonly Regex HpPromptRegex = new(@"\[HP=\d+", RegexOptions.Compiled);
+    private static readonly Regex HpPromptStripRegex = new(@"\[HP=\d+[^\]]*\]:?", RegexOptions.Compiled);
 
     // ── Events ──
     public event Action<RoomNode?>? OnRoomChanged;
@@ -132,6 +139,35 @@ public class RoomTracker
     /// <summary>Currently visible exits as shown in "Obvious exits:" line.</summary>
     public IReadOnlyList<VisibleExit> CurrentVisibleExits => _currentVisibleExits.AsReadOnly();
 
+    /// <summary>
+    /// Manually set the current room (e.g., restored from a saved profile).
+    /// The next room display will either confirm this or trigger normal matching.
+    /// </summary>
+    public void SetCurrentRoom(RoomNode room)
+    {
+        _currentRoom = room;
+        _currentRoomName = room.Name;
+        _lastDetectionTime = DateTime.MinValue;
+    }
+
+    /// <summary>
+    /// Get the current room transition history (for saving to profile).
+    /// </summary>
+    public List<RoomTransition> GetRoomHistory() => new List<RoomTransition>(_roomHistory);
+
+    /// <summary>
+    /// Restore room transition history (e.g., from a saved profile).
+    /// </summary>
+    public void SetRoomHistory(List<RoomTransition> history)
+    {
+        _roomHistory.Clear();
+        if (history != null)
+        {
+            foreach (var entry in history.TakeLast(MaxRoomHistory))
+                _roomHistory.Add(entry);
+        }
+    }
+
     #endregion
 
     #region Command Tracking
@@ -140,7 +176,7 @@ public class RoomTracker
     /// Call this when the player sends a command to the MUD.
     /// If the command is a movement direction, we record it for room-change tracking.
     /// </summary>
-public void OnPlayerCommand(string command)
+    public void OnPlayerCommand(string command)
     {
         var trimmed = command.Trim().ToLower();
 
@@ -164,6 +200,15 @@ public void OnPlayerCommand(string command)
         }
     }
 
+    /// <summary>
+    /// Call this for EVERY command sent to the MUD (not just movement).
+    /// Tracks the command so its server echo can be filtered from the room buffer.
+    /// </summary>
+    public void OnCommandSent(string command)
+    {
+        _lastSentCommand = command.Trim();
+    }
+
     #endregion
 
     #region Message Processing
@@ -177,8 +222,13 @@ public void OnPlayerCommand(string command)
     /// </summary>
     public void ProcessLine(string line)
     {
-        //Line to enable debugging of room text chunks. So we can debug if needed.
-        //OnLogMessage?.Invoke($"🔬 LINE: [{_bufferState}] \"{line.TrimEnd()}\"");
+        // Debug: log exits lines reaching RoomTracker to diagnose detection failures.
+        // If a room detection fails silently and this log does NOT appear, the problem
+        // is upstream (MessageRouter partial buffer held the line). If it DOES appear,
+        // the problem is downstream (a guard in ProcessRoomDetection blocked it).
+        var _dbgTrim = line.TrimEnd();
+        if (_dbgTrim.StartsWith("Obvious exits:", StringComparison.OrdinalIgnoreCase))
+            OnLogMessage?.Invoke($"🔬 LINE→EXITS: [{_bufferState}] capture={_capturingExitsLine} \"{_dbgTrim}\"");
 
         // Skip completely empty lines
         if (string.IsNullOrEmpty(line))
@@ -198,6 +248,37 @@ public void OnPlayerCommand(string command)
                 _pendingMoveFromKey = null;
                 return;
             }
+        }
+
+        // ── Filter entity movement messages ──
+        // Lines like "Tester walks into the room from the north." or
+        // "A large giant rat creeps into the room from the east!"
+        // These can arrive interleaved with the next room's output during fast
+        // movement, overwriting the real room name in the buffer. Discard them.
+        if (trimmedRight.Contains("into the room", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        // ── Filter party/entity action messages ──
+        // "Tester moves to attack nasty thug." / "Tester breaks off combat."
+        // These party action lines can land in the buffer between room displays
+        // and get mistaken for room names.
+        if (trimmedRight.Contains("moves to attack", StringComparison.OrdinalIgnoreCase) ||
+            trimmedRight.Contains("breaks off combat", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        // ── Filter command echoes ──
+        // The server echoes back every command the player sends. When moving fast,
+        // these echoes can land in the buffer and get extracted as room names.
+        // Filter any line that exactly matches the last sent command.
+        if (_lastSentCommand != null &&
+            trimmedRight.Equals(_lastSentCommand, StringComparison.OrdinalIgnoreCase))
+        {
+            _lastSentCommand = null;
+            return;
         }
 
         // ── Handle "Obvious exits:" line continuation ──
@@ -260,11 +341,10 @@ public void OnPlayerCommand(string command)
             // or end without a direction phrase.
             if (Regex.IsMatch(trimmedRight, @"from the (north|south|east|west|northeast|southeast|northwest|southwest|above|below)[.!]", RegexOptions.IgnoreCase))
             {
-                // This is a movement message, not a room item notice. Treat as noise.
-                if (_bufferState == BufferState.Idle)
-                {
-                    _lineBuffer.Clear();
-                }
+                // This is a movement message (e.g., "You notice Tester sneaking in
+                // from the north."), not a room item listing. Discard it as noise.
+                // Do NOT clear the buffer — a valid room name may already be stored
+                // there waiting for the exits line to trigger detection.
                 return;
             }
 
@@ -340,11 +420,35 @@ public void OnPlayerCommand(string command)
         if (trimmedRight == "The room is dimly lit")
             return;
 
-        // ── Skip known non-room-block lines ──
+        // ── Strip HP prompts ──
+        // The HP prompt (e.g., "[HP=81/MA=60]:") often arrives as a partial line
+        // that gets prepended to the next chunk by MessageRouter's TCP reassembly.
+        // This creates lines like "[HP=81/MA=60]:Slum Street" where the room name
+        // is glued to the prompt. Instead of discarding the entire line, strip the
+        // prompt and continue processing whatever remains (which may be a room name).
+        // NOTE: HpPromptStripRegex matches the FULL prompt "[HP=81/MA=63]:" whereas
+        // HpPromptRegex only matches the opening "[HP=81" — using the detection
+        // regex for stripping would leave "/MA=63]:" behind, still losing the room name.
         if (HpPromptRegex.IsMatch(trimmedRight))
-            return;
+        {
+            trimmedRight = HpPromptStripRegex.Replace(trimmedRight, "").Trim();
+            if (string.IsNullOrEmpty(trimmedRight))
+                return;
+            // Fall through to continue processing the remainder
+        }
 
         // ── Everything else: potential room name ──
+        // Validate against the room graph before accepting. Every room in the game
+        // is in the database, so any line that doesn't match a known room name is
+        // guaranteed to be noise (combat messages, gossip, system text, etc.).
+        // This is an O(1) dictionary lookup — no performance concern.
+        if (_roomGraph.IsLoaded && _roomGraph.GetRoomsByName(trimmedRight.Trim()).Count == 0)
+        {
+            // Not a known room name — discard as noise.
+            // Don't clear the buffer; a valid room name may already be there.
+            return;
+        }
+
         // When we're Idle (not inside a room block), clear the buffer so noise doesn't
         // accumulate. The room name is always the last non-marker line before the room
         // block starts, so we only need to keep the most recent candidate.
@@ -388,6 +492,8 @@ public void OnPlayerCommand(string command)
 
         if (string.IsNullOrEmpty(roomName))
         {
+            var bufferDump = string.Join(" | ", _lineBuffer.Select(l => l.Length > 40 ? l.Substring(0, 40) + "…" : l));
+            OnLogMessage?.Invoke($"🔬 ROOM DETECT: roomName is empty — buffer had {_lineBuffer.Count} lines: [{bufferDump}]");
             _lineBuffer.Clear();
             return;
         }
@@ -395,6 +501,11 @@ public void OnPlayerCommand(string command)
         // Store display state
         _currentRoomName = roomName;
         _currentVisibleExits = visibleExits;
+
+        // Debug: show what ProcessRoomDetection sees before the guards evaluate it.
+        // pending=null means no movement, guards will treat as redisplay.
+        // current=room name shows what Guard 1 compares against.
+        OnLogMessage?.Invoke($"🔬 ROOM DETECT: name='{roomName}' pending='{_pendingMoveCommand}' current='{_currentRoom?.Name}' elapsed={(DateTime.Now - _lastDetectionTime).TotalMilliseconds:F0}ms");
 
         OnRoomDisplayDetected?.Invoke(roomName, visibleExits);
         
@@ -407,11 +518,29 @@ public void OnPlayerCommand(string command)
             return;
         }
 
-        // If the room display matches our current room name and we didn't move, keep it.
-        // This prevents re-matching on room redisplays (pressing Enter, "look", etc.)
+        // Guard 1: No-move redisplay.
+        // If the room display matches our current room and we didn't move, skip it.
+        // Handles: pressing Enter, combat ending, room refresh, etc.
+        // No timing restriction — redisplays can happen seconds after last detection.
         if (_currentRoom != null &&
+            _pendingMoveCommand == null &&
+            _currentRoom.Name.Equals(roomName, StringComparison.OrdinalIgnoreCase))
+        {
+            _lineBuffer.Clear();
+            return;
+        }
+
+        // Guard 2: Party-member-follow redisplay.
+        // When a party member follows into the room, the server sends a redisplay
+        // of the current room. By this time the walker has already sent the NEXT
+        // move command, so _pendingMoveCommand is set. However, real game-enforced
+        // movement takes at least 1 second, so if we see the same room name
+        // within 750ms of the last detection, it's a follow redisplay, not
+        // arrival at the next room. Skip WITHOUT consuming the pending move.
+        if (_currentRoom != null &&
+            _pendingMoveCommand != null &&
             _currentRoom.Name.Equals(roomName, StringComparison.OrdinalIgnoreCase) &&
-            _pendingMoveCommand == null)
+            (DateTime.Now - _lastDetectionTime).TotalMilliseconds < 750)
         {
             _lineBuffer.Clear();
             return;
@@ -419,6 +548,28 @@ public void OnPlayerCommand(string command)
 
         // Step 3: Match against graph
         var matchedRoom = MatchRoom(roomName, visibleExits);
+
+        // Record this room observation in history (only when player actually moved).
+        // Redisplays (no movement) are not recorded to avoid flushing useful history.
+        if (_pendingMoveCommand != null)
+        {
+            _roomHistory.Add(new RoomTransition
+            {
+                RoomName = roomName,
+                ExitDirections = visibleExits.Select(e => e.DirectionKey).ToList(),
+                DirectionMoved = _pendingMoveCommand
+            });
+            while (_roomHistory.Count > MaxRoomHistory)
+                _roomHistory.RemoveAt(0);
+        }
+
+        // Clear pending movement BEFORE firing event.
+        // OnRoomChanged subscribers (AutoWalkManager) may call OnPlayerCommand()
+        // to set the NEXT step's pending move — clearing after the event would wipe it.
+        _pendingMoveCommand = null;
+        _pendingMoveFromKey = null;
+
+        _lastDetectionTime = DateTime.Now;
 
         // Step 4: Update current room if changed
         if (matchedRoom?.Key != _currentRoom?.Key)
@@ -436,10 +587,6 @@ public void OnPlayerCommand(string command)
 
             OnRoomChanged?.Invoke(matchedRoom);
         }
-
-        // Clear pending movement
-        _pendingMoveCommand = null;
-        _pendingMoveFromKey = null;
 
         _lineBuffer.Clear();
     }
@@ -513,10 +660,15 @@ public void OnPlayerCommand(string command)
         if (_pendingMoveCommand != null && _pendingMoveFromKey != null)
         {
             var predicted = PredictRoomFromMovement(_pendingMoveFromKey, _pendingMoveCommand);
+            OnLogMessage?.Invoke($"🔬 MATCH DEBUG: Strategy 1 — from='{_pendingMoveFromKey}' cmd='{_pendingMoveCommand}' predicted='{predicted?.Key}' name='{predicted?.Name}' roomName='{roomName}'");
             if (predicted != null && predicted.Name.Equals(roomName, StringComparison.OrdinalIgnoreCase))
             {
                 return predicted;
             }
+        }
+        else
+        {
+            OnLogMessage?.Invoke($"🔬 MATCH DEBUG: Strategy 1 SKIPPED — pendingCmd='{_pendingMoveCommand}' pendingFrom='{_pendingMoveFromKey}'");
         }
 
         // Strategy 2: Exact name lookup
@@ -528,7 +680,21 @@ public void OnPlayerCommand(string command)
         if (candidates.Count == 1)
             return candidates[0];
 
-        // Strategy 3: Disambiguate by exits
+        // Strategy 3: Room history disambiguation (before exit matching)
+        // In areas with many duplicate room names AND similar exit patterns,
+        // history-based backwards chain walking is far more reliable than
+        // exit matching alone. Try it first when we have movement data.
+        if (_pendingMoveCommand != null && _roomHistory.Count > 0)
+        {
+            var historyMatch = DisambiguateWithHistory(candidates, _pendingMoveCommand);
+            if (historyMatch != null)
+            {
+                OnLogMessage?.Invoke($"🔬 MATCH DEBUG: Strategy 3 (history) — resolved [{historyMatch.Key}] {historyMatch.Name}");
+                return historyMatch;
+            }
+        }
+
+        // Strategy 4: Disambiguate by exits
         var exitDirections = visibleExits.Select(e => e.DirectionKey).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var exitMatches = new List<(RoomNode room, int score)>();
@@ -576,7 +742,7 @@ public void OnPlayerCommand(string command)
             }
         }
 
-        // Strategy 4: Movement prediction alone
+        // Strategy 5: Movement prediction alone
         if (_pendingMoveCommand != null && _pendingMoveFromKey != null)
         {
             var predicted = PredictRoomFromMovement(_pendingMoveFromKey, _pendingMoveCommand);
@@ -608,6 +774,90 @@ public void OnPlayerCommand(string command)
             return null;
 
         return _roomGraph.GetRoom(exit.DestinationKey);
+    }
+
+    /// <summary>
+    /// Attempt to disambiguate candidates by walking backwards through room history.
+    /// 
+    /// For each candidate, we check: "Could the player have arrived here given the
+    /// recorded sequence of moves and room names?" We build chains of room keys
+    /// backwards through history, eliminating candidates where the graph connections
+    /// don't match the observed transitions.
+    /// 
+    /// Example: 50 rooms named "Slum Street" with exits N,S. We moved east to get here.
+    /// History says the previous room was "Slum Street, Bend". For each candidate,
+    /// check if any room named "Slum Street, Bend" has an east exit leading to it.
+    /// Most candidates won't have a valid source room and get eliminated.
+    /// </summary>
+    private RoomNode? DisambiguateWithHistory(List<RoomNode> candidates, string directionMoved)
+    {
+        if (_roomHistory.Count == 0 || string.IsNullOrEmpty(directionMoved))
+            return null;
+
+        // Each chain tracks a sequence of room keys: [currentCandidate, prevRoom, prevPrevRoom, ...]
+        // We start with one chain per candidate.
+        var chains = candidates.Select(c => new List<string> { c.Key }).ToList();
+
+        // The direction used to arrive at the current (most recent) position in the chain
+        string arrivalDirection = directionMoved;
+
+        // Walk backwards through history, newest to oldest
+        for (int h = _roomHistory.Count - 1; h >= 0 && chains.Count > 0; h--)
+        {
+            var histEntry = _roomHistory[h];
+
+            // Convert the movement command to a direction key (e.g., "e" → "E")
+            if (!MoveCommandToDirectionKey.TryGetValue(arrivalDirection, out var dirKey))
+                break;
+
+            // Get all rooms that could be the previous room (by name)
+            var prevRoomCandidates = _roomGraph.GetRoomsByName(histEntry.RoomName);
+            if (prevRoomCandidates.Count == 0)
+                break;
+
+            // For each surviving chain, check if any previous room candidate
+            // has an exit in the right direction leading to the chain's tail
+            var newChains = new List<List<string>>();
+            foreach (var chain in chains)
+            {
+                var targetKey = chain[chain.Count - 1]; // room we need to reach
+
+                foreach (var prevRoom in prevRoomCandidates)
+                {
+                    // Does this previous room have an exit in dirKey that leads to targetKey?
+                    var exit = prevRoom.Exits.FirstOrDefault(e =>
+                        e.Direction.Equals(dirKey, StringComparison.OrdinalIgnoreCase));
+
+                    if (exit != null && exit.DestinationKey == targetKey)
+                    {
+                        var newChain = new List<string>(chain) { prevRoom.Key };
+                        newChains.Add(newChain);
+                    }
+                }
+            }
+
+            chains = newChains;
+
+            // Check if we've narrowed to a single original candidate
+            var uniqueCurrentKeys = chains.Select(c => c[0]).Distinct().ToList();
+            if (uniqueCurrentKeys.Count == 1)
+            {
+                return _roomGraph.GetRoom(uniqueCurrentKeys[0]);
+            }
+
+            // If all chains eliminated, history doesn't help
+            if (chains.Count == 0)
+                break;
+
+            // Safety cap to prevent chain explosion in highly connected areas
+            if (chains.Count > 500)
+                break;
+
+            // Next iteration checks one step further back
+            arrivalDirection = histEntry.DirectionMoved;
+        }
+
+        return null;
     }
 
     #endregion
@@ -767,6 +1017,9 @@ public void OnPlayerCommand(string command)
         _bufferState = BufferState.Idle;
         _inYouNoticeContinuation = false;
         _inAlsoHereContinuation = false;
+        _lastDetectionTime = DateTime.MinValue;
+        _lastSentCommand = null;
+        _roomHistory.Clear();
         OnRoomChanged?.Invoke(null);
     }
 

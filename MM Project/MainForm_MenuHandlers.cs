@@ -269,6 +269,12 @@ public partial class MainForm
         dialog.ShowDialog(this);
     }
     
+    private void WalkTo_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new WalkToDialog(_gameManager);
+        dialog.ShowDialog(this);
+    }
+    
     private void OpenSettings_Click(object? sender, EventArgs e)
     {
         var currentCharacter = _gameManager.PlayerStateManager.PlayerInfo.Name;

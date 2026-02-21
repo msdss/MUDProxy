@@ -574,6 +574,28 @@ public class CharacterProfile
     
     // Window layout (per-character)
     public WindowSettings? WindowSettings { get; set; }
+    
+    // Last known room (for position recovery on app restart)
+    public string LastRoomKey { get; set; } = string.Empty;
+    
+    // Room transition history (for disambiguation in areas with duplicate room names)
+    public List<RoomTransition> LastRoomHistory { get; set; } = new();
+}
+
+/// <summary>
+/// Records a single room transition for disambiguation history.
+/// Stores what the player observed when arriving at a room.
+/// </summary>
+public class RoomTransition
+{
+    /// <summary>Room name as displayed by the server.</summary>
+    public string RoomName { get; set; } = string.Empty;
+    
+    /// <summary>Exit direction keys visible in the room (e.g., "N", "S", "E").</summary>
+    public List<string> ExitDirections { get; set; } = new();
+    
+    /// <summary>The movement command used to arrive at this room (e.g., "e", "n").</summary>
+    public string DirectionMoved { get; set; } = string.Empty;
 }
 
 // Export/Import classes

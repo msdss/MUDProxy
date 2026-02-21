@@ -21,6 +21,7 @@ public class GameManager
     private readonly ProfileManager _profileManager;
     private readonly BuffManager _buffManager;
     private readonly CastCoordinator _castCoordinator;
+    private readonly AutoWalkManager _autoWalkManager;
     
     // Events for UI updates
     public event Action? OnBuffsChanged;
@@ -88,6 +89,7 @@ public class GameManager
     public ProfileManager ProfileManager => _profileManager;
     public BuffManager BuffManager => _buffManager;
     public CastCoordinator CastCoordinator => _castCoordinator;
+    public AutoWalkManager AutoWalkManager => _autoWalkManager;
     
     /// <summary>
     /// Public helper for MessageRouter to raise log messages.
@@ -211,6 +213,17 @@ public class GameManager
         _roomGraphManager.LoadFromGameData();
         _roomTracker = new RoomTracker(_roomGraphManager);
         _roomTracker.OnLogMessage += msg => OnRoomTrackerLogMessage?.Invoke(msg);
+        OnSendCommand += cmd => { if (cmd != null) _roomTracker.OnCommandSent(cmd); };
+
+        _autoWalkManager = new AutoWalkManager(
+            _roomTracker,
+            _roomGraphManager,
+            () => _combatManager.CurrentRoomEnemies.Count,
+            () => ShouldPauseCommands,
+            () => _combatManager.ClearRoomState(),
+            cmd => OnSendCommand?.Invoke(cmd),
+            msg => OnLogMessage?.Invoke(msg)
+        );
         
         // Create BuffManager — buff config CRUD, active tracking, recast eligibility
         _buffManager = new BuffManager(
@@ -270,6 +283,7 @@ public class GameManager
     {
         _playerStateManager.OnDisconnected();
         _partyManager.OnDisconnected();
+        _autoWalkManager.OnDisconnected();
         OnLogMessage?.Invoke("📡 Disconnected - session state reset");
     }
     
@@ -365,7 +379,9 @@ public class GameManager
             ManaReservePercent = _buffManager.ManaReservePercent,
             BuffWhileResting = _buffManager.BuffWhileResting,
             BuffWhileInCombat = _buffManager.BuffWhileInCombat,
-            WindowSettings = _windowSettings
+            WindowSettings = _windowSettings,
+            LastRoomKey = _roomTracker.CurrentRoomKey,
+            LastRoomHistory = _roomTracker.GetRoomHistory()
         };
         
         return _profileManager.SaveProfile(profile, filePath);
@@ -470,6 +486,23 @@ public class GameManager
         _cureManager.CuringEnabled = true;
         
         _windowSettings = profile.WindowSettings;
+        
+        // Restore last known room position and movement history
+        if (!string.IsNullOrEmpty(profile.LastRoomKey) && _roomGraphManager.IsLoaded)
+        {
+            var room = _roomGraphManager.GetRoom(profile.LastRoomKey);
+            if (room != null)
+            {
+                _roomTracker.SetCurrentRoom(room);
+                OnLogMessage?.Invoke($"📍 Restored last known room: [{room.Key}] {room.Name}");
+            }
+        }
+        
+        if (profile.LastRoomHistory != null && profile.LastRoomHistory.Count > 0)
+        {
+            _roomTracker.SetRoomHistory(profile.LastRoomHistory);
+            OnLogMessage?.Invoke($"📍 Restored {profile.LastRoomHistory.Count} room history entries");
+        }
         
         return (success, message);
     }
