@@ -1,28 +1,23 @@
 # MUD Proxy Viewer - AI Knowledge Base
 
-> **Version:** 2.4.0  
-> **Last Updated:** February 19, 2026  
+> **Version:** 2.5.0  
+> **Last Updated:** February 21, 2026  
 > **Purpose:** Combat automation client for MajorMUD, replacing the deprecated MegaMUD client  
 > **Platform:** Windows (.NET 8.0 WinForms)  
-> **Status:** Active Development - **BuffManager Refactoring Complete**
+> **Status:** Active Development - **Auto-Pathing System Operational**
 
 ---
 
-## 🎉 Recent Major Update (v2.4.0)
+## 🎉 Recent Major Update (v2.5.0)
 
-**BuffManager refactoring complete — all phases finished**
+**Auto-pathing system fully operational — player can walk from any room to any room automatically**
 
-BuffManager.cs reduced from 2,237 lines to ~622 lines (72% total reduction). The monolithic hub has been fully decomposed into focused, single-responsibility classes:
-- ✅ Extracted `PartyManager.cs` — party tracking, par automation, health requests
-- ✅ Extracted `PlayerStateManager.cs` — HP/mana, stats, exp, training screen, resting state, exit meditation
-- ✅ Extracted `MessageRouter.cs` — server message dispatching to all sub-managers
-- ✅ Extracted `ProfileManager.cs` — character profile file I/O and app-level settings
-- ✅ Created `GameManager.cs` — central coordinator owning all sub-managers
-- ✅ Extracted `CastCoordinator.cs` — priority loop, cast timing/cooldowns, failure detection
-- ✅ Consolidated `AppSettings.cs` into `ProfileManager.cs` — eliminated duplicate settings class
-- ✅ BuffManager is now **pure buff management**: config CRUD, active buff tracking, recast eligibility
-- ✅ Uniform cast interface: each manager returns data, CastCoordinator sends commands
-- ✅ Combat re-attack bug fixed: no longer sends redundant attacks when entities enter the room
+The auto-pathing system (Phases 1-4) is complete and tested in live gameplay:
+- ✅ `RoomGraphManager.cs` — 56,375 rooms, 131,538 traversable exits, BFS pathfinding in ~2ms
+- ✅ `RoomTracker.cs` — Real-time room detection with 6-strategy disambiguation, HP prompt stripping, TCP reassembly handling
+- ✅ `AutoWalkManager.cs` — Step-by-step walk execution with combat pause/resume, timeout retry, arrival confirmation
+- ✅ `WalkToDialog.cs` — Search destination, preview path, start/stop walking with live progress
+- 🔄 Next: Special exit handling (doors, hidden exits, text command exits)
 
 ---
 
@@ -99,7 +94,7 @@ MegaMUD was the traditional client used to play MajorMUD. It is **very old and d
                         │
                         ▼
 ┌──────────────────────────────────────────────────────┐
-│              GameManager (Central Coordinator)        │
+│              BuffManager (Hub — being refactored)    │
 │  ┌──────────────┐  ┌──────────────┐                 │
 │  │ PlayerState  │  │ PartyManager │                 │
 │  │ Manager      │  │              │                 │
@@ -108,21 +103,17 @@ MegaMUD was the traditional client used to play MajorMUD. It is **very old and d
 │  │ Combat Mgr │  │ Healing Mgr│  │  Cure Mgr  │    │
 │  └────────────┘  └────────────┘  └────────────┘    │
 │  ┌────────────┐  ┌──────────────┐ ┌────────────┐   │
-│  │ Remote Cmd │  │ Room Tracker │                 │
+│  │ Remote Cmd │  │ Room Tracker │ │ AppSettings│   │
 │  │ Manager    │  │ + GraphMgr  │ │            │   │
 │  └────────────┘  └──────────────┘ └────────────┘   │
+│  ┌──────────────┐  ┌──────────────┐                 │
+│  │ AutoWalk Mgr │  │ Walk To      │                 │
+│  │ (Pathing)    │  │ Dialog       │                 │
+│  └──────────────┘  └──────────────┘                 │
 │  ┌──────────────┐  ┌──────────────┐                 │
 │  │ PlayerDB Mgr │  │ MonsterDB   │                 │
 │  │              │  │ Manager     │                 │
 │  └──────────────┘  └──────────────┘                 │
-│  ┌──────────────┐  ┌──────────────┐                 │
-│  │ BuffManager  │  │ ProfileMgr  │                 │
-│  │ (buff-only)  │  │              │                 │
-│  └──────────────┘  └──────────────┘                 │
-│  ┌──────────────┐                                    │
-│  │ CastCoord-   │                                    │
-│  │ inator       │                                    │
-│  └──────────────┘                                    │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -135,11 +126,9 @@ MainForm (Entry Point - Partial Class Split)
     │       └── Handles IAC, NAWS, reconnection
     │
     ├── MessageRouter (Message Processing)
-    │       ├── Takes GameManager reference
     │       ├── Combat state detection
     │       ├── HP/Mana parsing
-    │       ├── Tick detection
-    │       └── Dispatches to all sub-managers
+    │       └── Tick detection
     │
     ├── TerminalControl (VT100 Terminal)
     │       ├── ScreenBuffer (2D character grid + scrollback history)
@@ -148,10 +137,8 @@ MainForm (Entry Point - Partial Class Split)
     ├── LogRenderer (Log Display)
     │       └── ANSI color rendering for logs
     │
-    ├── GameManager (Central Coordinator — owns all sub-managers)
-    │       ├── BuffManager (buff configs, active tracking, recast eligibility)
-    │       ├── CastCoordinator (priority casting — heals, cures, buffs — timing/cooldowns)
-    │       ├── PlayerStateManager (HP, mana, stats, exp, resting, training, exit meditation)
+    ├── BuffManager (Central Hub — being decomposed)
+    │       ├── PlayerStateManager (HP, mana, stats, exp, resting, training)
     │       ├── PartyManager (party tracking, par, health requests)
     │       ├── HealingManager (heal spells, HP threshold rules)
     │       ├── CureManager (ailment detection, cure automation)
@@ -160,7 +147,8 @@ MainForm (Entry Point - Partial Class Split)
     │       ├── PlayerDatabaseManager (friend/enemy tracking)
     │       ├── MonsterDatabaseManager (monster data, overrides)
     │       ├── RoomGraphManager + RoomTracker (room detection, mapping)
-    │       └── ProfileManager (character profile file I/O, app-level settings)
+    │       ├── AutoWalkManager (auto-pathing execution, combat pause/resume)
+    │       └── AppSettings (app-level persistence)
     │
     └── GameDataCache (Singleton)
             └── Game JSON files (Races, Classes, Items, etc.)
@@ -172,10 +160,10 @@ MainForm (Entry Point - Partial Class Split)
 2. **TelnetConnection → MainForm:** Decoded text via OnDataReceived event
 3. **MainForm → MessageRouter:** Process message for game state
 4. **MainForm → TerminalControl:** Display in VT100 terminal
-5. **MessageRouter → Sub-managers:** Route to PlayerStateManager, PartyManager, CureManager, CombatManager, BuffManager, etc.
-6. **Sub-managers:** Update state, trigger automation
-7. **GameManager events → MainForm:** UI updates (OnBuffsChanged, OnPartyChanged, OnPlayerInfoChanged, etc.)
-8. **Automation → TelnetConnection:** Send commands back to server via GameManager.OnSendCommand
+5. **MessageRouter → Managers:** Route to BuffManager, CombatManager, etc.
+6. **Managers:** Update state, trigger automation
+7. **Automation → TelnetConnection:** Send commands back to server
+8. **MainForm → UI:** Update status panels, logs, indicators
 
 ---
 
@@ -210,10 +198,8 @@ MudProxyViewer/
 │   └── DarkColorTable.cs              # Dark theme color table
 │
 ├── Game Managers
-│   ├── GameManager.cs                 # Central coordinator — owns all sub-managers
-│   ├── CastCoordinator.cs             # Priority-based casting (heals, cures, buffs)
-│   ├── BuffManager.cs                 # Buff configs, active tracking, recast eligibility (buff-only)
-│   ├── PlayerStateManager.cs          # HP/mana, stats, exp, resting/combat/training/exit state
+│   ├── BuffManager.cs                 # Buff configs, auto-recast, cast priority (hub — being decomposed)
+│   ├── PlayerStateManager.cs          # HP/mana, stats, exp, resting/combat/training state
 │   ├── PartyManager.cs                # Party tracking, par automation, health requests
 │   ├── CombatManager.cs               # Combat automation, enemy detection, attacks
 │   ├── HealingManager.cs              # Heal spell management, HP monitoring
@@ -221,12 +207,14 @@ MudProxyViewer/
 │   ├── RemoteCommandManager.cs        # Telepath-based remote command handling
 │   ├── PlayerDatabaseManager.cs       # Player tracking (friends/enemies)
 │   ├── MonsterDatabaseManager.cs      # Monster data, CSV parsing, overrides
-│   ├── RoomGraphManager.cs            # Room graph from game data
+│   ├── RoomGraphManager.cs            # Room graph from game data, BFS pathfinding
 │   ├── RoomTracker.cs                 # Current room detection from server output
+│   ├── AutoWalkManager.cs             # Auto-walk execution, combat pause/resume
 │   └── ExperienceTracker.cs           # Exp/hour calculation, time-to-level
 │
 ├── Settings & Persistence
-│   └── ProfileManager.cs             # Character profile file I/O, app-level settings (settings.json)
+│   ├── AppSettings.cs                 # App-level settings (settings.json)
+│   └── ProfileManager.cs             # Character profile file I/O (partial — not yet wired)
 │
 ├── Data & Models
 │   ├── Models.cs                      # All data models and enums
@@ -239,7 +227,9 @@ MudProxyViewer/
 │   ├── BuffConfigDialog.cs            # Buff configuration editor
 │   ├── HealingConfigDialog.cs         # Healing rules configuration
 │   ├── CureConfigDialog.cs            # Cure/ailment configuration
-│   └── MonsterDatabaseDialog.cs       # Monster-specific list with overrides
+│   ├── MonsterDatabaseDialog.cs       # Monster-specific list with overrides
+│   ├── WalkToDialog.cs                # Auto-walk destination search and execution
+│   └── PathfindingTestDialog.cs       # Debug tool for verifying BFS paths
 │
 ├── Controls/
 │   └── CombatStatusPanel.cs           # Combat panel UI component
@@ -264,27 +254,26 @@ MudProxyViewer/
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| **GameManager.cs** | ~489 | Central coordinator, profile management |
-| **CastCoordinator.cs** | ~206 | Priority-based casting (heals, cures, buffs) |
-| **BuffManager.cs** | ~622 | Buff config CRUD, active tracking, recast eligibility |
-| PlayerStateManager.cs | ~480 | Player state, stats, exp, exit meditation |
+| **BuffManager.cs** | ~1,147 | Buff management + hub (being decomposed) |
+| PlayerStateManager.cs | ~300 | Player state, stats, exp tracking |
 | PartyManager.cs | ~400 | Party tracking, automation |
 | CombatManager.cs | ~700 | Combat automation |
 | HealingManager.cs | ~450 | Heal spell management |
 | CureManager.cs | ~700 | Ailment/cure automation |
 | RemoteCommandManager.cs | ~400 | Telepath remote commands |
-| RoomTracker.cs | ~350 | Room detection from server output |
-| RoomGraphManager.cs | ~300 | Room graph from game data |
-| ProfileManager.cs | ~224 | Character profile file I/O, app-level settings |
-| MessageRouter.cs | ~205 | Server message routing and dispatching |
-| MainForm.cs | ~1,540 | Core UI orchestration |
-| MainForm.MenuHandlers.cs | ~898 | All menu/button handlers |
+| RoomTracker.cs | ~1,050 | Room detection, 6-strategy disambiguation |
+| RoomGraphManager.cs | ~300 | Room graph, BFS pathfinding |
+| AutoWalkManager.cs | ~500 | Auto-walk execution, combat pause/resume |
+| WalkToDialog.cs | ~300 | Walk-to destination UI |
+| MainForm.cs | ~600 | Core UI orchestration |
+| MainForm.MenuHandlers.cs | ~400 | All menu/button handlers |
 | MainForm.DisplayUpdates.cs | ~300 | UI refresh methods |
 | TelnetConnection.cs | ~400 | Network layer |
+| MessageRouter.cs | ~250 | Message processing + partial line buffering |
 | TerminalControl.cs | ~480 | VT100 terminal |
 | ScreenBuffer.cs | ~400 | Terminal buffer + scrollback |
 | AnsiVtParser.cs | ~365 | ANSI parser |
-| SettingsDialog.cs | ~1,585 | Tabbed settings UI |
+| SettingsDialog.cs | ~900 | Tabbed settings UI |
 
 ---
 
@@ -438,18 +427,17 @@ public class TelnetConnection
 
 ### MessageRouter.cs
 
-Routes and processes all messages from the MUD server. Takes a `GameManager` reference and dispatches to all sub-managers:
+Routes and processes messages from the MUD server:
 
 ```csharp
 public class MessageRouter
 {
     // Events
     public event Action<bool>? OnCombatStateChanged;
-    public event Action<int, int, string>? OnPlayerStatsUpdated;
+    public event Action<int, int, int, int, string>? OnPlayerStatsUpdated;
     public event Action? OnCombatTickDetected;
     public event Action? OnPlayerDeath;
     public event Action? OnLoginComplete;
-    public event Action<bool>? OnPauseStateChanged;
     
     // Methods
     public void ProcessMessage(string text);
@@ -460,13 +448,10 @@ public class MessageRouter
 
 **Responsibilities:**
 - Combat state detection (*Combat Engaged* / *Combat Off*)
-- HP/Mana parsing from `[HP=100/MA=50]`
+- HP/Mana parsing from `[HP=100/100/MA=50/50]`
 - Combat tick detection via damage clustering
 - Death detection
 - Login phase tracking
-- Dispatches to: PlayerStateManager, PartyManager, CureManager, PlayerDB, BuffManager, CombatManager
-- Room tracker line feeding
-- Remote command dispatching
 
 ### Terminal Components
 
@@ -522,49 +507,22 @@ public class LogRenderer
 
 ### BuffManager.cs
 
-Pure buff management (fully decomposed — no longer a hub or cast coordinator):
+Central management hub (**currently being decomposed** — see Refactoring Plan):
 - Buff configurations CRUD, import/export
 - Active buff tracking (activate, expire, clear)
-- Recast eligibility evaluation via `CheckBuffRecast()` — returns data, does not send commands
-- Buff cast success and expiration detection in `ProcessMessage()`
-- Cast failure detection delegated to CastCoordinator via injected handler
-- Receives dependencies via constructor (PlayerStateManager, PartyManager)
-- Owned by GameManager
-
-### CastCoordinator.cs
-
-Priority-based casting system (extracted from BuffManager in Phase 7):
-- Main entry point: `CheckAutoRecast()` — iterates priority order (Heals → Cures → Buffs)
-- Cast timing: cooldown (5.5s), minimum interval (500ms), blocked-until-next-tick
-- Cast failure detection: spell fail, not enough mana, already cast this round
-- `TryCastHeal()` → calls `HealingManager.CheckHealing()`
-- `TryCastCure()` → calls `CureManager.CheckCuring()`
-- `TryCastBuff()` → calls `BuffManager.CheckBuffRecast()`
-- Only class that sends cast commands — sub-managers return data only
-- `OnCombatTick()` resets cast blocking state
-- Owned by GameManager
-
-### GameManager.cs
-
-Central coordinator (created in Phase 6 of refactoring):
-- Owns all sub-managers including CastCoordinator (constructs and wires them)
-- Profile management (save/load/new character profiles via ProfileManager)
-- DTO assembly for profile serialization
-- Events for UI updates (OnBuffsChanged, OnPartyChanged, OnPlayerInfoChanged, etc.)
-- Coordination properties (ShouldPauseCommands, CombatAutoEnabled)
-- BBS/Window settings storage
-- Delegates `CheckAutoRecast()` and `OnCombatTick()` to CastCoordinator
+- Auto-recast system with heal/cure/buff cast priority
+- Cast failure detection (blocked until next tick)
+- Still owns: constructor wiring, message dispatching, profile save/load (moving out in next phases)
 
 ### PlayerStateManager.cs
 
 Player state tracking (extracted from BuffManager):
 - HP, Mana, MaxHP, MaxMana, ManaType
-- Resting, InCombat, InTrainingScreen, IsInLoginPhase, IsExiting states
+- Resting, InCombat, InTrainingScreen, IsInLoginPhase states
 - PlayerInfo (name, race, class, level)
 - ExperienceTracker (exp/hour, time-to-level)
 - Stat and exp command parsing
 - Training screen detection
-- Exit meditation state machine (timed window distinguishes meditation HP bars from re-entry)
 
 ### PartyManager.cs
 
@@ -602,15 +560,11 @@ Telepath-based remote control:
 - Execute arbitrary commands, request party invite
 - Hangup/relog commands
 
-### ProfileManager.cs
+### AppSettings.cs
 
-Character profile and app-level settings persistence:
-- Profile file I/O: `SaveProfile()`, `LoadProfile()`, `AutoSave()`
-- App-level settings: `AutoLoadLastCharacter`, `LastCharacterPath`, `DisplaySystemLog`
-- Reads/writes `settings.json` for app settings (auto-saves on property change)
-- Profile path tracking, unsaved changes detection
-- `GetDefaultProfileFilename()` for safe filename generation
-- GameManager assembles profile DTOs; ProfileManager handles serialization only
+App-level settings persistence (extracted from BuffManager):
+- `AutoLoadLastCharacter`, `LastCharacterPath`, `DisplaySystemLog`
+- Reads/writes `settings.json` (separate from character profiles)
 
 ---
 
@@ -732,7 +686,7 @@ var items = GameDataCache.Instance.GetTable("Items");
 
 ```
 %AppData%\MudProxyViewer\
-├── settings.json              # Global application settings (managed by ProfileManager)
+├── settings.json              # Global application settings
 ├── buffs.json                 # Buff configurations
 ├── healing.json               # Heal spells and rules
 ├── cures.json                 # Ailments and cure spells
@@ -872,20 +826,12 @@ public partial class MainForm
 All major subsystems are extracted into focused classes:
 
 ```csharp
-// Central coordinator
-var gameManager = new GameManager();
-gameManager.OnBuffsChanged += RefreshBuffDisplay;
-gameManager.OnPartyChanged += RefreshPartyDisplay;
-
-// Buff-specific shortcut
-var buffManager = gameManager.BuffManager;
-
 // Network layer
 var telnet = new TelnetConnection();
 telnet.OnDataReceived += HandleData;
 
-// Message processing (takes GameManager)
-var router = new MessageRouter(gameManager);
+// Message processing
+var router = new MessageRouter(buffManager);
 router.OnCombatStateChanged += HandleCombatState;
 
 // Terminal display
@@ -946,17 +892,14 @@ private TelnetConnection _telnetConnection = null!;  // Initialized in construct
 
 ### Adding New Features
 
-1. **New Manager:** Create class with delegate injection, wire into GameManager constructor
+1. **New Manager:** Create class with delegate injection, wire into BuffManager constructor
 2. **New UI Component:** Extract to separate UserControl or Form
 3. **New Network Feature:** Add to TelnetConnection.cs
 4. **New Message Processing:** Add to MessageRouter.cs
 5. **New Display Logic:** Add to MainForm.DisplayUpdates.cs
 6. **New Player State:** Add to PlayerStateManager.cs
 7. **New Party Feature:** Add to PartyManager.cs
-8. **New Menu/Button:** Add to MainForm.MenuHandlers.cs
-9. **New Coordination Logic:** Add to GameManager.cs
-10. **New Profile Data:** Add to GameManager.SaveCharacterProfile / LoadCharacterProfile
-11. **New Cast Priority/Timing:** Add to CastCoordinator.cs
+8. **New Menu/Button:** Add to MainForm.MenuHandlers.cs **New Menu Handler:** Add to MainForm.MenuHandlers.cs
 
 ---
 
@@ -1020,7 +963,7 @@ private void SomeMethod(string data)
 - **Removed from BuffManager:** ~250 lines (HP/mana, stats, exp, training screen, resting state)
 - **Result:** BuffManager reduced to ~1,640 lines
 
-#### Phase 3a: Extract AppSettings ✅ *(later consolidated into ProfileManager in v2.4.0)*
+#### Phase 3a: Extract AppSettings ✅
 - **Created:** `AppSettings.cs` (~75 lines)
 - **Removed from BuffManager:** ~69 lines (app-level settings persistence)
 - **Result:** BuffManager reduced to ~1,570 lines
@@ -1040,63 +983,46 @@ private void SomeMethod(string data)
 - HealthRequestIntervalSeconds minimum lowered from 30 to 15
 - Removed `CombatAutoEnabled` from character profile persistence
 
-### Version 2.3.0 - CastCoordinator & Phase 7 (February 2026)
+#### Remaining (Phases 4-6 — Complete in v2.2.0)
+- **Phase 4:** ✅ Moved message dispatching from BuffManager to MessageRouter
+- **Phase 5:** ✅ Moved profile save/load/new to ProfileManager
+- **Phase 6:** ✅ Created GameManager as central coordinator, BuffManager became buff-only
 
-**Objective:** Extract the priority-based casting pipeline from BuffManager into a dedicated CastCoordinator.
+### Version 2.5.0 - Auto-Pathing System (February 2026)
 
-#### Phase 7: CastCoordinator Extraction ✅
-- **Created:** `CastCoordinator.cs` (~206 lines) — priority loop, cast timing, cooldowns, failure detection
-- **Removed from BuffManager:** Cast timing state, failure regexes, `TryCastHeal/TryCastCure/TryCastBuff`, `CheckAutoRecast`, `OnCombatTick` (~115 lines)
-- **Simplified:** BuffManager constructor (removed `_shouldPauseCommands`, `_healingManager`, `_cureManager`, `_sendCommand` parameters)
-- **Added to BuffManager:** `CheckBuffRecast()` returns data instead of sending commands
-- **Updated:** GameManager creates CastCoordinator, delegates `CheckAutoRecast()` and `OnCombatTick()` to it
-- **Result:** BuffManager reduced from ~737 to ~622 lines (72% total reduction from original 2,237)
+**Objective:** Build automatic room-to-room navigation through a 56,375-room game world.
 
-### Version 2.4.0 - AppSettings Consolidation & Bug Fix (February 2026)
+#### Auto-Pathing Phase 1: Room Graph Engine ✅
+- **Created:** `RoomGraphManager.cs` — BFS pathfinding over 131,538 traversable exits in ~2ms
 
-**Objective:** Eliminate duplicate settings class. Fix combat re-attack bug.
+#### Auto-Pathing Phase 2: Room Detection ✅
+- **Created:** `RoomTracker.cs` — state machine parser with 6 disambiguation strategies
 
-#### Phase 8: AppSettings Consolidation ✅
-- **Deleted:** `AppSettings.cs` — ProfileManager already had identical properties and persistence
-- **Updated:** MainForm.cs, MainForm.MenuHandlers.cs — `_gameManager.AppSettings.X` → `_gameManager.ProfileManager.X`
-- **Removed:** Redundant `.Save()` calls (ProfileManager auto-saves on property set)
-- **Removed:** `_appSettings` field and `AppSettings` property from GameManager
-- **Result:** One fewer file, single source of truth for app-level settings
+#### Auto-Pathing Phase 3: Walk Execution ✅
+- **Created:** `AutoWalkManager.cs` — step-by-step command execution with combat pause/resume
+- **10 debugging sessions** resolved: TCP reassembly, HP prompt concatenation, buffer corruption, strategy ordering, guard logic, command echo contamination, message processing order
 
-#### Phase 9: Cancelled ✅
-- BbsSettings/WindowSettings stay in GameManager — they are runtime coordination state, not file I/O
-- Moving them to ProfileManager would blur its clean "serialization only" responsibility
+#### Auto-Pathing Phase 4: User Interface ✅
+- **Created:** `WalkToDialog.cs` — destination search, path preview, live walk progress
 
-#### Bug Fix: Combat Re-Attack Loop
-- **Root cause:** `TryInitiateCombat()` had no guard for "already in combat" — when an entity entered the room, a room refresh triggered a redundant attack command, causing `*Combat Off*` / `*Combat Engaged*` cycling
-- **Fix:** Added `_isInCombat` check in `TryInitiateCombat()` — skips attack if already fighting the top-priority target, allows re-attack only if a higher-priority enemy has appeared
-- **Result:** Single attack per engagement, no more command spam
+#### Key Technical Fixes in v2.5.0
+- MessageRouter partial line buffering for TCP packet boundary handling
+- HP prompt stripping instead of line discarding (preserves room names glued to prompts)
+- Room name validation against graph database (rejects combat/chat text)
+- History disambiguation moved ahead of exit matching for duplicate room name areas
+- Guard logic refined: Guard 1 no timing restriction, Guard 2 only when pending move exists
+- Sneaking message filter no longer clears room name buffer
 
-### Version 2.2.0 - GameManager & Phase 6 Completion (February 2026)
+### Version 2.4.0 - AppSettings Consolidation (February 2026)
+- AppSettings.cs consolidated into ProfileManager.cs
+- Combat re-attack bug fix in CombatManager
 
-**Objective:** Create GameManager as central coordinator, BuffManager becomes buff-only sub-manager.
+### Version 2.3.0 - CastCoordinator Extraction (February 2026)
+- **Created:** `CastCoordinator.cs` — priority-based casting system extracted from BuffManager
 
-#### Phase 4: Message Routing Extraction ✅
-- **Updated:** `MessageRouter.cs` to take GameManager reference
-- **Removed from BuffManager:** Message dispatching to sub-managers (~50 lines)
-- **Result:** MessageRouter now dispatches to all sub-managers directly
-
-#### Phase 5: ProfileManager Wiring ✅
-- **Wired:** `ProfileManager.cs` into GameManager for file I/O delegation
-- **Removed from BuffManager:** Profile file read/write operations (~36 lines)
-- **Result:** Profile persistence fully managed by GameManager + ProfileManager
-
-#### Phase 6: GameManager Creation ✅
-- **Created:** `GameManager.cs` (~479 lines) — owns all sub-managers
-- **Reduced:** BuffManager from ~1,092 to ~737 lines (buff-only)
-- **Updated:** MainForm uses `_gameManager` + `_buffManager` shortcut
-- **Updated:** SettingsDialog, MessageRouter take GameManager reference
-- **Result:** Clean coordinator pattern, BuffManager is pure buff engine
-
-#### Additional Fixes in v2.2.0
-- Exit meditation state machine with 10-second timed window for re-entry detection
-- PlayerStateManager handles exit → menu → re-enter game cycle without disconnect
-- All automation correctly pauses during exit and resumes on re-entry or interruption
+### Version 2.2.0 - GameManager Architecture (February 2026)
+- **Created:** `GameManager.cs` — central coordinator replacing BuffManager-as-hub pattern
+- Exit meditation state machine fix (time-based window for game re-entry)
 
 ### Version 2.0.0 - Major Refactoring (February 2026)
 
@@ -1173,28 +1099,20 @@ _logRenderer.LogMessage("message", MessageType.System, _systemLogTextBox,
 // Process server message
 _messageRouter.ProcessMessage(text);
 
-// Access player state (via GameManager)
-_gameManager.PlayerStateManager.CurrentHp
-_gameManager.PlayerStateManager.InCombat
-_gameManager.PlayerStateManager.PlayerInfo.Name
+// Access player state
+_buffManager.PlayerStateManager.CurrentHp
+_buffManager.PlayerStateManager.InCombat
+_buffManager.PlayerStateManager.PlayerInfo.Name
 
-// Access party (via GameManager)
-_gameManager.PartyManager.PartyMembers
-_gameManager.PartyManager.IsInParty
+// Access party
+_buffManager.PartyManager.PartyMembers
+_buffManager.PartyManager.IsInParty
 
 // Access automation toggles
-_gameManager.CombatManager.CombatEnabled
-_buffManager.AutoRecastEnabled          // _buffManager is shortcut to _gameManager.BuffManager
-_gameManager.HealingManager.HealingEnabled
-_gameManager.CureManager.CuringEnabled
-
-// Profile management
-_gameManager.SaveCharacterProfile(filePath)
-_gameManager.LoadCharacterProfile(filePath)
-
-// Coordination
-_gameManager.ShouldPauseCommands        // Checks login, training, exiting, manual pause
-_gameManager.IsTargetSelf(name)
+_buffManager.CombatAutoEnabled
+_buffManager.AutoRecastEnabled
+_buffManager.HealingManager.HealingEnabled
+_buffManager.CureManager.CuringEnabled
 
 // Access game data
 var table = GameDataCache.Instance.GetTable("Items");
@@ -1204,14 +1122,13 @@ var table = GameDataCache.Instance.GetTable("Items");
 
 ```csharp
 // Main components in MainForm
-private readonly GameManager _gameManager = new();   // Central coordinator
-private BuffManager _buffManager = null!;            // Shortcut: _gameManager.BuffManager
-private MessageRouter _messageRouter = null!;
-private TelnetConnection _telnetConnection = null!;
+private TelnetConnection _telnetConnection;
+private MessageRouter _messageRouter;
+private BuffManager _buffManager;
 private LogRenderer _logRenderer;
-private TerminalControl _terminalControl = null!;
-private ScreenBuffer _screenBuffer = null!;
-private AnsiVtParser _ansiParser = null!;
+private TerminalControl _terminalControl;
+private ScreenBuffer _screenBuffer;
+private AnsiVtParser _ansiParser;
 ```
 
 ---
@@ -1220,9 +1137,10 @@ private AnsiVtParser _ansiParser = null!;
 
 | Version | Changes |
 |---------|---------|
-| **2.4.0** | **Refactoring complete** — Consolidated AppSettings into ProfileManager (deleted AppSettings.cs). Cancelled Phase 9 (current design correct). Fixed combat re-attack loop bug in CombatManager. |
-| **2.3.0** | **CastCoordinator extraction** — Priority casting pipeline extracted from BuffManager. BuffManager reduced to ~622 lines (72% total reduction). Uniform cast interface across heals/cures/buffs. |
-| **2.2.0** | **BuffManager refactoring complete** — Created GameManager as central coordinator. BuffManager reduced to buff-only (~737 lines). Extracted MessageRouter dispatching, ProfileManager, exit meditation state machine. |
+| **2.5.0** | **Auto-pathing operational** — AutoWalkManager, WalkToDialog, RoomTracker hardened with 10 bug fixes (TCP reassembly, HP prompt stripping, strategy reordering, buffer corruption fixes). Reliably walks multi-step routes through hostile areas. |
+| **2.4.0** | **AppSettings consolidated** into ProfileManager, combat re-attack bug fix |
+| **2.3.0** | **CastCoordinator extracted** — priority-based casting system separated from BuffManager |
+| **2.2.0** | **GameManager created** — central coordinator replacing BuffManager-as-hub pattern |
 | **2.1.0** | **BuffManager decomposition** — Extracted PartyManager, PlayerStateManager, AppSettings. Pass-through cleanup. Automation toggle fix. Backscroll viewer. Combat toggle improvements. |
 | **2.0.0** | **Major refactoring complete** — Extracted network, message routing, terminal, logging into separate classes. MainForm reduced 87%. Zero warnings. |
 | 1.0.0 | Code reorganization, comprehensive knowledge base |
@@ -1235,38 +1153,36 @@ private AnsiVtParser _ansiParser = null!;
 
 ## Important Notes for AI Assistants
 
-1. **GameManager is the central coordinator** — Owns all sub-managers. Access via `_gameManager.PlayerStateManager`, `_gameManager.PartyManager`, `_gameManager.CombatManager`, etc.
-2. **BuffManager is pure buff management** — Config CRUD, active buff tracking, recast eligibility only. No cast timing or cross-system coordination. Access via `_buffManager` shortcut (which equals `_gameManager.BuffManager`).
-3. **CastCoordinator owns the casting pipeline** — Priority loop (heals → cures → buffs), cast timing/cooldowns, failure detection. Only class that sends cast commands. Access via `_gameManager.CastCoordinator`.
-4. **MainForm has two key references** — `_gameManager` for coordinator/sub-manager access, `_buffManager` as shortcut for buff-specific calls
-4. **MainForm is a partial class** — Check MenuHandlers.cs and DisplayUpdates.cs for methods
-5. **Network logic is in TelnetConnection** — Don't add network code to MainForm
-6. **Message routing is in MessageRouter** — Takes GameManager, dispatches to all sub-managers. Don't add parsing to MainForm
-7. **Terminal rendering is in TerminalControl** — Complete VT100 emulator with scrollback
-8. **Log rendering is in LogRenderer** — ANSI color support for logs
-9. **Dark theme is mandatory** — All UI uses consistent color palette
-10. **Zero warnings policy** — All nullable references must be initialized or marked `= null!`
-11. **Automation toggles are runtime-only** — Combat, Heal, Buff, Cure all default ON on launch, never persisted
-12. **Delegate injection pattern** — All managers receive dependencies as `Func<>` delegates, not direct references
-13. **Character profiles are comprehensive** — ALL character settings in one JSON file, managed by GameManager via ProfileManager
-14. **Exit meditation is timed** — PlayerStateManager uses a 10-second window to distinguish meditation HP bars from game re-entry
+1. **BuffManager is being decomposed** — Sub-managers (PlayerStateManager, PartyManager, etc.) now own their data. Access via `_buffManager.PlayerStateManager`, `_buffManager.PartyManager`, etc.
+2. **No more pass-through properties** — Don't use `_buffManager.CurrentHp`, use `_buffManager.PlayerStateManager.CurrentHp`
+3. **MainForm is a partial class** — Check MenuHandlers.cs and DisplayUpdates.cs for methods
+4. **Network logic is in TelnetConnection** — Don't add network code to MainForm
+5. **Message processing is in MessageRouter** — Don't add parsing to MainForm. MessageRouter includes partial line buffering for TCP reassembly.
+6. **Terminal rendering is in TerminalControl** — Complete VT100 emulator with scrollback
+7. **Log rendering is in LogRenderer** — ANSI color support for logs
+8. **Dark theme is mandatory** — All UI uses consistent color palette
+9. **Zero warnings policy** — All nullable references must be initialized or marked `= null!`
+10. **Automation toggles are runtime-only** — Combat, Heal, Buff, Cure all default ON on launch, never persisted
+11. **Delegate injection pattern** — All managers receive dependencies as `Func<>` delegates, not direct references
+12. **Character profiles are comprehensive** — ALL character settings in one JSON file
+13. **Auto-pathing is operational** — RoomTracker detects current room, AutoWalkManager executes paths. Only Normal exits are traversable; doors/hidden/text exits are Phase 5.
+14. **RoomTracker is complex (~1,050 lines)** — Contains 6 disambiguation strategies, HP prompt stripping, TCP reassembly handling, and extensive guard logic. Changes require careful verification to avoid regressions.
 
 ### When Adding New Features
 
 - **Network features** → Add to `TelnetConnection.cs`
-- **Message processing** → Add to `MessageRouter.cs` (not BuffManager or MainForm)
+- **Message processing** → Add to `MessageRouter.cs` (not BuffManager)
 - **Player state tracking** → Add to `PlayerStateManager.cs`
 - **Party features** → Add to `PartyManager.cs`
-- **Buff features** → Add to `BuffManager.cs`
-- **Cast priority/timing** → Add to `CastCoordinator.cs`
-- **Coordination logic** → Add to `GameManager.cs`
-- **Profile data** → Add to `GameManager.SaveCharacterProfile` / `LoadCharacterProfile`
 - **UI event handlers** → Add to `MainForm.MenuHandlers.cs`
 - **Display updates** → Add to `MainForm.DisplayUpdates.cs`
 - **Core orchestration** → Add to `MainForm.cs`
 - **Game logic** → Add to appropriate Manager class
+- **Auto-pathing / walk execution** → Add to `AutoWalkManager.cs`
+- **Room detection / disambiguation** → Add to `RoomTracker.cs` (verify changes with diff — regressions are common)
+- **Room graph / pathfinding** → Add to `RoomGraphManager.cs`
 - **UI components** → Create new UserControl or Form
 
 ---
 
-*This document provides comprehensive context for AI assistants working on this project. Version 2.4.0 completes the BuffManager refactoring — all phases finished. Keep updated as features are added.*
+*This document provides comprehensive context for AI assistants working on this project. Version 2.5.0 adds a fully operational auto-pathing system. Next priority is Phase 5: special exit handling (doors, hidden exits, text commands). See AutoPathing_Plan.md for the full plan. Keep updated as features are added.*
