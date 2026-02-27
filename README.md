@@ -1,23 +1,34 @@
-# MUD Proxy Viewer - AI Knowledge Base
+# MUD Proxy Viewer — AI Knowledge Base
 
-> **Version:** 2.5.0  
-> **Last Updated:** February 21, 2026  
-> **Purpose:** Combat automation client for MajorMUD, replacing the deprecated MegaMUD client  
-> **Platform:** Windows (.NET 8.0 WinForms)  
-> **Status:** Active Development - **Auto-Pathing System Operational**
+> **Version:** 2.9.3
+> **Last Updated:** February 27, 2026
+> **Purpose:** Combat automation client for MajorMUD, replacing the deprecated MegaMUD client
+> **Platform:** Windows (.NET 8.0 WinForms)
+> **Status:** Active Development — **Combat Heartbeat Safety Net + Loop Editor UI**
 
 ---
 
-## 🎉 Recent Major Update (v2.5.0)
+## 🎉 Recent Major Update (v2.9.3)
 
-**Auto-pathing system fully operational — player can walk from any room to any room automatically**
+**Combat Heartbeat Safety Net + Loop Editor UI improvements**
 
-The auto-pathing system (Phases 1-4) is complete and tested in live gameplay:
-- ✅ `RoomGraphManager.cs` — 56,375 rooms, 131,538 traversable exits, BFS pathfinding in ~2ms
-- ✅ `RoomTracker.cs` — Real-time room detection with 6-strategy disambiguation, HP prompt stripping, TCP reassembly handling
-- ✅ `AutoWalkManager.cs` — Step-by-step walk execution with combat pause/resume, timeout retry, arrival confirmation
-- ✅ `WalkToDialog.cs` — Search destination, preview path, start/stop walking with live progress
-- 🔄 Next: Special exit handling (doors, hidden exits, text command exits)
+17-hour soak test revealed the walker can get permanently stuck in `WaitingForCombat` when `*Combat Off*` is never received (TCP split/dropped). Added a damage heartbeat system: while in `WaitingForCombat`, a 10-second timer resets on every combat activity (damage ticks + dodge/miss messages). When no activity is detected for 10s, the system performs a non-aggressive room check. If the room is clear, walking resumes. If enemies are present, the heartbeat restarts.
+
+Also fixed an empty-room detection bug where `ClearAlsoHereDedup()` only cleared the dedup guard but left stale enemy lists intact — causing infinite heartbeat loops in empty rooms. Expanded to also clear `_currentRoomEnemies` and `_playersInRoom` while preserving `_currentTarget` (prevents harmful re-attack commands that change combat attack order).
+
+Loop Editor dialog improvements:
+- Dialog now centers on the main form's monitor (fixes wrong-monitor placement)
+- Collapses to minimal view during loop execution (hides steps list, add-room controls, notes — shows only loop name, status panel, and control buttons)
+
+### New/Modified Files (v2.9.3)
+
+| File | Change |
+|------|--------|
+| `CombatManager.cs` | `OnCombatActivityDetected` event, `ContainsPlayerSwing()` helper, combat activity detection for dodge/miss patterns, expanded `ClearAlsoHereDedup()` to clear stale enemy/player lists |
+| `AutoWalkManager.cs` | Heartbeat timer system: `OnCombatTick()`, `OnCombatHeartbeatTimeout()`, `OnCombatHeartbeatRecheck()`, start/stop helpers |
+| `GameManager.cs` | Wired `ClearAlsoHereDedup` delegate and `OnCombatActivityDetected` event |
+| `MainForm.cs` | Wired `OnCombatTick()` to `MessageRouter_OnCombatTickDetected` |
+| `LoopDialog.cs` | Center-on-parent positioning, collapse/expand UI during loop execution |
 
 ---
 
@@ -35,10 +46,11 @@ The auto-pathing system (Phases 1-4) is complete and tested in live gameplay:
 10. [Configuration & Persistence](#configuration--persistence)
 11. [Character Profiles](#character-profiles)
 12. [UI Components](#ui-components)
-13. [Code Organization](#code-organization)
-14. [Development Guidelines](#development-guidelines)
-15. [Known Patterns & Solutions](#known-patterns--solutions)
-16. [Refactoring History](#refactoring-history)
+13. [Auto-Pathing System](#auto-pathing-system)
+14. [Code Organization](#code-organization)
+15. [Development Guidelines](#development-guidelines)
+16. [Known Patterns & Solutions](#known-patterns--solutions)
+17. [Refactoring History](#refactoring-history)
 
 ---
 
@@ -93,28 +105,28 @@ MegaMUD was the traditional client used to play MajorMUD. It is **very old and d
 └──────────────┘  └──────────────┘  └──────────────┘
                         │
                         ▼
-┌──────────────────────────────────────────────────────┐
-│              BuffManager (Hub — being refactored)    │
-│  ┌──────────────┐  ┌──────────────┐                 │
-│  │ PlayerState  │  │ PartyManager │                 │
-│  │ Manager      │  │              │                 │
-│  └──────────────┘  └──────────────┘                 │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐    │
-│  │ Combat Mgr │  │ Healing Mgr│  │  Cure Mgr  │    │
-│  └────────────┘  └────────────┘  └────────────┘    │
-│  ┌────────────┐  ┌──────────────┐ ┌────────────┐   │
-│  │ Remote Cmd │  │ Room Tracker │ │ AppSettings│   │
-│  │ Manager    │  │ + GraphMgr  │ │            │   │
-│  └────────────┘  └──────────────┘ └────────────┘   │
-│  ┌──────────────┐  ┌──────────────┐                 │
-│  │ AutoWalk Mgr │  │ Walk To      │                 │
-│  │ (Pathing)    │  │ Dialog       │                 │
-│  └──────────────┘  └──────────────┘                 │
-│  ┌──────────────┐  ┌──────────────┐                 │
-│  │ PlayerDB Mgr │  │ MonsterDB   │                 │
-│  │              │  │ Manager     │                 │
-│  └──────────────┘  └──────────────┘                 │
-└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│              BuffManager (Hub — being refactored)        │
+│  ┌──────────────┐  ┌──────────────┐                     │
+│  │ PlayerState  │  │ PartyManager │                     │
+│  │ Manager      │  │              │                     │
+│  └──────────────┘  └──────────────┘                     │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐        │
+│  │ Combat Mgr │  │ Healing Mgr│  │  Cure Mgr  │        │
+│  └────────────┘  └────────────┘  └────────────┘        │
+│  ┌────────────┐  ┌──────────────┐ ┌────────────┐       │
+│  │ Remote Cmd │  │ Room Tracker │ │ AppSettings│       │
+│  │ Manager    │  │ + GraphMgr  │ │            │       │
+│  └────────────┘  └──────────────┘ └────────────┘       │
+│  ┌──────────────┐  ┌──────────────┐                     │
+│  │ AutoWalk Mgr │  │ Loop Manager │                     │
+│  │ (Pathing)    │  │              │                     │
+│  └──────────────┘  └──────────────┘                     │
+│  ┌──────────────┐  ┌──────────────┐                     │
+│  │ PlayerDB Mgr │  │ MonsterDB   │                     │
+│  │              │  │ Manager     │                     │
+│  └──────────────┘  └──────────────┘                     │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ### Component Relationships
@@ -128,7 +140,8 @@ MainForm (Entry Point - Partial Class Split)
     ├── MessageRouter (Message Processing)
     │       ├── Combat state detection
     │       ├── HP/Mana parsing
-    │       └── Tick detection
+    │       ├── Tick detection
+    │       └── Partial line buffering / OnBufferCleared
     │
     ├── TerminalControl (VT100 Terminal)
     │       ├── ScreenBuffer (2D character grid + scrollback history)
@@ -147,7 +160,9 @@ MainForm (Entry Point - Partial Class Split)
     │       ├── PlayerDatabaseManager (friend/enemy tracking)
     │       ├── MonsterDatabaseManager (monster data, overrides)
     │       ├── RoomGraphManager + RoomTracker (room detection, mapping)
-    │       ├── AutoWalkManager (auto-pathing execution, combat pause/resume)
+    │       ├── AutoWalkManager (auto-pathing execution, special exit handling)
+    │       ├── LoopManager (waypoint loop execution, lap counting)
+    │       ├── DebugLogWriter (per-session walk/loop logging)
     │       └── AppSettings (app-level persistence)
     │
     └── GameDataCache (Singleton)
@@ -180,254 +195,134 @@ MudProxyViewer/
 │   └── MainForm.DisplayUpdates.cs     # UI refresh methods
 │
 ├── Network Layer
-│   └── TelnetConnection.cs            # TCP, IAC, NAWS, reconnection
+│   └── TelnetConnection.cs            # Telnet protocol, IAC, reconnection
 │
 ├── Message Processing
-│   └── MessageRouter.cs               # Combat detection, HP parsing, ticks
+│   └── MessageRouter.cs               # Combat detection, HP parsing, partial line buffering
 │
 ├── Terminal Emulation
-│   ├── TerminalControl.cs             # VT100 terminal UserControl
-│   ├── ScreenBuffer.cs                # 2D character buffer + scrollback history
+│   ├── TerminalControl.cs             # VT100 terminal (UserControl)
+│   ├── ScreenBuffer.cs                # 2D character grid + scrollback
 │   ├── AnsiVtParser.cs                # ANSI escape sequence parser
-│   └── TerminalCell.cs                # Terminal cell struct
+│   └── TerminalCell.cs                # Character cell struct
 │
-├── UI Components
-│   ├── LogRenderer.cs                 # ANSI log rendering
-│   ├── MessageType.cs                 # Log message type enum
-│   ├── DarkMenuRenderer.cs            # Dark theme menu renderer
-│   └── DarkColorTable.cs              # Dark theme color table
+├── Logging
+│   ├── LogRenderer.cs                 # ANSI color log rendering
+│   └── DebugLogWriter.cs              # Per-session walk/loop debug logging
 │
-├── Game Managers
-│   ├── BuffManager.cs                 # Buff configs, auto-recast, cast priority (hub — being decomposed)
-│   ├── PlayerStateManager.cs          # HP/mana, stats, exp, resting/combat/training state
-│   ├── PartyManager.cs                # Party tracking, par automation, health requests
-│   ├── CombatManager.cs               # Combat automation, enemy detection, attacks
-│   ├── HealingManager.cs              # Heal spell management, HP monitoring
-│   ├── CureManager.cs                 # Ailment detection and cure automation
-│   ├── RemoteCommandManager.cs        # Telepath-based remote command handling
-│   ├── PlayerDatabaseManager.cs       # Player tracking (friends/enemies)
-│   ├── MonsterDatabaseManager.cs      # Monster data, CSV parsing, overrides
-│   ├── RoomGraphManager.cs            # Room graph from game data, BFS pathfinding
-│   ├── RoomTracker.cs                 # Current room detection from server output
-│   ├── AutoWalkManager.cs             # Auto-walk execution, combat pause/resume
-│   └── ExperienceTracker.cs           # Exp/hour calculation, time-to-level
+├── Managers
+│   ├── BuffManager.cs                 # Central hub (being decomposed)
+│   ├── GameManager.cs                 # Central coordinator
+│   ├── PlayerStateManager.cs          # HP, mana, stats, experience
+│   ├── PartyManager.cs                # Party tracking
+│   ├── HealingManager.cs              # Heal spell automation
+│   ├── CureManager.cs                 # Ailment cure automation
+│   ├── CombatManager.cs               # Enemy detection, attack automation
+│   ├── CastCoordinator.cs             # Priority-based casting system
+│   ├── RemoteCommandManager.cs        # Telepath-based remote control
+│   ├── PlayerDatabaseManager.cs       # Friend/enemy tracking
+│   └── MonsterDatabaseManager.cs      # Monster data, overrides
 │
-├── Settings & Persistence
-│   ├── AppSettings.cs                 # App-level settings (settings.json)
-│   └── ProfileManager.cs             # Character profile file I/O (partial — not yet wired)
-│
-├── Data & Models
-│   ├── Models.cs                      # All data models and enums
-│   ├── GameDataCache.cs               # Singleton cache for loaded JSON data
-│   └── GameDataViewerDialog.cs        # Generic game data list viewer
+├── Auto-Pathing System
+│   ├── RoomGraphManager.cs            # Room graph engine, BFS pathfinding, exit classification
+│   ├── RoomTracker.cs                 # Real-time room detection, 6-strategy disambiguation
+│   ├── AutoWalkManager.cs             # Walk execution, door/search state machines
+│   └── LoopManager.cs                 # Waypoint loop execution, lap counting
 │
 ├── Dialogs
-│   ├── SettingsDialog.cs              # Settings UI (tabbed configuration)
-│   ├── BackscrollDialog.cs            # Scrollback history viewer with search
-│   ├── BuffConfigDialog.cs            # Buff configuration editor
-│   ├── HealingConfigDialog.cs         # Healing rules configuration
-│   ├── CureConfigDialog.cs            # Cure/ailment configuration
-│   ├── MonsterDatabaseDialog.cs       # Monster-specific list with overrides
-│   ├── WalkToDialog.cs                # Auto-walk destination search and execution
-│   └── PathfindingTestDialog.cs       # Debug tool for verifying BFS paths
+│   ├── WalkToDialog.cs                # Walk destination search, path preview, loop UI
+│   ├── LoopDialog.cs                  # Loop editor, live stats, collapse-on-run UI
+│   ├── SettingsDialog.cs              # Character settings including Navigation tab
+│   ├── PathfindingTestDialog.cs       # Debug: manual path verification
+│   └── RoomDialogs.cs                 # Room detail viewer
 │
-├── Controls/
-│   └── CombatStatusPanel.cs           # Combat panel UI component
+├── UI Helpers
+│   ├── MessageType.cs                 # Log message type enum
+│   ├── DarkMenuRenderer.cs            # Dark theme menu renderer
+│   └── DarkColorTable.cs              # Dark theme colors
 │
-├── GameData/                          # Game data viewers
-│   ├── AbilityNames.cs                # Ability ID → name lookup
-│   ├── GenericDetailDialog.cs         # Fallback detail dialog
-│   ├── RaceDialogs.cs                 # RaceViewerConfig + RaceDetailDialog
-│   ├── ClassDialogs.cs                # ClassViewerConfig + ClassDetailDialog
-│   ├── ItemDialogs.cs                 # ItemViewerConfig + ItemDetailDialog
-│   ├── SpellDialogs.cs                # SpellViewerConfig + SpellDetailDialog
-│   ├── MonsterDialogs.cs              # MonsterViewerConfig
-│   ├── RoomDialogs.cs                 # RoomViewerConfig + RoomDetailDialog
-│   ├── ShopDialogs.cs                 # ShopViewerConfig + ShopDetailDialog
-│   ├── LairDialogs.cs                 # LairViewerConfig + LairDetailDialog
-│   └── TextBlockDialogs.cs            # TextBlockViewerConfig + TextBlockDetailDialog
+├── Data
+│   ├── Models.cs                      # All data models (buffs, combat, pathing, etc.)
+│   ├── GameDataCache.cs               # Singleton game data loader
+│   └── ProfileManager.cs             # Character profile persistence + AppSettings
 │
-└── MudProxyViewer.csproj              # .NET 8.0 Windows Forms project
+└── Game Data Viewers
+    ├── *ViewerConfig.cs               # Grid column configurations
+    └── *DetailDialog.cs               # Detail view forms
 ```
-
-### File Size Summary
-
-| File | Lines | Purpose |
-|------|-------|---------|
-| **BuffManager.cs** | ~1,147 | Buff management + hub (being decomposed) |
-| PlayerStateManager.cs | ~300 | Player state, stats, exp tracking |
-| PartyManager.cs | ~400 | Party tracking, automation |
-| CombatManager.cs | ~700 | Combat automation |
-| HealingManager.cs | ~450 | Heal spell management |
-| CureManager.cs | ~700 | Ailment/cure automation |
-| RemoteCommandManager.cs | ~400 | Telepath remote commands |
-| RoomTracker.cs | ~1,050 | Room detection, 6-strategy disambiguation |
-| RoomGraphManager.cs | ~300 | Room graph, BFS pathfinding |
-| AutoWalkManager.cs | ~500 | Auto-walk execution, combat pause/resume |
-| WalkToDialog.cs | ~300 | Walk-to destination UI |
-| MainForm.cs | ~600 | Core UI orchestration |
-| MainForm.MenuHandlers.cs | ~400 | All menu/button handlers |
-| MainForm.DisplayUpdates.cs | ~300 | UI refresh methods |
-| TelnetConnection.cs | ~400 | Network layer |
-| MessageRouter.cs | ~250 | Message processing + partial line buffering |
-| TerminalControl.cs | ~480 | VT100 terminal |
-| ScreenBuffer.cs | ~400 | Terminal buffer + scrollback |
-| AnsiVtParser.cs | ~365 | ANSI parser |
-| SettingsDialog.cs | ~900 | Tabbed settings UI |
 
 ---
 
-## UI Styling Guidelines
+## Auto-Pathing System
 
-### Color Palette
+### Overview
 
-| Element | RGB Value | Usage |
-|---------|-----------|-------|
-| **Background (Main)** | `30, 30, 30` | Form background |
-| **Background (Panels)** | `45, 45, 45` | Dialogs, panels, menus |
-| **Background (Sections)** | `40, 40, 40` | Grouped sections within tabs |
-| **Background (Inputs)** | `50, 50, 50` - `60, 60, 60` | TextBox, ListView, grids |
-| **Background (Dark)** | `35, 35, 35` | Section panels with borders |
-| **Background (Darker)** | `20, 20, 20` | Terminal/log backgrounds |
-| **Foreground (Primary)** | `White` | Primary text |
-| **Foreground (Secondary)** | `LightGray` | Labels, secondary text |
-| **Foreground (Dimmed)** | `Gray` | Disabled, placeholder text |
-| **Accent (Green)** | `0, 100, 0` | Save buttons |
-| **Accent (Hover)** | `70, 70, 70` | Menu hover state |
+The auto-pathing system navigates a player through a 56,375-room game world automatically. It handles directional movement, doors (bash/picklock), text command exits, invisible hidden passages, and searchable hidden exits.
 
-### Standard Control Styling
+### Exit Type Classification
 
-```csharp
-// TextBox
-var textBox = new TextBox
-{
-    BackColor = Color.FromArgb(60, 60, 60),
-    ForeColor = Color.White,
-    BorderStyle = BorderStyle.FixedSingle,
-    Font = new Font("Segoe UI", 9)
-};
+| Exit Type | BFS Traversable | Walk Handling | Example Data |
+|-----------|----------------|---------------|--------------|
+| **Normal** | ✅ Yes | Send direction command (`n`, `se`, etc.) | `1/298` |
+| **Text** | ✅ Yes | Send text command (`go crimson`, etc.) | `1/298 (Text: go crimson, enter crimson)` |
+| **Door** | ✅ Yes | Bash/pick then move; configurable strategy | `1/298 (Door)` |
+| **SearchableHidden** | ✅ Yes | Send `search`, parse result, retry on fail, then move | `1/298 (Hidden/Needs 1 Actions, any order)` + `Action#1` |
+| **Hidden (Passable)** | ✅ Yes | Send direction command (exit is invisible but passable) | `1/298 (Hidden/Passable)` |
+| **Locked** | ❌ No | Intentionally excluded (999+ stat requirements) | `1/298 (Door [1000 picklocks/strength])` |
+| **Hidden (Multi-Action)** | ❌ No | Complex multi-room prerequisites, deferred | `1/298 (Hidden/Needs 3 Actions, any order)` |
 
-// Button (Standard)
-var button = new Button
-{
-    BackColor = Color.FromArgb(60, 60, 60),
-    ForeColor = Color.White,
-    FlatStyle = FlatStyle.Flat,
-    Font = new Font("Segoe UI", 9)
-};
+### Key Components
 
-// Button (Save/Primary)
-var saveButton = new Button
-{
-    BackColor = Color.FromArgb(0, 100, 0),
-    ForeColor = Color.White,
-    FlatStyle = FlatStyle.Flat
-};
+**RoomGraphManager.cs** — Graph engine and pathfinding:
+- 56,375 rooms, 136,245 total exits parsed
+- BFS pathfinding in ~2ms
+- Exit type classification determines traversability
+- `FindPath()` returns `PathResult` with `PathStep` list including `ExitType` per step
 
-// Label
-var label = new Label
-{
-    ForeColor = Color.White,  // or Color.LightGray for secondary
-    Font = new Font("Segoe UI", 9),
-    BackColor = Color.Transparent
-};
+**RoomTracker.cs** (~1,200 lines) — Room detection:
+- Parses MUD server output to determine current room
+- 7-strategy disambiguation (movement prediction, neighbor check, exact name, history, exit matching, tiebreaker, fallback)
+- 3-guard suppression system: Guard 1 (no-move redisplay), Guard 2 (party-follow within 750ms), Guard 3 (late follow with prediction check)
+- `GetDirectionalExitKeys()` — filters `RoomExitType.Text`, `Hidden`, and `SearchableHidden` from exit comparisons (none appear in "Obvious exits:")
+- Command queue: FIFO `Queue<PendingMove>` replaces single-slot tracking; uses `_currentRoom.Key` at consumption time; 10s staleness pruning, 15-command cap
+- HP prompt stripping, TCP reassembly handling, verbose mode support
+- `ClearLineBuffer()` for search/door state machine coordination
+- `OnBufferCleared` event to sync MessageRouter partial line clearing
+- `OnDisconnected()` clears command queue and stale state while preserving current room and history
 
-// NumericUpDown
-var numeric = new NumericUpDown
-{
-    BackColor = Color.FromArgb(60, 60, 60),
-    ForeColor = Color.White
-};
+**AutoWalkManager.cs** — Walk execution:
+- State machine: Idle → Walking → WaitingForRoom → WaitingForCombat → Complete/Failed/Disconnected
+- Door state machine: sends bash/pick → parses response → opens → moves
+- Search state machine: sends `search` → parses success/failure → retries → moves
+- Combat pause/resume with RoomTracker→CombatManager direct forwarding
+- Combat verification: 5s timer clears stale enemies if combat never engages
+- Combat heartbeat: 10s timer resets on damage ticks and combat activity (dodge/miss). On timeout, sends non-aggressive room refresh. Clears stale enemy/player lists (but not `_currentTarget`) so empty rooms correctly read as 0 enemies. Resumes walking if clear, restarts heartbeat if enemies present.
+- Disconnect/reconnect: preserves step list and position, resumes in-place after reconnect (with bounds check for edge case)
+- `TryResolveNearbyStep()`: 3-pass position resolver (nearby keys, full list, name-based proximity) before recalculation
+- Duplicate send prevention: `_lastSentStepIndex` + 500ms guard prevents rapid combat cycling from double-sending
+- Recursion guard: prevents infinite loops when position resolution doesn't make progress
+- Combat retry counter: resets only on combat start (not every state change) to prevent infinite retry loops
+- Configurable `MaxSearchAttempts` from profile settings
+- Per-session debug logging via `DebugLogWriter`
 
-// ListView/DataGridView
-var listView = new ListView
-{
-    BackColor = Color.FromArgb(50, 50, 50),
-    ForeColor = Color.White,
-    GridLines = true,
-    FullRowSelect = true
-};
-```
+**LoopManager.cs** — Loop execution:
+- Room-key waypoint sequences for experience grinding
+- Continuous cycling with lap counter
+- Integrates with AutoWalkManager for path execution between waypoints
+- Disconnect/reconnect: preserves loop definition, lap count, gets first resume priority
+- Per-session debug logging
 
-### Menu Styling (Dark Theme)
+### Navigation Settings (SettingsDialog → Navigation Tab)
 
-Menu styling is now handled by dedicated classes:
-
-```csharp
-// Apply dark theme to menu (in MainForm)
-menuStrip.Renderer = new DarkMenuRenderer();
-```
-
-Implementation is in `DarkMenuRenderer.cs` and `DarkColorTable.cs`.
-
-### Status Label Colors
-
-| State | Color | Example |
-|-------|-------|---------|
-| Connected | `LimeGreen` | "Connected" |
-| Disconnected | `White` | "Disconnected" |
-| Connecting | `Yellow` | "Connecting..." |
-| Error | `Red` | "Connection Failed" |
-| In Combat | `Red` | Combat state |
-| Idle | `LimeGreen` | Not in combat |
+- **Door Handling:** Bash only / Picklock only / Both (bash first, then pick)
+- **Max Search Attempts:** Configurable retry limit for searchable hidden exits (default: 5)
+- Settings persisted per character profile
 
 ---
 
 ## Core Components
 
-### MainForm (Partial Class)
-
-The main application form is now split across three files for better organization:
-
-**MainForm.cs** (~600 lines) - Core orchestration:
-- Connection management
-- Timer initialization
-- Core event routing
-- Form initialization
-
-**MainForm.MenuHandlers.cs** (~400 lines) - Event handlers:
-- All menu item click handlers
-- All button click handlers
-- Import/Export handlers
-- Settings dialogs
-
-**MainForm.DisplayUpdates.cs** (~300 lines) - UI updates:
-- `RefreshBuffDisplay()`
-- `RefreshPartyDisplay()`
-- `UpdateToggleButtonStates()`
-- `UpdateTickDisplay()`
-- Other UI refresh methods
-
-### TelnetConnection.cs
-
-Handles all network communication:
-
-```csharp
-public class TelnetConnection
-{
-    // Events
-    public event Action<string>? OnDataReceived;      // Text received from server
-    public event Action<bool>? OnStatusChanged;       // Connection state changed
-    public event Action<string>? OnLogMessage;        // Log message for UI
-    
-    // Methods
-    public async Task<bool> ConnectAsync(string address, int port, BbsSettings settings);
-    public void Disconnect();
-    public async Task SendCommandAsync(string command);
-    public async Task SendDataAsync(byte[] data);
-}
-```
-
-**Features:**
-- Full telnet IAC negotiation (WILL/WONT/DO/DONT)
-- NAWS (window size) support
-- Terminal type negotiation (ANSI)
-- Automatic reconnection with configurable retry logic
-- CP437 encoding support
-
 ### MessageRouter.cs
-
-Routes and processes messages from the MUD server:
 
 ```csharp
 public class MessageRouter
@@ -452,6 +347,8 @@ public class MessageRouter
 - Combat tick detection via damage clustering
 - Death detection
 - Login phase tracking
+- Partial line buffering for TCP reassembly
+- `OnBufferCleared` event coordination with RoomTracker
 
 ### Terminal Components
 
@@ -473,32 +370,9 @@ public class MessageRouter
 - SGR (Select Graphic Rendition)
 - Scroll regions
 
-**TerminalCell.cs** - Simple struct:
-```csharp
-public readonly struct TerminalCell
-{
-    public readonly char Ch;
-    public readonly ConsoleColor Fg;
-    public readonly ConsoleColor Bg;
-}
-```
-
 ### LogRenderer.cs
 
 Handles all log rendering with ANSI color support:
-
-```csharp
-public class LogRenderer
-{
-    public void LogMessage(string message, MessageType type, 
-        RichTextBox textBox, CheckBox autoScroll, bool showTimestamp);
-        
-    public void LogMessageWithAnsi(string message, MessageType type,
-        RichTextBox textBox, CheckBox autoScroll, bool showTimestamp);
-}
-```
-
-**Features:**
 - ANSI color code parsing for logs
 - Automatic log trimming (500KB → 300KB)
 - Timestamp support
@@ -507,287 +381,46 @@ public class LogRenderer
 
 ### BuffManager.cs
 
-Central management hub (**currently being decomposed** — see Refactoring Plan):
-- Buff configurations CRUD, import/export
-- Active buff tracking (activate, expire, clear)
-- Auto-recast system with heal/cure/buff cast priority
-- Cast failure detection (blocked until next tick)
-- Still owns: constructor wiring, message dispatching, profile save/load (moving out in next phases)
-
-### PlayerStateManager.cs
-
-Player state tracking (extracted from BuffManager):
-- HP, Mana, MaxHP, MaxMana, ManaType
-- Resting, InCombat, InTrainingScreen, IsInLoginPhase states
-- PlayerInfo (name, race, class, level)
-- ExperienceTracker (exp/hour, time-to-level)
-- Stat and exp command parsing
-- Training screen detection
-
-### PartyManager.cs
-
-Party management (extracted from BuffManager):
-- Party member tracking from `par` output
-- Join/leave/disband detection
-- Auto `par` command on interval or after combat tick
-- Health request polling via telepath
-- Auto-invite players from room
+Central management hub (being decomposed):
+- Buff configurations and tracking
+- Party management
+- Player info tracking
+- Settings persistence
+- Character profiles
 
 ### CombatManager.cs
 
 Combat automation:
-- Enemy detection from "Also here:" lines
+- Enemy detection from "Also here:" lines (with direct RoomTracker forwarding)
 - Attack automation (melee and spell)
-- Monster override support (attack/ignore/flee)
-- Target tracking, round management
-- Break command on disable, room rescan on enable
+- Monster override support
+- Target tracking
 
 ### HealingManager.cs & CureManager.cs
 
 Health management:
-- Heal spell configurations with self/party/party-wide targeting
-- HP threshold rules (combat vs resting states)
-- Ailment detection and cure automation
+- Heal spell configurations
+- HP threshold monitoring
+- Ailment detection and curing
 - Party healing rules
-- Toggle state is runtime-only (defaults ON, not persisted)
-
-### RemoteCommandManager.cs
-
-Telepath-based remote control:
-- Permission-based command system via player database
-- Toggle automation (combat, heal, cure, buff) remotely
-- Query health, exp, location
-- Execute arbitrary commands, request party invite
-- Hangup/relog commands
-
-### AppSettings.cs
-
-App-level settings persistence (extracted from BuffManager):
-- `AutoLoadLastCharacter`, `LastCharacterPath`, `DisplaySystemLog`
-- Reads/writes `settings.json` (separate from character profiles)
 
 ---
 
-## Data Models
+## UI Styling Guidelines
 
-*(This section remains largely unchanged - see original README sections)*
-
-### Key Model Classes
+### Dark Theme Color Palette
 
 ```csharp
-// BBS/Connection Settings
-public class BbsSettings
-{
-    public string Address { get; set; }
-    public int Port { get; set; } = 23;
-    public List<LogonSequence> LogonSequences { get; set; }
-    public string LogoffCommand { get; set; }
-    public string RelogCommand { get; set; }
-    public int PvpLevel { get; set; }
-    
-    // Reconnection settings
-    public bool ReconnectOnConnectionFail { get; set; } = true;
-    public bool ReconnectOnConnectionLost { get; set; } = true;
-    public int MaxConnectionAttempts { get; set; } = 0;  // 0 = unlimited
-    public int ConnectionRetryPauseSeconds { get; set; } = 5;
-}
-
-// Buff Configuration
-public class BuffConfiguration
-{
-    public string DisplayName { get; set; }
-    public string Command { get; set; }
-    public int DurationSeconds { get; set; }
-    public int ManaCost { get; set; }
-    public string Category { get; set; }
-    public string TargetType { get; set; }
-    public bool AutoRecast { get; set; }
-    // ... additional properties
-}
-
-// Combat Settings
-public class CombatSettings
-{
-    public string AttackCommand { get; set; }
-    public string AttackSpell { get; set; }
-    public string MultiAttackSpell { get; set; }
-    public string PreAttackSpell { get; set; }
-    public int MaxMonsters { get; set; }
-    // ... additional properties
-}
+Background:      Color.FromArgb(45, 45, 45)      // Main background
+Panel/GroupBox:  Color.FromArgb(50, 50, 50)      // Panels
+Input Fields:    Color.FromArgb(60, 60, 60)      // Text boxes
+Buttons:         Color.FromArgb(60, 60, 60)      // Standard buttons
+Active/Selected: Color.FromArgb(70, 100, 130)    // Selected items
+Text:            Color.White                       // Primary text
+Secondary Text:  Color.LightGray                   // Labels, descriptions
 ```
 
----
-
-## Combat System
-
-*(Combat system documentation unchanged from previous version)*
-
-### Combat Ticks
-
-Combat ticks occur approximately every 10 seconds (configurable via `TICK_INTERVAL_MS` constant).
-
-- **Detection:** `*Combat Engaged*` message or damage clustering
-- **Timer:** Countdown displayed with progress bar
-- **Color Coding:** Green (>2s), Orange (1-2s), Red (<1s)
-
----
-
-## Message Parsing
-
-### Key Detection Patterns
-
-**Combat Tick:**
-```csharp
-if (line == "*Combat Engaged*") { /* tick detected */ }
-```
-
-**HP/Mana Bar (processed in MessageRouter):**
-```csharp
-var match = Regex.Match(line, @"\[HP=(\d+)/(\d+)\s+(?:MA|KA)=(\d+)/(\d+)\]");
-```
-
-**Room Contents (processed in CombatManager):**
-```csharp
-var match = Regex.Match(line, @"Also here:\s*(.+?)\.", RegexOptions.Singleline);
-```
-
-### ANSI Color Rendering
-
-- **Terminal Display:** Handled by `AnsiVtParser` → `ScreenBuffer` → `TerminalControl`
-- **Log Display:** Handled by `LogRenderer.LogMessageWithAnsi()`
-
-Both support full ANSI color codes (30-37, 90-97) with bold/bright variants.
-
----
-
-## Game Data System
-
-*(Game data system unchanged from previous version)*
-
-### Data Files (JSON)
-
-Located in user-specified folder:
-- `Races.json`, `Classes.json`, `Items.json`
-- `Spells.json`, `Monsters.json`, `Rooms.json`
-- `Shops.json`, `Lairs.json`, `TextBlocks.json`
-
-### GameDataCache (Singleton)
-
-```csharp
-var items = GameDataCache.Instance.GetTable("Items");
-```
-
----
-
-## Configuration & Persistence
-
-### File Locations
-
-```
-%AppData%\MudProxyViewer\
-├── settings.json              # Global application settings
-├── buffs.json                 # Buff configurations
-├── healing.json               # Heal spells and rules
-├── cures.json                 # Ailments and cure spells
-├── monster_settings.json      # Path to monster CSV
-└── Characters\                # Character profiles
-    ├── CharacterName.json
-    └── AnotherChar.json
-```
-
----
-
-## Character Profiles
-
-Character profiles contain ALL character-specific settings in a single JSON file.
-
-**Structure:**
-```json
-{
-    "ProfileVersion": "1.0",
-    "CharacterName": "Azii Ragequit",
-    "CharacterClass": "Priest",
-    "CharacterLevel": 25,
-    "BbsSettings": { ... },
-    "CombatSettings": { ... },
-    "Buffs": [ ... ],
-    "HealSpells": [ ... ],
-    "SelfHealRules": [ ... ],
-    "PartyHealRules": [ ... ],
-    "PartyWideHealRules": [ ... ],
-    "Ailments": [ ... ],
-    "CureSpells": [ ... ],
-    "MonsterOverrides": [ ... ],
-    "Players": [ ... ]
-}
-```
-
----
-
-## UI Components
-
-### Main Window Layout
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│ File  Options  Game Data  Help                                      │
-├─────────────────────────────────────────────────────────────────────┤
-│ [Connect] server:23    │ [Pause] [Combat] [Heal] [Buff] [Cure]      │
-├────────────────────────┴────────────────────────────────────────────┤
-│                                │                                     │
-│  📺 VT100 Terminal             │  ⚔️ Combat Panel                   │
-│  (TerminalControl)             │  ┌─────────────────────┐           │
-│                                │  │ State: Idle         │           │
-│                                │  │ Next Tick: 8.5s     │           │
-│                                │  │ [████████░░] 85%    │           │
-│                                │  ├─────────────────────┤           │
-│                                │  │ Self Status         │           │
-│                                │  │ HP: ████████░░ 80%  │           │
-│ ───────────────────────────── │  │ MA: ██████░░░░ 60%  │           │
-│ [Command handled by terminal] │  ├─────────────────────┤           │
-├───────────────────────────────┤  │ Party               │           │
-│  📋 System Log                 │  │ Member1 [████] 100% │           │
-│  (RichTextBox + LogRenderer)  │  │ Member2 [██░░]  50% │           │
-│                                │  └─────────────────────┘           │
-├─────────────────────────────────────────────────────────────────────┤
-│ Status: Connected                                    [AutoScroll ✓] │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### Menu Structure
-
-```
-File
-├── Load Character...
-├── Save Character
-├── Save Character As...
-├── ─────────────────
-├── Save Log...
-├── Clear Log
-├── ─────────────────
-└── Exit
-
-Options
-├── Settings...
-├── ─────────────────
-├── Export ▶ (Buffs, Heals, Cures)
-└── Import ▶ (Buffs, Heals, Cures)
-
-Game Data
-├── Races...
-├── Classes...
-├── Items...
-├── Spells...
-├── Monsters...
-├── Rooms...
-├── Shops...
-├── Lairs...
-└── TextBlocks...
-
-Help
-└── About
-```
+All UI uses `FlatStyle.Flat` for buttons and consistent dark theme throughout.
 
 ---
 
@@ -795,21 +428,19 @@ Help
 
 ### Partial Class Pattern
 
-MainForm uses the partial class pattern for organization:
-
 ```csharp
 // MainForm.cs - Core logic
 public partial class MainForm : Form
 {
-    // Fields, initialization, core methods
+    private TelnetConnection _telnetConnection;
+    // ... core initialization and orchestration
 }
 
 // MainForm.MenuHandlers.cs - Event handlers
 public partial class MainForm
 {
-    private void LoadCharacter_Click(object? sender, EventArgs e) { }
+    private void ConnectMenuItem_Click(object? sender, EventArgs e) { }
     private void SaveCharacter_Click(object? sender, EventArgs e) { }
-    // ... all menu/button handlers
 }
 
 // MainForm.DisplayUpdates.cs - UI updates
@@ -817,39 +448,8 @@ public partial class MainForm
 {
     private void RefreshBuffDisplay() { }
     private void RefreshPartyDisplay() { }
-    // ... all display update methods
 }
 ```
-
-### Extracted Component Pattern
-
-All major subsystems are extracted into focused classes:
-
-```csharp
-// Network layer
-var telnet = new TelnetConnection();
-telnet.OnDataReceived += HandleData;
-
-// Message processing
-var router = new MessageRouter(buffManager);
-router.OnCombatStateChanged += HandleCombatState;
-
-// Terminal display
-var terminal = new TerminalControl();
-terminal.SetScreenBuffer(screenBuffer);
-
-// Log rendering
-var logRenderer = new LogRenderer();
-logRenderer.LogMessage(msg, type, textBox, autoScroll, showTimestamp);
-```
-
-### GameData Folder Structure
-
-*(Unchanged from previous version)*
-
-Each data type has its own file with:
-- `*ViewerConfig` - Static configuration
-- `*DetailDialog` - Detail view form
 
 ---
 
@@ -865,22 +465,6 @@ Each data type has its own file with:
 - Consistent dark theme throughout
 - Zero build warnings policy
 
-### Event Patterns
-
-```csharp
-// Network events
-_telnetConnection.OnDataReceived += HandleData;
-_telnetConnection.OnStatusChanged += HandleStatus;
-
-// Message routing events
-_messageRouter.OnCombatStateChanged += HandleCombat;
-_messageRouter.OnPlayerStatsUpdated += UpdateStats;
-
-// Manager events
-OnLogMessage?.Invoke("📝 Message here");
-OnSendCommand?.Invoke("cast spell");
-```
-
 ### Nullable Reference Types
 
 All fields must be initialized or marked with `= null!;`:
@@ -892,34 +476,24 @@ private TelnetConnection _telnetConnection = null!;  // Initialized in construct
 
 ### Adding New Features
 
-1. **New Manager:** Create class with delegate injection, wire into BuffManager constructor
+1. **New Manager:** Create class, inject into BuffManager, wire events
 2. **New UI Component:** Extract to separate UserControl or Form
 3. **New Network Feature:** Add to TelnetConnection.cs
 4. **New Message Processing:** Add to MessageRouter.cs
 5. **New Display Logic:** Add to MainForm.DisplayUpdates.cs
-6. **New Player State:** Add to PlayerStateManager.cs
-7. **New Party Feature:** Add to PartyManager.cs
-8. **New Menu/Button:** Add to MainForm.MenuHandlers.cs **New Menu Handler:** Add to MainForm.MenuHandlers.cs
+6. **New Menu Handler:** Add to MainForm.MenuHandlers.cs
 
 ---
 
 ## Known Patterns & Solutions
 
-### Read-Only Checkboxes
+### Buffer Clearing for State Machine Coordination
 
 ```csharp
-var cb = new CheckBox { /* ... */ };
-cb.Click += (s, e) => { if (s is CheckBox chk) chk.Checked = !chk.Checked; };
-```
-
-### Numeric-Only TextBox
-
-```csharp
-textBox.KeyPress += (s, e) =>
-{
-    if (!char.IsControl(e.KeyChar) && !char.IsDigit(e.KeyChar))
-        e.Handled = true;
-};
+// When search/door state machines need clean room detection:
+_roomTracker.ClearLineBuffer();  // Clears room detection buffer
+// OnBufferCleared event fires → MessageRouter clears _partialLine
+// Prevents HP prompt fragments from contaminating next room detection
 ```
 
 ### Multi-Chunk Line Buffering
@@ -940,7 +514,6 @@ private void SomeMethod(string data)
         BeginInvoke(() => SomeMethod(data));
         return;
     }
-    
     // Update UI here
 }
 ```
@@ -949,187 +522,90 @@ private void SomeMethod(string data)
 
 ## Refactoring History
 
-### Version 2.1.0 - BuffManager Decomposition (February 2026)
+### Version 2.9.3 — Combat Heartbeat Safety Net + Loop Editor UI (February 2026)
 
-**Objective:** Decompose BuffManager.cs from 2,237-line monolithic hub into focused single-responsibility classes.
+- **Combat Heartbeat:** 10-second damage heartbeat timer in `WaitingForCombat`. Resets on damage ticks (`OnCombatTickDetected`) and combat activity messages (dodge/miss patterns via `OnCombatActivityDetected`). On timeout, sends non-aggressive room refresh to check if combat has ended. Resumes walking if room is clear, restarts heartbeat if enemies present.
+- **Combat activity detection:** `CombatManager` now detects dodge/miss patterns (`but you dodge!`, `but he dodges!`, `but she dodges!`, `at you`, `at {playerName}`) and fires `OnCombatActivityDetected` event. Covers ~99% of non-damaging combat messages as supplemental heartbeat signals.
+- **Empty room fix:** `ClearAlsoHereDedup()` expanded to also clear `_currentRoomEnemies` and `_playersInRoom`. When server responds without "Also here:" (empty room), stale enemy lists no longer cause infinite heartbeat loops. Preserves `_currentTarget` to prevent harmful re-attack commands that change combat attack order.
+- **Loop Editor — center on parent:** `FormStartPosition.Manual` with `OnLoad` override that centers on `Owner.Bounds`, clamped to screen working area. Fixes wrong-monitor placement for modeless dialogs.
+- **Loop Editor — collapse on run:** When loop starts, dialog collapses to show only loop name, status panel, and control buttons. Steps list, add-room controls, validation label, and notes are hidden. Form locks to collapsed size. Expands back on stop or failure.
 
-#### Phase 1: Extract PartyManager ✅
-- **Created:** `PartyManager.cs` (~400 lines)
-- **Removed from BuffManager:** ~350 lines (party tracking, par automation, health requests, regex patterns)
-- **Result:** BuffManager reduced to ~1,890 lines
+### Version 2.9.2 — Combat Verification Safety Net (February 2026)
 
-#### Phase 2: Extract PlayerStateManager ✅
-- **Created:** `PlayerStateManager.cs` (~300 lines)
-- **Removed from BuffManager:** ~250 lines (HP/mana, stats, exp, training screen, resting state)
-- **Result:** BuffManager reduced to ~1,640 lines
+- **`OnCombatStateChanged(true)` fix:** After `StopTimers()`, restarts the combat verification timer. Previously, the timer was killed and never restarted, leaving the walker stuck forever if `*Combat Off*` was never detected (1,219 laps soak test failure — walker stuck ~2 minutes until manually stopped).
+- **`OnCombatVerificationRecheck` fix:** When enemies are confirmed present after a room refresh, restarts the verification timer to schedule another check. Previously returned with no timer, creating the same permanent-stuck condition.
 
-#### Phase 3a: Extract AppSettings ✅
-- **Created:** `AppSettings.cs` (~75 lines)
-- **Removed from BuffManager:** ~69 lines (app-level settings persistence)
-- **Result:** BuffManager reduced to ~1,570 lines
+### Version 2.9.1 — Hidden Exit Contamination Fix (February 2026)
 
-#### Phase 3b: Pass-Through Property Cleanup ✅
-- **Removed from BuffManager:** 15+ pass-through properties
-- **Updated:** 7 caller files to access sub-managers directly
-- **Result:** BuffManager reduced to ~1,147 lines
+- **`GetDirectionalExitKeys()` expanded:** Now excludes `Hidden` and `SearchableHidden` exit types in addition to `Text`. All three never appear in "Obvious exits:", so including them caused `SetEquals` to always fail for rooms with non-visible exits, breaking Guard 1/2/3 suppression and causing phantom room displays to corrupt the tracker's position in same-name areas (Darkwood Forest at 188 laps).
+- **Strategy 1.5 fix:** Neighbor check now uses `GetDirectionalExitKeys()` instead of raw `room.Exits` for exit comparison, preventing false negatives for rooms with hidden exits.
+- **Strategy 4 fix:** Exit matching now uses `GetDirectionalExitKeys()` instead of raw `room.Exits` for candidate scoring, improving disambiguation accuracy in areas with hidden exits.
 
-#### Additional Fixes in v2.1.0
-- Automation toggles (Combat/Heal/Buff/Cure) default ON, no longer persisted
-- SettingsDialog no longer auto-saves on every change
-- Backscroll history viewer (`BackscrollDialog.cs`) with ANSI color and search
-- ScreenBuffer scrollback capture (500 line buffer)
-- Combat toggle sends `break` on disable, rescans room on enable
-- Race/class regex fix for hyphenated names (e.g., "Dark-Elf")
-- HealthRequestIntervalSeconds minimum lowered from 30 to 15
-- Removed `CombatAutoEnabled` from character profile persistence
+### Version 2.9.0 — Same-Name Room Guards + Command Queue (February 2026)
 
-#### Remaining (Phases 4-6 — Complete in v2.2.0)
-- **Phase 4:** ✅ Moved message dispatching from BuffManager to MessageRouter
-- **Phase 5:** ✅ Moved profile save/load/new to ProfileManager
-- **Phase 6:** ✅ Created GameManager as central coordinator, BuffManager became buff-only
+- **Guard 1/2 exit comparison:** Both guards now compare directional exits (via `GetDirectionalExitKeys()`) before suppressing same-name room displays, fixing false suppression for rooms sharing names but having different exits
+- **Guard 3 (new):** Late follow redisplay suppression — catches party-follow room displays arriving beyond 750ms by comparing movement prediction name to display name
+- **Strategy 1.5 neighbor check:** Login desync recovery — when save file restores wrong room, checks neighbors for name + exit match instead of falling through to wrong strategy
+- **Text exit contamination fix:** `GetDirectionalExitKeys()` excludes `RoomExitType.Text` from all exit comparisons — text exits never appear in "Obvious exits:" display, so including them caused `SetEquals` to always return false
+- **Command queue:** FIFO `Queue<PendingMove>` replaces single-slot `_pendingMoveCommand`/`_pendingMoveFromKey` — handles rapid manual navigation without losing commands; uses `_currentRoom.Key` at consumption time; 10s staleness pruning; 15-command cap
+- **Duplicate send prevention:** `_lastSentStepIndex` + 500ms guard prevents rapid combat cycling from sending same walk step twice
+- **Recursion guard:** Prevents infinite recursion in `SendNextStep()` when position resolution doesn't make progress
+- **Reconnect bounds check:** Prevents index-out-of-range crash when step index is past end of step list after disconnect
+- **Combat-pause log fix:** Moved "Auto-walk paused" log message before state change so it actually fires
+- **Combat retry reset fix:** `_combatResumeRetries` only resets on combat start, not on every state change — prevents infinite retry loops in areas with rapid combat cycling
 
-### Version 2.5.0 - Auto-Pathing System (February 2026)
+### Version 2.8.0 — Disconnect/Reconnect Resume + Combat Verification Fix (February 2026)
 
-**Objective:** Build automatic room-to-room navigation through a 56,375-room game world.
+- **Disconnect/reconnect resume:** Walks and loops survive server disconnections — state preserved, 5s startup delay, automatic resume
+- **Combat verification timer:** 5-second timer in `WaitingForCombat` clears stale enemies, sends room refresh, resumes if clear — eliminates stuck-in-combat bug (912+ laps clean)
+- **TryResolveNearbyStep:** 3-pass position resolver (nearby keys ±3, full step list, name-based proximity) corrects off-by-one drift from disconnect without full path recalculation
+- **RoomTracker.OnDisconnected():** Clears stale pending move commands that caused false room advancement in duplicate-name areas
+- **GameManager disconnect chain:** `OnDisconnected()` calls managers in order (RoomTracker first), `OnLoginComplete()` waits 5s then resumes loop or walk
+- **WalkToDialog non-modal:** Changed from `ShowDialog()` to `Show()` so main window remains interactive during walks
 
-#### Auto-Pathing Phase 1: Room Graph Engine ✅
-- **Created:** `RoomGraphManager.cs` — BFS pathfinding over 131,538 traversable exits in ~2ms
+### Version 2.7.0 — Phase 5c Searchable Hidden Exits + Bug Fixes (February 2026)
 
-#### Auto-Pathing Phase 2: Room Detection ✅
-- **Created:** `RoomTracker.cs` — state machine parser with 6 disambiguation strategies
+- **Phase 5c complete:** Searchable hidden exits with `search` command, success/failure parsing, configurable retry attempts
+- **SearchableHidden enum value** added to `RoomExitType` in Models.cs
+- **Search state machine** in AutoWalkManager — sends search, waits for response, retries on failure, moves on success
+- **Buffer pollution fix:** `RoomTracker.ClearLineBuffer()` and `MessageRouter._partialLine` clearing via `OnBufferCleared` event
+- **HP prompt concatenation fix:** Search responses glued to HP prompts now handled correctly
+- **Walker race condition improvement:** RoomTracker→CombatManager direct "Also here:" forwarding before `OnRoomChanged` fires
 
-#### Auto-Pathing Phase 3: Walk Execution ✅
-- **Created:** `AutoWalkManager.cs` — step-by-step command execution with combat pause/resume
-- **10 debugging sessions** resolved: TCP reassembly, HP prompt concatenation, buffer corruption, strategy ordering, guard logic, command echo contamination, message processing order
+### Version 2.6.0 — Phase 5a/5b + Loop System (February 2026)
 
-#### Auto-Pathing Phase 4: User Interface ✅
-- **Created:** `WalkToDialog.cs` — destination search, path preview, live walk progress
+- **Phase 5a complete:** Text command exits and hidden/passable exits enabled in BFS pathfinding
+- **Phase 5b complete:** Door exits with bash/picklock state machine, Navigation settings tab, stat-gated door requirements display
+- **Loop System complete:** LoopManager with room-key waypoints, continuous cycling, lap counter
+- **Debug logging:** DebugLogWriter utility class, per-session logs to `Loops/` directory
+- **Text exit disambiguation fix** in RoomTracker
+- **101-lap test validated** with debug logging
 
-#### Key Technical Fixes in v2.5.0
-- MessageRouter partial line buffering for TCP packet boundary handling
-- HP prompt stripping instead of line discarding (preserves room names glued to prompts)
-- Room name validation against graph database (rejects combat/chat text)
-- History disambiguation moved ahead of exit matching for duplicate room name areas
-- Guard logic refined: Guard 1 no timing restriction, Guard 2 only when pending move exists
-- Sneaking message filter no longer clears room name buffer
+### Version 2.5.0 — Auto-Pathing Operational (February 2026)
 
-### Version 2.4.0 - AppSettings Consolidation (February 2026)
+- AutoWalkManager, WalkToDialog, RoomTracker hardened with 10 bug fixes
+- 56,375 rooms, 131,538 traversable exits, BFS pathfinding in ~2ms
+- Reliably walks multi-step routes through hostile areas
+
+### Version 2.4.0 — AppSettings Consolidation (February 2026)
 - AppSettings.cs consolidated into ProfileManager.cs
 - Combat re-attack bug fix in CombatManager
 
-### Version 2.3.0 - CastCoordinator Extraction (February 2026)
+### Version 2.3.0 — CastCoordinator Extraction (February 2026)
 - **Created:** `CastCoordinator.cs` — priority-based casting system extracted from BuffManager
 
-### Version 2.2.0 - GameManager Architecture (February 2026)
+### Version 2.2.0 — GameManager Architecture (February 2026)
 - **Created:** `GameManager.cs` — central coordinator replacing BuffManager-as-hub pattern
-- Exit meditation state machine fix (time-based window for game re-entry)
 
-### Version 2.0.0 - Major Refactoring (February 2026)
+### Version 2.0.0 — Major Refactoring (February 2026)
 
-**Objective:** Reduce MainForm.cs from 4,552 lines to manageable size for better maintainability and AI collaboration.
-
-#### Phase 1: Network Extraction
-- **Extracted:** `TelnetConnection.cs` (400 lines)
-- **Removed from MainForm:** Network connection logic, IAC handling, reconnection
-- **Result:** MainForm reduced to 4,348 lines
-
-#### Phase 2: Message Processing Extraction
-- **Extracted:** `MessageRouter.cs` (200 lines)
-- **Removed from MainForm:** Combat detection, HP parsing, tick detection
-- **Result:** MainForm reduced to 4,139 lines
-
-#### Phase 3: Terminal Classes Extraction
-- **Extracted:** 
-  - `TerminalControl.cs` (480 lines)
-  - `ScreenBuffer.cs` (340 lines)
-  - `AnsiVtParser.cs` (365 lines)
-  - `TerminalCell.cs` (17 lines)
-- **Removed from MainForm:** Entire VT100 terminal emulation (1,200 lines)
-- **Result:** MainForm reduced to 2,930 lines
-
-#### Phase 4: UI Helper Extraction
-- **Extracted:**
-  - `MessageType.cs` (10 lines)
-  - `DarkMenuRenderer.cs` (55 lines)
-  - `DarkColorTable.cs` (22 lines)
-- **Removed from MainForm:** Enums and UI theming classes (77 lines)
-- **Result:** MainForm reduced to 2,853 lines
-
-#### Phase 5: Log Rendering Extraction
-- **Extracted:** `LogRenderer.cs` (260 lines)
-- **Removed from MainForm:** ANSI log parsing, log formatting (260 lines)
-- **Result:** MainForm reduced to 2,593 lines
-
-#### Phase 6: Partial Class Organization
-- **Created:**
-  - `MainForm.MenuHandlers.cs` (400 lines)
-  - `MainForm.DisplayUpdates.cs` (300 lines)
-- **Reorganized:** Moved methods to appropriate partial class files
-- **Result:** MainForm.cs core logic reduced to ~600 lines
-- **Total project:** ~2,400 lines across organized files
-
-#### Phase 7: Warning Resolution
-- **Fixed:** All CS8618 nullable reference warnings in CombatStatusPanel.cs
-- **Result:** Zero build warnings
-
-### Final Statistics
+**Objective:** Reduce MainForm.cs from 4,552 lines to manageable size.
 
 | Metric | Before | After | Improvement |
 |--------|--------|-------|-------------|
 | MainForm.cs Lines | 4,552 | ~600 | **87% reduction** |
-| Total Project Lines | 4,552 | ~2,400 | **47% reduction** |
 | Number of Files | 1 large | 14 focused | **Better organization** |
 | Build Warnings | 9 | 0 | **100% clean** |
-| Largest File Size | 4,552 | ~600 | **AI-friendly** |
-
----
-
-## Quick Reference
-
-### Essential Calls
-
-```csharp
-// Send command via telnet
-await _telnetConnection.SendCommandAsync("command");
-
-// Log message
-_logRenderer.LogMessage("message", MessageType.System, _systemLogTextBox, 
-    _autoScrollLogsCheckBox, _showTimestampsCheckBox.Checked);
-
-// Process server message
-_messageRouter.ProcessMessage(text);
-
-// Access player state
-_buffManager.PlayerStateManager.CurrentHp
-_buffManager.PlayerStateManager.InCombat
-_buffManager.PlayerStateManager.PlayerInfo.Name
-
-// Access party
-_buffManager.PartyManager.PartyMembers
-_buffManager.PartyManager.IsInParty
-
-// Access automation toggles
-_buffManager.CombatAutoEnabled
-_buffManager.AutoRecastEnabled
-_buffManager.HealingManager.HealingEnabled
-_buffManager.CureManager.CuringEnabled
-
-// Access game data
-var table = GameDataCache.Instance.GetTable("Items");
-```
-
-### Key Components
-
-```csharp
-// Main components in MainForm
-private TelnetConnection _telnetConnection;
-private MessageRouter _messageRouter;
-private BuffManager _buffManager;
-private LogRenderer _logRenderer;
-private TerminalControl _terminalControl;
-private ScreenBuffer _screenBuffer;
-private AnsiVtParser _ansiParser;
-```
 
 ---
 
@@ -1137,41 +613,56 @@ private AnsiVtParser _ansiParser;
 
 | Version | Changes |
 |---------|---------|
-| **2.5.0** | **Auto-pathing operational** — AutoWalkManager, WalkToDialog, RoomTracker hardened with 10 bug fixes (TCP reassembly, HP prompt stripping, strategy reordering, buffer corruption fixes). Reliably walks multi-step routes through hostile areas. |
+| **2.9.3** | **Combat Heartbeat Safety Net + Loop Editor UI** — 10s damage heartbeat timer resets on combat activity (damage + dodge/miss). On timeout, non-aggressive room refresh checks if combat ended. Empty room fix: `ClearAlsoHereDedup()` clears stale enemy/player lists while preserving `_currentTarget`. Loop Editor: centers on parent monitor, collapses to minimal view during execution. |
+| **2.9.2** | **Combat verification safety net** — `OnCombatStateChanged(true)` now restarts the verification timer after `StopTimers()`. `OnCombatVerificationRecheck` restarts timer when enemies confirmed. Fixes permanent WaitingForCombat deadlock when `*Combat Off*` is never detected (1,219 lap soak test). |
+| **2.9.1** | **Hidden exit contamination fix** — `GetDirectionalExitKeys()` now excludes Hidden + SearchableHidden exits (not just Text). Strategy 1.5 and Strategy 4 use filtered exits instead of raw exits. Fixes Guard 1/2/3 suppression failure in rooms with hidden exits that caused tracker position corruption during combat pause in same-name areas. |
+| **2.9.0** | **Same-name room guards + command queue** — Guards 1/2 hardened with exit comparison, Guard 3 added for late follow redisplays, Strategy 1.5 neighbor check for login desync, text exit contamination fix, FIFO command queue for rapid navigation, comprehensive audit fixes (reconnect crash, combat log, retry reset, duplicate send, recursion guard). |
+| **2.8.0** | **Disconnect/reconnect resume + combat fix** — Walks and loops survive disconnections with 5s resume delay. Combat verification timer eliminates stuck-in-combat (912+ laps). TryResolveNearbyStep 3-pass position resolver. WalkToDialog non-modal. |
+| **2.7.0** | **Phase 5c + bug fixes** — Searchable hidden exits with retry logic, buffer pollution fix, HP prompt concatenation fix, walker race condition improvement. |
+| **2.6.0** | **Phase 5a/5b + Loop System** — Text/passable exits enabled, door bash/pick state machine, Navigation settings tab, loop waypoint system, 101-lap validation. |
+| **2.5.0** | **Auto-pathing operational** — 10 bug fixes, reliably walks through hostile areas. |
 | **2.4.0** | **AppSettings consolidated** into ProfileManager, combat re-attack bug fix |
-| **2.3.0** | **CastCoordinator extracted** — priority-based casting system separated from BuffManager |
-| **2.2.0** | **GameManager created** — central coordinator replacing BuffManager-as-hub pattern |
-| **2.1.0** | **BuffManager decomposition** — Extracted PartyManager, PlayerStateManager, AppSettings. Pass-through cleanup. Automation toggle fix. Backscroll viewer. Combat toggle improvements. |
-| **2.0.0** | **Major refactoring complete** — Extracted network, message routing, terminal, logging into separate classes. MainForm reduced 87%. Zero warnings. |
+| **2.3.0** | **CastCoordinator extracted** — priority-based casting system |
+| **2.2.0** | **GameManager created** — central coordinator |
+| **2.1.0** | **BuffManager decomposition** — Extracted sub-managers |
+| **2.0.0** | **Major refactoring complete** — MainForm reduced 87%. Zero warnings. |
 | 1.0.0 | Code reorganization, comprehensive knowledge base |
 | 0.9.0 | Direct telnet, ANSI colors, logon automation, BBS settings |
-| 0.8.1 | Character profiles, monster/player DB in profiles |
-| 0.8.0 | Combat system, healing, curing |
+| 0.8.x | Character profiles, combat system, healing, curing |
 | 0.7.x | Buff management, party tracking |
 
 ---
 
 ## Important Notes for AI Assistants
 
-1. **BuffManager is being decomposed** — Sub-managers (PlayerStateManager, PartyManager, etc.) now own their data. Access via `_buffManager.PlayerStateManager`, `_buffManager.PartyManager`, etc.
-2. **No more pass-through properties** — Don't use `_buffManager.CurrentHp`, use `_buffManager.PlayerStateManager.CurrentHp`
-3. **MainForm is a partial class** — Check MenuHandlers.cs and DisplayUpdates.cs for methods
-4. **Network logic is in TelnetConnection** — Don't add network code to MainForm
-5. **Message processing is in MessageRouter** — Don't add parsing to MainForm. MessageRouter includes partial line buffering for TCP reassembly.
-6. **Terminal rendering is in TerminalControl** — Complete VT100 emulator with scrollback
-7. **Log rendering is in LogRenderer** — ANSI color support for logs
-8. **Dark theme is mandatory** — All UI uses consistent color palette
-9. **Zero warnings policy** — All nullable references must be initialized or marked `= null!`
-10. **Automation toggles are runtime-only** — Combat, Heal, Buff, Cure all default ON on launch, never persisted
-11. **Delegate injection pattern** — All managers receive dependencies as `Func<>` delegates, not direct references
-12. **Character profiles are comprehensive** — ALL character settings in one JSON file
-13. **Auto-pathing is operational** — RoomTracker detects current room, AutoWalkManager executes paths. Only Normal exits are traversable; doors/hidden/text exits are Phase 5.
-14. **RoomTracker is complex (~1,050 lines)** — Contains 6 disambiguation strategies, HP prompt stripping, TCP reassembly handling, and extensive guard logic. Changes require careful verification to avoid regressions.
+1. **BuffManager is being decomposed** — Access sub-managers via `_buffManager.PlayerStateManager`, etc.
+2. **No more pass-through properties** — Use `_buffManager.PlayerStateManager.CurrentHp`
+3. **Code is now highly modular** — Look for logic in appropriate extracted classes
+4. **MainForm is a partial class** — Check MenuHandlers.cs and DisplayUpdates.cs for methods
+5. **Network logic is in TelnetConnection** — Don't add network code to MainForm
+6. **Message processing is in MessageRouter** — Don't add parsing to MainForm
+7. **Terminal rendering is in TerminalControl** — Complete VT100 emulator with scrollback
+8. **Log rendering is in LogRenderer** — ANSI color support for logs
+9. **Dark theme is mandatory** — All UI uses consistent color palette
+10. **Zero warnings policy** — All nullable references must be initialized or marked `= null!`
+11. **Combat ticks are critical** — Timing handled by MessageRouter
+12. **Character profiles are comprehensive** — ALL settings in one JSON file
+13. **Auto-pathing handles special exits** — Normal, Text, Door, SearchableHidden, and Hidden/Passable are all traversable. Locked doors and multi-action hidden exits remain excluded.
+14. **RoomTracker is complex (~1,200 lines)** — 7 disambiguation strategies, 3 suppression guards, command queue, HP prompt stripping, TCP reassembly. Changes require careful verification.
+15. **Buffer clearing coordination** — `ClearLineBuffer()` + `OnBufferCleared` must fire to prevent contamination between room detection cycles.
+16. **Disconnect/reconnect resume** — Walks and loops survive disconnections. RoomTracker clears command queue, GameManager chains resume with 5s delay, TryResolveNearbyStep handles drift.
+17. **Combat verification timer** — 5s timer in WaitingForCombat clears stale enemies. Runs continuously: restarted after combat engages and after each recheck that finds enemies. This ensures the walker never gets permanently stuck if `*Combat Off*` is missed.
+18. **Combat heartbeat** — 10s damage heartbeat timer resets on damage ticks and combat activity (dodge/miss messages). On timeout, `ClearAlsoHereDedup()` clears enemy/player lists (but NOT `_currentTarget`) and sends a room refresh. If room is clear, walker resumes. If enemies present, heartbeat restarts. `_currentTarget` must be preserved to prevent the "already fighting" guard from being bypassed — sending a redundant attack changes combat attack order (monster attacks first).
+19. **WalkToDialog is non-modal** — Uses `Show()` not `ShowDialog()` so main window stays interactive during walks.
+20. **Command queue** — `_pendingMoveQueue` (`Queue<PendingMove>`) replaces single-slot `_pendingMoveCommand`. Uses `_currentRoom.Key` at consumption time (not pre-computed FromKey). 10s staleness pruning, 15-command cap. Dequeues one entry per room detection.
+21. **Guard system** — Guard 1 (no-move redisplay), Guard 2 (party-follow within 750ms), Guard 3 (late follow with prediction). All use `GetDirectionalExitKeys()` to exclude text exits from comparison.
+22. **Non-visible exit filtering** — `RoomExitType.Text`, `Hidden`, and `SearchableHidden` exits never appear in "Obvious exits:" display. `GetDirectionalExitKeys()` must be used for ANY exit comparison against visible exits. Including non-visible exits causes `SetEquals` to fail, breaking guard suppression and strategy matching.
+23. **Loop Editor dialog** — `LoopDialog.cs` creates/edits/runs loops. Centers on parent form via manual positioning in `OnLoad`. Collapses to minimal view (name + status + buttons) when loop starts; expands on stop/fail. Each open creates a new instance — no state persistence between opens.
 
 ### When Adding New Features
 
 - **Network features** → Add to `TelnetConnection.cs`
-- **Message processing** → Add to `MessageRouter.cs` (not BuffManager)
+- **Message processing** → Add to `MessageRouter.cs`
 - **Player state tracking** → Add to `PlayerStateManager.cs`
 - **Party features** → Add to `PartyManager.cs`
 - **UI event handlers** → Add to `MainForm.MenuHandlers.cs`
@@ -1179,10 +670,11 @@ private AnsiVtParser _ansiParser;
 - **Core orchestration** → Add to `MainForm.cs`
 - **Game logic** → Add to appropriate Manager class
 - **Auto-pathing / walk execution** → Add to `AutoWalkManager.cs`
-- **Room detection / disambiguation** → Add to `RoomTracker.cs` (verify changes with diff — regressions are common)
+- **Loop execution** → Add to `LoopManager.cs`
+- **Room detection / disambiguation** → Add to `RoomTracker.cs` (verify with diff — regressions are common)
 - **Room graph / pathfinding** → Add to `RoomGraphManager.cs`
 - **UI components** → Create new UserControl or Form
 
 ---
 
-*This document provides comprehensive context for AI assistants working on this project. Version 2.5.0 adds a fully operational auto-pathing system. Next priority is Phase 5: special exit handling (doors, hidden exits, text commands). See AutoPathing_Plan.md for the full plan. Keep updated as features are added.*
+*This document provides comprehensive context for AI assistants working on this project. Version 2.9.3 adds a combat heartbeat safety net (10s damage heartbeat with dodge/miss detection, empty-room fix preserving `_currentTarget`) and Loop Editor UI improvements (center-on-parent, collapse-on-run). See AutoPathing_Plan.md for the full pathing plan.*
