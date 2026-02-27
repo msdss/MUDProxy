@@ -91,53 +91,53 @@ MegaMUD was the traditional client used to play MajorMUD. It is **very old and d
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                      MainForm                           │
-│  (UI Orchestration)                                    │
+│  (UI Orchestration — Partial Class Split)               │
 │                                                         │
 │  ┌──────────────────────┐  ┌──────────────────────┐   │
 │  │ MenuHandlers.cs      │  │ DisplayUpdates.cs    │   │
 │  └──────────────────────┘  └──────────────────────┘   │
 └─────────────────────────────────────────────────────────┘
-           │               │               │
-           ▼               ▼               ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│ Telnet       │  │ Message      │  │ Terminal     │
-│ Connection   │  │ Router       │  │ Control      │
-└──────────────┘  └──────────────┘  └──────────────┘
-                        │
-                        ▼
+      │            │            │            │
+      ▼            ▼            ▼            ▼
+┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
+│ Telnet   │ │ Message  │ │ Terminal │ │  Log     │
+│ Connect  │ │ Router   │ │ Control  │ │ Renderer │
+└──────────┘ └──────────┘ └──────────┘ └──────────┘
+                  │
+                  ▼
 ┌──────────────────────────────────────────────────────────┐
-│              BuffManager (Hub — being refactored)        │
-│  ┌──────────────┐  ┌──────────────┐                     │
-│  │ PlayerState  │  │ PartyManager │                     │
-│  │ Manager      │  │              │                     │
-│  └──────────────┘  └──────────────┘                     │
-│  ┌────────────┐  ┌────────────┐  ┌────────────┐        │
-│  │ Combat Mgr │  │ Healing Mgr│  │  Cure Mgr  │        │
-│  └────────────┘  └────────────┘  └────────────┘        │
-│  ┌────────────┐  ┌──────────────┐ ┌────────────┐       │
-│  │ Remote Cmd │  │ Room Tracker │ │ AppSettings│       │
-│  │ Manager    │  │ + GraphMgr  │ │            │       │
-│  └────────────┘  └──────────────┘ └────────────┘       │
-│  ┌──────────────┐  ┌──────────────┐                     │
-│  │ AutoWalk Mgr │  │ Loop Manager │                     │
-│  │ (Pathing)    │  │              │                     │
-│  └──────────────┘  └──────────────┘                     │
-│  ┌──────────────┐  ┌──────────────┐                     │
-│  │ PlayerDB Mgr │  │ MonsterDB   │                     │
-│  │              │  │ Manager     │                     │
-│  └──────────────┘  └──────────────┘                     │
+│            GameManager (Central Coordinator)             │
+│                                                          │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │ PlayerState  │  │ PartyManager │  │ ProfileMgr   │  │
+│  │ Manager      │  │              │  │              │  │
+│  └──────────────┘  └──────────────┘  └──────────────┘  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │ Combat Mgr   │  │ Healing Mgr  │  │  Cure Mgr    │  │
+│  └──────────────┘  └──────────────┘  └──────────────┘  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │ Remote Cmd   │  │ Room Tracker │  │ RoomGraph    │  │
+│  │ Manager      │  │              │  │ Manager      │  │
+│  └──────────────┘  └──────────────┘  └──────────────┘  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │ AutoWalk Mgr │  │ Loop Manager │  │ CastCoord    │  │
+│  └──────────────┘  └──────────────┘  └──────────────┘  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │ PlayerDB Mgr │  │ MonsterDB    │  │ BuffManager  │  │
+│  │              │  │ Manager      │  │              │  │
+│  └──────────────┘  └──────────────┘  └──────────────┘  │
 └──────────────────────────────────────────────────────────┘
 ```
 
 ### Component Relationships
 
 ```
-MainForm (Entry Point - Partial Class Split)
+MainForm (Entry Point — Partial Class Split)
     │
     ├── TelnetConnection (Network Layer)
     │       └── Handles IAC, NAWS, reconnection
     │
-    ├── MessageRouter (Message Processing)
+    ├── MessageRouter (Message Processing — routes via GameManager)
     │       ├── Combat state detection
     │       ├── HP/Mana parsing
     │       ├── Tick detection
@@ -150,23 +150,25 @@ MainForm (Entry Point - Partial Class Split)
     ├── LogRenderer (Log Display)
     │       └── ANSI color rendering for logs
     │
-    ├── BuffManager (Central Hub — being decomposed)
-    │       ├── PlayerStateManager (HP, mana, stats, exp, resting, training)
-    │       ├── PartyManager (party tracking, par, health requests)
-    │       ├── HealingManager (heal spells, HP threshold rules)
-    │       ├── CureManager (ailment detection, cure automation)
-    │       ├── CombatManager (enemy detection, attack automation)
-    │       ├── RemoteCommandManager (telepath-based remote control)
-    │       ├── PlayerDatabaseManager (friend/enemy tracking)
-    │       ├── MonsterDatabaseManager (monster data, overrides)
-    │       ├── RoomGraphManager + RoomTracker (room detection, mapping)
-    │       ├── AutoWalkManager (auto-pathing execution, special exit handling)
-    │       ├── LoopManager (waypoint loop execution, lap counting)
-    │       ├── DebugLogWriter (per-session walk/loop logging)
-    │       └── AppSettings (app-level persistence)
-    │
-    └── GameDataCache (Singleton)
-            └── Game JSON files (Races, Classes, Items, etc.)
+    └── GameManager (Central Coordinator — owns all managers)
+            ├── ProfileManager (character profile persistence)
+            ├── PlayerStateManager (HP, mana, stats, exp, resting, training)
+            ├── PartyManager (party tracking, par, health requests)
+            ├── HealingManager (heal spells, HP threshold rules)
+            ├── CureManager (ailment detection, cure automation)
+            ├── CombatManager (enemy detection, attack automation)
+            ├── RemoteCommandManager (telepath-based remote control)
+            ├── PlayerDatabaseManager (friend/enemy tracking)
+            ├── MonsterDatabaseManager (monster data, overrides)
+            ├── RoomGraphManager (room graph, BFS pathfinding)
+            ├── RoomTracker (room detection, 7-strategy disambiguation)
+            ├── AutoWalkManager (walk execution, special exit handling)
+            ├── LoopManager (waypoint loop execution, lap counting)
+            ├── BuffManager (buff tracking and configuration)
+            ├── CastCoordinator (priority-based casting across heals/cures/buffs)
+            │
+            └── GameDataCache (Singleton)
+                    └── Game JSON files (Races, Classes, Items, etc.)
 ```
 
 ### Event Flow
@@ -175,7 +177,7 @@ MainForm (Entry Point - Partial Class Split)
 2. **TelnetConnection → MainForm:** Decoded text via OnDataReceived event
 3. **MainForm → MessageRouter:** Process message for game state
 4. **MainForm → TerminalControl:** Display in VT100 terminal
-5. **MessageRouter → Managers:** Route to BuffManager, CombatManager, etc.
+5. **MessageRouter → Managers:** Route to CombatManager, RoomTracker, etc. via GameManager
 6. **Managers:** Update state, trigger automation
 7. **Automation → TelnetConnection:** Send commands back to server
 8. **MainForm → UI:** Update status panels, logs, indicators
@@ -211,8 +213,8 @@ MudProxyViewer/
 │   └── DebugLogWriter.cs              # Per-session walk/loop debug logging
 │
 ├── Managers
-│   ├── BuffManager.cs                 # Central hub (being decomposed)
-│   ├── GameManager.cs                 # Central coordinator
+│   ├── GameManager.cs                 # Central coordinator (owns all managers)
+│   ├── BuffManager.cs                 # Buff tracking and configuration
 │   ├── PlayerStateManager.cs          # HP, mana, stats, experience
 │   ├── PartyManager.cs                # Party tracking
 │   ├── HealingManager.cs              # Heal spell automation
@@ -225,7 +227,7 @@ MudProxyViewer/
 │
 ├── Auto-Pathing System
 │   ├── RoomGraphManager.cs            # Room graph engine, BFS pathfinding, exit classification
-│   ├── RoomTracker.cs                 # Real-time room detection, 6-strategy disambiguation
+│   ├── RoomTracker.cs                 # Real-time room detection, 7-strategy disambiguation
 │   ├── AutoWalkManager.cs             # Walk execution, door/search state machines
 │   └── LoopManager.cs                 # Waypoint loop execution, lap counting
 │
@@ -379,14 +381,21 @@ Handles all log rendering with ANSI color support:
 - Auto-scroll support
 - Color brightening for bold codes
 
+### GameManager.cs
+
+Central coordinator (owns all 15 sub-managers):
+- Instantiates and wires all managers in constructor
+- Inter-manager event wiring (e.g., RoomTracker → CombatManager, Party → CureManager)
+- Profile save/load via ProfileManager
+- Disconnect/reconnect lifecycle coordination
+- Forwards events to MainForm for UI updates
+
 ### BuffManager.cs
 
-Central management hub (being decomposed):
-- Buff configurations and tracking
-- Party management
-- Player info tracking
-- Settings persistence
-- Character profiles
+Buff tracking and configuration:
+- Buff configurations and active buff tracking
+- Buff recast logic (delegates to CastCoordinator via injected handler)
+- Receives PlayerStateManager and PartyManager via constructor injection
 
 ### CombatManager.cs
 
@@ -635,8 +644,8 @@ private void SomeMethod(string data)
 
 ## Important Notes for AI Assistants
 
-1. **BuffManager is being decomposed** — Access sub-managers via `_buffManager.PlayerStateManager`, etc.
-2. **No more pass-through properties** — Use `_buffManager.PlayerStateManager.CurrentHp`
+1. **GameManager is the central coordinator** — Owns all 15 sub-managers. Access via `_gameManager.CombatManager`, `_gameManager.RoomTracker`, etc. MainForm's `_buffManager` is a shortcut reference to `_gameManager.BuffManager`.
+2. **BuffManager is focused** — Only handles buff tracking/configuration. It does NOT own other managers.
 3. **Code is now highly modular** — Look for logic in appropriate extracted classes
 4. **MainForm is a partial class** — Check MenuHandlers.cs and DisplayUpdates.cs for methods
 5. **Network logic is in TelnetConnection** — Don't add network code to MainForm
