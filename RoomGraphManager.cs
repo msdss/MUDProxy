@@ -39,6 +39,25 @@ public class RoomGraphManager
     // Regex to extract modifier in parentheses after the MapNum/RoomNum
     private static readonly Regex ModifierRegex = new(@"\(([^)]+)\)", RegexOptions.Compiled);
 
+    // Regex to parse Action# entries: "Action#N [on the DIR exit of this room|room Map/Room]: cmd1, cmd2"
+    // Group 1: step number (optional), Group 2: target direction, Group 3: room reference, Group 4: commands
+    private static readonly Regex ActionDetailRegex = new(
+        @"^Action(?:#(\d+))?\s*\[on the (\w+) exit of (this room|room \d+/\d+)\]:\s*(.*?)$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Regex to extract N and order type from "Needs N Actions, any/specific order"
+    private static readonly Regex NeedsActionsRegex = new(
+        @"Needs\s+(\d+)\s+Actions?,\s*(any order|specific order)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Regex to detect Item requirement embedded in action commands: "(Item: NNN)"
+    private static readonly Regex ActionItemRegex = new(
+        @"\(Item:\s*(\d+)\)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Regex to extract remote room reference: "room MapNum/RoomNum"
+    private static readonly Regex RemoteRoomRegex = new(
+        @"room\s+(\d+/\d+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     public event Action<string>? OnLogMessage;
 
     public RoomGraphManager()
@@ -198,7 +217,7 @@ public class RoomGraphManager
     /// <param name="fromKey">Starting room key (e.g., "1/1")</param>
     /// <param name="toKey">Destination room key (e.g., "5/23")</param>
     /// <returns>A PathResult with the list of steps, or a failed result if no path exists.</returns>
-    public PathResult FindPath(string fromKey, string toKey)
+    public PathResult FindPath(string fromKey, string toKey, Func<RoomExit, bool>? exitFilter = null)
     {
         var result = new PathResult
         {
@@ -240,8 +259,11 @@ public class RoomGraphManager
 
             foreach (var exit in currentRoom.Exits)
             {
-                // Phase 1: Only traverse normal exits
                 if (!exit.Traversable)
+                    continue;
+
+                // Caller-provided filter (e.g., skip stat-gated doors player can't handle)
+                if (exitFilter != null && !exitFilter(exit))
                     continue;
 
                 var destKey = exit.DestinationKey;
@@ -271,6 +293,8 @@ public class RoomGraphManager
                             if (step.DoorStatRequirement > reqs.MaxDoorStatRequirement)
                                 reqs.MaxDoorStatRequirement = step.DoorStatRequirement;
                         }
+                        if (step.ExitType == RoomExitType.MultiActionHidden)
+                            reqs.HasMultiActionExits = true;
                     }
                     result.Requirements = reqs;
                     result.TotalSteps = result.Steps.Count;
@@ -309,7 +333,9 @@ public class RoomGraphManager
                 ToKey = current,
                 ToName = destRoom?.Name ?? "Unknown",
                 ExitType = exitUsed.ExitType,
-                DoorStatRequirement = exitUsed.DoorStatRequirement
+                DoorStatRequirement = exitUsed.DoorStatRequirement,
+                DoorActionBypass = exitUsed.DoorActionBypass,
+                MultiActionData = exitUsed.MultiActionData
             });
 
             current = parentKey;
@@ -335,6 +361,10 @@ public class RoomGraphManager
         int exitCount = 0;
         int skippedExits = 0;
 
+        // Collect Action# entries during Pass 1 for association in Pass 2
+        var actionEntries = new List<(string roomKey, string direction, string actionText)>();
+
+        // ── Pass 1: Parse all rooms and exits ──
         foreach (var row in roomRows)
         {
             try
@@ -363,7 +393,19 @@ public class RoomGraphManager
                 foreach (var direction in DirectionColumns)
                 {
                     var exitValue = GetString(row, direction);
-                    var exit = ParseExit(direction, exitValue);
+                    if (string.IsNullOrWhiteSpace(exitValue) || exitValue.Trim() == "0")
+                        continue;
+
+                    var trimmedValue = exitValue.Trim();
+
+                    // Collect Action# entries for Pass 2 (instead of silently skipping)
+                    if (ActionRegex.IsMatch(trimmedValue))
+                    {
+                        actionEntries.Add((key, direction, trimmedValue));
+                        continue;
+                    }
+
+                    var exit = ParseExit(direction, trimmedValue);
 
                     if (exit != null)
                     {
@@ -392,7 +434,151 @@ public class RoomGraphManager
             }
         }
 
-        OnLogMessage?.Invoke($"🗺️ Room graph loaded: {parsedCount} rooms, {exitCount} exits ({exitCount - skippedExits} traversable, {skippedExits} non-traversable)");
+        // ── Pass 2: Associate Action entries with their target exits ──
+        // Links Action#N entries to MultiActionHidden exits (Phase 5e)
+        // Links unnumbered Action entries to Door exits as action bypasses (levers/switches)
+        int actionsLinked = 0;
+        int actionsRemote = 0;
+        int actionsItemGated = 0;
+        int doorBypasses = 0;
+
+        foreach (var (roomKey, direction, actionText) in actionEntries)
+        {
+            var match = ActionDetailRegex.Match(actionText);
+            if (!match.Success)
+                continue;
+
+            int stepNumber = match.Groups[1].Success && int.TryParse(match.Groups[1].Value, out var sn) ? sn : 1;
+            string targetDirection = match.Groups[2].Value.ToUpper();
+            string roomRef = match.Groups[3].Value;
+            string commandsStr = match.Groups[4].Value.Trim();
+
+            // Determine target room key (same room or remote)
+            string targetRoomKey;
+            bool isRemote;
+            if (roomRef.Equals("this room", StringComparison.OrdinalIgnoreCase))
+            {
+                targetRoomKey = roomKey;
+                isRemote = false;
+            }
+            else
+            {
+                var remoteMatch = RemoteRoomRegex.Match(roomRef);
+                if (!remoteMatch.Success) continue;
+                targetRoomKey = remoteMatch.Groups[1].Value;
+                isRemote = true;
+            }
+
+            // Find the target room and its exit in the specified direction
+            // Match MultiActionHidden exits (Phase 5e) OR Door exits (action bypass — e.g., lever opens a stat-gated door)
+            if (!_rooms.TryGetValue(targetRoomKey, out var targetRoom))
+                continue;
+
+            var targetExit = targetRoom.Exits.FirstOrDefault(e =>
+                e.Direction.Equals(targetDirection, StringComparison.OrdinalIgnoreCase)
+                && (e.ExitType == RoomExitType.MultiActionHidden || e.ExitType == RoomExitType.Door));
+
+            if (targetExit == null)
+                continue;
+
+            // Door exits: store action commands as bypass (lever/switch alternative to bash/pick)
+            if (targetExit.ExitType == RoomExitType.Door)
+            {
+                var bypassCommands = commandsStr.Split(',')
+                    .Select(c => c.Trim())
+                    .Where(c => !string.IsNullOrEmpty(c))
+                    .ToList();
+
+                if (bypassCommands.Count > 0)
+                {
+                    targetExit.DoorActionBypass = bypassCommands;
+                    actionsLinked++;
+                    doorBypasses++;
+                }
+                continue;  // Skip MultiActionData processing below
+            }
+
+            // MultiActionHidden exits: add to action sequence (existing Phase 5e logic)
+            if (targetExit.MultiActionData == null)
+                continue;
+
+            // Check for embedded item requirement: "(Item: NNN)"
+            bool hasItemReq = false;
+            int itemId = 0;
+            var itemMatch = ActionItemRegex.Match(commandsStr);
+            if (itemMatch.Success)
+            {
+                hasItemReq = true;
+                int.TryParse(itemMatch.Groups[1].Value, out itemId);
+                commandsStr = ActionItemRegex.Replace(commandsStr, "").TrimEnd(',').Trim();
+            }
+
+            // Parse alternative commands (comma-separated)
+            var commands = commandsStr.Split(',')
+                .Select(c => c.Trim())
+                .Where(c => !string.IsNullOrEmpty(c))
+                .ToList();
+
+            if (commands.Count == 0)
+                continue;
+
+            var action = new ExitAction
+            {
+                StepNumber = stepNumber,
+                Commands = commands,
+                RequiresItem = hasItemReq,
+                RequiredItemId = itemId
+            };
+
+            targetExit.MultiActionData.Actions.Add(action);
+
+            if (isRemote)
+            {
+                targetExit.MultiActionData.HasRemoteActions = true;
+                actionsRemote++;
+            }
+            if (hasItemReq)
+            {
+                targetExit.MultiActionData.HasItemRequirements = true;
+                actionsItemGated++;
+            }
+            actionsLinked++;
+        }
+
+        // ── Pass 2b: Sort actions by step number and finalize traversability ──
+        int multiActionTraversable = 0;
+        int multiActionDeferred = 0;
+
+        foreach (var room in _rooms.Values)
+        {
+            foreach (var exit in room.Exits)
+            {
+                if (exit.ExitType != RoomExitType.MultiActionHidden || exit.MultiActionData == null)
+                    continue;
+
+                // Sort actions by step number for correct execution order
+                exit.MultiActionData.Actions.Sort((a, b) => a.StepNumber.CompareTo(b.StepNumber));
+
+                // Make the exit traversable if it can be automated
+                if (exit.MultiActionData.IsAutomatable)
+                {
+                    exit.Traversable = true;
+                    skippedExits--;  // Was counted as non-traversable in Pass 1
+                    multiActionTraversable++;
+                }
+                else
+                {
+                    multiActionDeferred++;
+                }
+            }
+        }
+
+        OnLogMessage?.Invoke(
+            $"🗺️ Room graph loaded: {parsedCount} rooms, {exitCount} exits " +
+            $"({exitCount - skippedExits} traversable, {skippedExits} non-traversable). " +
+            $"Actions: {actionsLinked} linked ({doorBypasses} door bypasses), " +
+            $"multi-action: {multiActionTraversable} traversable, " +
+            $"{multiActionDeferred} deferred ({actionsRemote} remote, {actionsItemGated} item-gated)");
     }
 
     /// <summary>
@@ -424,6 +610,7 @@ public class RoomGraphManager
         var rawModifier = "";
         var isPassableHidden = false;
         var doorStatReq = 0;
+        MultiActionExitData? multiActionData = null;
 
         var modMatch = ModifierRegex.Match(trimmed);
         if (modMatch.Success)
@@ -450,10 +637,41 @@ public class RoomGraphManager
                     exitType = RoomExitType.Hidden;
                     isPassableHidden = true;
                 }
-                // Multi-action hidden exits (e.g., "Needs 2 Actions, any order") stay non-traversable
+                // Multi-action hidden exits (e.g., "Needs 2 Actions, any order")
+                // Phase 5e: classified as MultiActionHidden; traversability set in Pass 2
                 else if (modLower.Contains("needs") && modLower.Contains("action"))
                 {
-                    exitType = RoomExitType.Hidden;
+                    exitType = RoomExitType.MultiActionHidden;
+
+                    var needsMatch = NeedsActionsRegex.Match(rawModifier);
+                    int actionCount = 1;
+                    bool specificOrder = false;
+
+                    if (needsMatch.Success)
+                    {
+                        int.TryParse(needsMatch.Groups[1].Value, out actionCount);
+                        specificOrder = needsMatch.Groups[2].Value
+                            .Contains("specific", StringComparison.OrdinalIgnoreCase);
+                    }
+
+                    // Cap absurd action counts (data anomaly: room 1/1810 has 1278)
+                    if (actionCount > 20) actionCount = 1;
+
+                    multiActionData = new MultiActionExitData
+                    {
+                        RequiredActionCount = actionCount,
+                        RequiresSpecificOrder = specificOrder
+                    };
+                }
+                // Hidden/Unknown — data anomaly, treat as simple 1-action hidden exit
+                else if (modLower.Contains("unknown"))
+                {
+                    exitType = RoomExitType.MultiActionHidden;
+                    multiActionData = new MultiActionExitData
+                    {
+                        RequiredActionCount = 1,
+                        RequiresSpecificOrder = false
+                    };
                 }
                 // Plain (Hidden) — searchable with "sea {direction}"
                 else
@@ -484,8 +702,10 @@ public class RoomGraphManager
             DestinationKey = destKey,
             ExitType = exitType,
             DoorStatRequirement = doorStatReq,
+            MultiActionData = multiActionData,
             RawValue = trimmed,
-            // Phase 5b+5c: Normal, Text, Hidden/Passable, Door, and SearchableHidden exits are traversable
+            // Phase 5b+5c+5e: Normal, Text, Hidden/Passable, Door, and SearchableHidden exits are traversable.
+            // MultiActionHidden traversability is determined in Pass 2b after action data is linked.
             Traversable = exitType == RoomExitType.Normal
                        || exitType == RoomExitType.Text
                        || exitType == RoomExitType.Door

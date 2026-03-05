@@ -17,6 +17,7 @@ public class AutoWalkManager
     // ── Door handling sub-states ──
     private enum DoorSubState { None, WaitingForBash, WaitingForPick, WaitingForOpen, WaitingForMove }
     private enum SearchSubState { None, WaitingForSearch, WaitingForMove }
+    private enum MultiActionSubState { None, WaitingForActionDelay, WaitingForMove }
 
     // ── Dependencies (injected) ──
     private readonly RoomTracker _roomTracker;
@@ -28,6 +29,9 @@ public class AutoWalkManager
     private readonly Func<bool> _usePicklock;             // NavigationSettings.UsePicklockInsteadOfBash
     private readonly Func<int> _getMaxDoorAttempts;       // NavigationSettings.MaxDoorAttempts
     private readonly Func<int> _getMaxSearchAttempts;    // NavigationSettings.MaxSearchAttempts
+    private readonly Func<int> _getMultiActionDelayMs;  // NavigationSettings.MultiActionDelayMs
+    private readonly Func<Func<RoomExit, bool>> _getExitFilter;  // BFS door stat filter
+    private readonly Func<PlayerInfo> _getPlayerInfo;             // Player stats for door bypass decisions
     private readonly Action<string> _sendCommand;
     private readonly Action<string> _logMessage;
 
@@ -54,6 +58,14 @@ public class AutoWalkManager
     private System.Timers.Timer? _combatHeartbeatTimer;
     private const int CombatHeartbeatTimeoutMs = 10_000;
     
+    // ── Timeout re-sync ──
+    // When a step times out twice, we re-sync by sending an empty command to
+    // trigger a room display, then compare the detected room against the step's
+    // FromKey/ToKey to determine our actual position before failing/retrying.
+    private bool _resyncInProgress = false;
+    private System.Timers.Timer? _resyncTimer;
+    private const int ResyncTimeoutMs = 10_000;
+
     // ── Debug logging ──
     private DebugLogWriter? _debugLog;
 
@@ -74,12 +86,20 @@ public class AutoWalkManager
     private int _doorClosedRetryCount = 0;
     private string _doorDirection = "";
     private const int MaxDoorClosedRetries = 2;
+    private System.Timers.Timer? _doorBypassDelayTimer;
 
     // ── Search handling state ──
     private bool _searchStepActive = false;
     private SearchSubState _searchSubState = SearchSubState.None;
     private int _searchRetryCount = 0;
     private string _searchDirection = "";
+
+    // ── Multi-action hidden exit handling state ──
+    private bool _multiActionStepActive = false;
+    private MultiActionSubState _multiActionSubState = MultiActionSubState.None;
+    private int _multiActionCurrentIndex = 0;
+    private List<ExitAction>? _multiActionSteps = null;
+    private System.Timers.Timer? _multiActionDelayTimer;
 
     private static readonly Dictionary<string, string> DirectionFullNames = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -109,6 +129,9 @@ public class AutoWalkManager
         Func<bool> usePicklock,
         Func<int> getMaxDoorAttempts,
         Func<int> getMaxSearchAttempts,
+        Func<int> getMultiActionDelayMs,
+        Func<Func<RoomExit, bool>> getExitFilter,
+        Func<PlayerInfo> getPlayerInfo,
         Action<string> sendCommand,
         Action<string> logMessage)
     {
@@ -121,6 +144,9 @@ public class AutoWalkManager
         _usePicklock = usePicklock;
         _getMaxDoorAttempts = getMaxDoorAttempts;
         _getMaxSearchAttempts = getMaxSearchAttempts;
+        _getMultiActionDelayMs = getMultiActionDelayMs;
+        _getExitFilter = getExitFilter;
+        _getPlayerInfo = getPlayerInfo;
         _sendCommand = sendCommand;
         _logMessage = logMessage;
 
@@ -137,6 +163,7 @@ public class AutoWalkManager
     public bool IsActive => _state == AutoWalkState.Walking || _state == AutoWalkState.WaitingForCombat || _state == AutoWalkState.Paused;
     public bool DoorStepActive => _doorStepActive;
     public bool SearchStepActive => _searchStepActive;
+    public bool MultiActionStepActive => _multiActionStepActive;
 
     #endregion
 
@@ -190,6 +217,7 @@ public class AutoWalkManager
         StopTimers();
         ResetDoorState();
         ResetSearchState();
+        ResetMultiActionState();
         var wasActive = IsActive;
         SetState(AutoWalkState.Idle);
 
@@ -253,6 +281,7 @@ public class AutoWalkManager
         StopTimers();
         ResetDoorState();
         ResetSearchState();
+        ResetMultiActionState();
         SetState(AutoWalkState.Failed);
         OnLogMessage?.Invoke("💀 Auto-walk aborted — player died");
         OnWalkFailed?.Invoke("Player died during walk.");
@@ -271,6 +300,7 @@ public class AutoWalkManager
         StopTimers();
         ResetDoorState();
         ResetSearchState();
+        ResetMultiActionState();
 
         // Preserve _steps, _currentStepIndex, _destinationKey, _destinationName.
         // On reconnect we'll find our position in the existing step list and resume.
@@ -457,6 +487,14 @@ public class AutoWalkManager
             return;
         }
 
+        // Multi-action hidden exits require action commands before movement
+        if (step.ExitType == RoomExitType.MultiActionHidden)
+        {
+            ResetMultiActionState();
+            BeginMultiActionSequence(step);
+            return;
+        }
+
         _logMessage($"🔬 WALK DEBUG: Step {_currentStepIndex + 1}/{_steps.Count} cmd='{step.Command}' toKey='{step.ToKey}' fromKey='{step.FromKey}' trackerRoom='{_roomTracker.CurrentRoomKey}'");
         _debugLog?.Write("STEP", $"{_currentStepIndex + 1}/{_steps.Count} cmd='{step.Command}' from=[{step.FromKey}] to=[{step.ToKey}] exit={step.ExitType} tracker=[{_roomTracker.CurrentRoomKey}]");
         _roomTracker.OnPlayerCommand(step.Command);
@@ -479,6 +517,15 @@ public class AutoWalkManager
     /// </summary>
     private void OnRoomChanged(RoomNode? newRoom)
     {
+        // ── Re-sync intercept ──
+        // If a timeout re-sync is in progress, route the first room detection
+        // to the re-sync handler instead of normal walk logic.
+        if (_resyncInProgress && newRoom != null)
+        {
+            OnResyncRoomDetected(newRoom);
+            return;
+        }
+
         // Track position during both Walking and WaitingForCombat states.
         // The player may physically move after combat engages (command was already sent).
         // We must still advance the step index so we don't repeat the step on resume.
@@ -493,6 +540,11 @@ public class AutoWalkManager
         if (_doorStepActive && _doorSubState != DoorSubState.WaitingForMove)
             return;
 
+        // During multi-action handling (before movement is sent), action commands
+        // may trigger room redisplays. Ignore these — we haven't moved yet.
+        if (_multiActionStepActive && _multiActionSubState != MultiActionSubState.WaitingForMove)
+            return;
+
         // Room arrival after door step — clean up door state
         if (_doorStepActive)
             ResetDoorState();
@@ -500,6 +552,10 @@ public class AutoWalkManager
         // Room arrival after search step — clean up search state
         if (_searchStepActive)
             ResetSearchState();
+
+        // Room arrival after multi-action step — clean up multi-action state
+        if (_multiActionStepActive)
+            ResetMultiActionState();
 
         StopStepTimer();
 
@@ -693,7 +749,7 @@ public class AutoWalkManager
 
         OnLogMessage?.Invoke($"⚠️ Unexpected room: [{currentRoom.Key}] {currentRoom.Name} — recalculating path (attempt {_recalcCount}/{MaxRecalculations})");
 
-        var newPath = _roomGraph.FindPath(currentRoom.Key, _destinationKey);
+        var newPath = _roomGraph.FindPath(currentRoom.Key, _destinationKey, _getExitFilter());
 
         if (!newPath.Success || newPath.Steps.Count == 0)
         {
@@ -716,6 +772,7 @@ public class AutoWalkManager
         _currentStepIndex = 0;
         ResetDoorState();
         ResetSearchState();
+        ResetMultiActionState();
 
         OnLogMessage?.Invoke($"🔄 Path recalculated: {_steps.Count} steps remaining");
         _debugLog?.Write("RECALC", $"attempt={_recalcCount}/{MaxRecalculations} from=[{currentRoom.Key}] newSteps={_steps.Count}");
@@ -785,6 +842,7 @@ public class AutoWalkManager
         _debugLog?.Write("COMBAT_RESUME", $"step={_currentStepIndex + 1}/{_steps.Count}");
         ResetDoorState();  // Combat may have interrupted a door sequence — start fresh
         ResetSearchState();  // Combat may have interrupted a search sequence — start fresh
+        ResetMultiActionState();  // Combat may have interrupted a multi-action sequence — start fresh
         SetState(AutoWalkState.Walking);
 
         // Check if the player is still where we expect them to be.
@@ -843,6 +901,15 @@ public class AutoWalkManager
                 return;
             }
 
+            if (_multiActionStepActive)
+            {
+                _logMessage($"⏱️ Multi-action step timeout — retrying action sequence");
+                _debugLog?.Write("MULTIACTION_TIMEOUT_RETRY", $"step={_currentStepIndex + 1}/{_steps.Count}");
+                ResetMultiActionState();
+                BeginMultiActionSequence(step);
+                return;
+            }
+
             // Normal step retry — re-register the pending move with RoomTracker
             // so room detection has movement context. Without this, Guard 1
             // treats the server response as a redisplay and skips it.
@@ -853,14 +920,127 @@ public class AutoWalkManager
             return;
         }
 
-        // Second timeout — give up
+        // Second timeout — attempt re-sync before failing.
+        // The room tracker may be desynced (character moved but detection failed).
+        // Clear pending moves and send an empty command to trigger a fresh room
+        // display, then compare against FromKey/ToKey to determine actual position.
         ResetDoorState();
         ResetSearchState();
+        ResetMultiActionState();
         StopTimers();
+
+        if (_currentStepIndex < _steps.Count)
+        {
+            var step = _steps[_currentStepIndex];
+            _logMessage($"⏱️ Step timed out after retry — attempting room re-sync");
+            _debugLog?.Write("RESYNC_START", $"step={_currentStepIndex + 1}/{_steps.Count} cmd='{step.Command}' fromKey='{step.FromKey}' toKey='{step.ToKey}'");
+
+            _resyncInProgress = true;
+            _roomTracker.ClearPendingMoves();
+            _sendCommand("");  // empty command triggers room redisplay
+
+            // Start a safety timer in case the room display never arrives
+            _resyncTimer?.Stop();
+            _resyncTimer?.Dispose();
+            _resyncTimer = new System.Timers.Timer(ResyncTimeoutMs);
+            _resyncTimer.AutoReset = false;
+            _resyncTimer.Elapsed += (s, e) => OnResyncTimeout();
+            _resyncTimer.Start();
+            return;
+        }
+
+        // No step to re-sync against — fail immediately
         SetState(AutoWalkState.Failed);
         _debugLog?.Write("TIMEOUT_FAIL", $"step={_currentStepIndex + 1}/{_steps.Count} cmd='{(_currentStepIndex < _steps.Count ? _steps[_currentStepIndex].Command : "?")}'");
         _logMessage("❌ Auto-walk failed — step timed out after retry");
         OnWalkFailed?.Invoke("Movement timed out. The path may be blocked.");
+    }
+
+    #endregion
+
+    #region Timeout Re-sync
+
+    /// <summary>
+    /// Called when the re-sync empty command fails to produce a room detection
+    /// within the timeout window. Falls back to the normal failure path.
+    /// </summary>
+    private void OnResyncTimeout()
+    {
+        if (!_resyncInProgress)
+            return;
+
+        _resyncInProgress = false;
+        StopResyncTimer();
+
+        _logMessage("❌ Room re-sync timed out — no room detected");
+        _debugLog?.Write("RESYNC_TIMEOUT", $"step={_currentStepIndex + 1}/{_steps.Count}");
+
+        SetState(AutoWalkState.Failed);
+        _logMessage("❌ Auto-walk failed — step timed out after retry");
+        OnWalkFailed?.Invoke("Movement timed out. The path may be blocked.");
+    }
+
+    /// <summary>
+    /// Called from OnRoomChanged when a re-sync is in progress.
+    /// Compares the detected room against the step's FromKey and ToKey
+    /// to determine actual position — mirrors the disconnect recovery logic.
+    /// </summary>
+    private void OnResyncRoomDetected(RoomNode detectedRoom)
+    {
+        _resyncInProgress = false;
+        StopResyncTimer();
+
+        var step = _steps[_currentStepIndex];
+
+        if (detectedRoom.Key == step.ToKey)
+        {
+            // The in-flight step actually completed — detection had failed earlier.
+            // Advance past it and continue walking.
+            _logMessage($"🔄 Re-sync: step completed (now in [{detectedRoom.Key}] {detectedRoom.Name}) — advancing");
+            _debugLog?.Write("RESYNC_STEP_COMPLETED", $"room=[{detectedRoom.Key}] {detectedRoom.Name} step={_currentStepIndex + 1}/{_steps.Count}");
+            _currentStepIndex++;
+            _hasRetriedCurrentStep = false;
+
+            if (_currentStepIndex >= _steps.Count)
+            {
+                WalkCompleted();
+                return;
+            }
+
+            SetState(AutoWalkState.Walking);
+            SendNextStep();
+        }
+        else if (detectedRoom.Key == step.FromKey)
+        {
+            // Still at the same room — step didn't complete. Fail normally so
+            // the caller (LoopManager/UI) can decide how to retry.
+            _logMessage($"🔄 Re-sync: still at [{detectedRoom.Key}] {detectedRoom.Name} — step did not complete");
+            _debugLog?.Write("RESYNC_SAME_POSITION", $"room=[{detectedRoom.Key}] {detectedRoom.Name} step={_currentStepIndex + 1}/{_steps.Count}");
+
+            SetState(AutoWalkState.Failed);
+            OnWalkFailed?.Invoke("Movement timed out. The path may be blocked.");
+        }
+        else
+        {
+            // Detected a room that is neither FromKey nor ToKey.
+            // Conservative assumption: set tracker to FromKey (same as disconnect logic).
+            _logMessage($"🔄 Re-sync: unexpected room [{detectedRoom.Key}] {detectedRoom.Name} — assuming still at [{step.FromKey}]");
+            _debugLog?.Write("RESYNC_ASSUMED_POSITION", $"detected=[{detectedRoom.Key}] assumed=[{step.FromKey}]");
+
+            var assumedRoom = _roomGraph.GetRoom(step.FromKey);
+            if (assumedRoom != null)
+                _roomTracker.SetCurrentRoom(assumedRoom);
+
+            SetState(AutoWalkState.Failed);
+            OnWalkFailed?.Invoke("Movement timed out. The path may be blocked.");
+        }
+    }
+
+    private void StopResyncTimer()
+    {
+        _resyncTimer?.Stop();
+        _resyncTimer?.Dispose();
+        _resyncTimer = null;
     }
 
     #endregion
@@ -1193,6 +1373,27 @@ public class AutoWalkManager
 
         _logMessage($"🔬 WALK DEBUG: Step {_currentStepIndex + 1}/{_steps.Count} cmd='{step.Command}' toKey='{step.ToKey}' fromKey='{step.FromKey}' exitType=Door direction='{_doorDirection}'");
 
+        // Check if we should use an action bypass (lever/switch) instead of bash/pick.
+        // Use bypass only when the player lacks the stats to open the door normally.
+        if (step.DoorActionBypass != null && step.DoorStatRequirement > 0)
+        {
+            var info = _getPlayerInfo();
+            bool canBashOrPick = info.Strength >= step.DoorStatRequirement
+                              || info.Picklocks >= step.DoorStatRequirement;
+
+            if (!canBashOrPick)
+            {
+                var bypassCmd = step.DoorActionBypass[0];
+                _logMessage($"🔧 Using action bypass: {bypassCmd} (door requires {step.DoorStatRequirement} str/pick)");
+                _sendCommand(bypassCmd);
+                // Timer-based: wait for multi-action delay then send movement command.
+                // Game response to lever/switch varies, so use a delay like multi-action exits.
+                _doorSubState = DoorSubState.WaitingForOpen;
+                StartDoorBypassDelayTimer();
+                return;
+            }
+        }
+
         if (_usePicklock())
         {
             _doorSubState = DoorSubState.WaitingForPick;
@@ -1250,6 +1451,33 @@ public class AutoWalkManager
         _doorRetryCount = 0;
         _doorClosedRetryCount = 0;
         _doorDirection = "";
+        StopDoorBypassDelayTimer();
+    }
+
+    /// <summary>
+    /// Start a delay timer after sending a door bypass command (lever/switch).
+    /// On elapsed, sends the movement command to walk through the opened door.
+    /// </summary>
+    private void StartDoorBypassDelayTimer()
+    {
+        StopDoorBypassDelayTimer();
+        _doorBypassDelayTimer = new System.Timers.Timer(_getMultiActionDelayMs());
+        _doorBypassDelayTimer.AutoReset = false;
+        _doorBypassDelayTimer.Elapsed += (s, e) =>
+        {
+            if (_state != AutoWalkState.Walking || !_doorStepActive)
+                return;
+            _logMessage("🔧 Bypass delay elapsed — sending movement command");
+            SendMovementAfterDoor();
+        };
+        _doorBypassDelayTimer.Start();
+    }
+
+    private void StopDoorBypassDelayTimer()
+    {
+        _doorBypassDelayTimer?.Stop();
+        _doorBypassDelayTimer?.Dispose();
+        _doorBypassDelayTimer = null;
     }
 
     #endregion
@@ -1354,6 +1582,166 @@ public class AutoWalkManager
 
     #endregion
 
+    #region Multi-Action Hidden Exit Handling
+
+    /// <summary>
+    /// Start the multi-action sequence for a hidden exit that requires action commands.
+    /// Sends action commands one at a time with configurable delays between them,
+    /// then sends the movement command to walk through the revealed exit.
+    /// </summary>
+    private void BeginMultiActionSequence(PathStep step)
+    {
+        if (step.MultiActionData == null || !step.MultiActionData.IsAutomatable)
+        {
+            _logMessage($"❌ Multi-action exit has no automatable action data");
+            _debugLog?.Write("MULTIACTION_NO_DATA", $"step={_currentStepIndex + 1}/{_steps.Count} toKey='{step.ToKey}'");
+            FailMultiActionStep("Multi-action exit data is missing or not automatable");
+            return;
+        }
+
+        _multiActionStepActive = true;
+        _multiActionCurrentIndex = 0;
+        _multiActionSteps = step.MultiActionData.Actions;
+
+        var actionCount = _multiActionSteps.Count;
+        var orderType = step.MultiActionData.RequiresSpecificOrder ? "specific order" : "any order";
+        _logMessage($"🔮 Multi-action hidden exit: {actionCount} action(s), {orderType}");
+        _debugLog?.Write("MULTIACTION_START", $"step={_currentStepIndex + 1}/{_steps.Count} cmd='{step.Command}' actions={actionCount} order='{orderType}'");
+
+        SendNextActionCommand();
+    }
+
+    /// <summary>
+    /// Send the next action command in the sequence.
+    /// Uses the first alternative command from the current action step.
+    /// After sending, either starts a delay timer (more actions to send)
+    /// or proceeds to send the movement command (all actions sent).
+    /// </summary>
+    private void SendNextActionCommand()
+    {
+        if (_multiActionSteps == null || _multiActionCurrentIndex >= _multiActionSteps.Count)
+        {
+            // All action commands sent — proceed with movement
+            SendMovementAfterMultiAction();
+            return;
+        }
+
+        var action = _multiActionSteps[_multiActionCurrentIndex];
+        var command = action.Commands[0]; // Use first alternative command
+
+        _logMessage($"🔮 Action {_multiActionCurrentIndex + 1}/{_multiActionSteps.Count}: {command}");
+        _debugLog?.Write("MULTIACTION_CMD", $"index={_multiActionCurrentIndex + 1}/{_multiActionSteps.Count} cmd='{command}'");
+
+        _multiActionSubState = MultiActionSubState.WaitingForActionDelay;
+        _sendCommand(command);
+        _multiActionCurrentIndex++;
+
+        if (_multiActionCurrentIndex < _multiActionSteps.Count)
+        {
+            // More actions to send — start delay timer before next command
+            StartMultiActionDelayTimer();
+        }
+        else
+        {
+            // Last action sent — wait for delay then send movement
+            StartMultiActionDelayTimer();
+        }
+    }
+
+    /// <summary>
+    /// All action commands have been sent and the final delay has elapsed.
+    /// Send the movement command to walk through the now-revealed exit.
+    /// Follows the same pattern as SendMovementAfterDoor/SendMovementAfterSearch.
+    /// </summary>
+    private void SendMovementAfterMultiAction()
+    {
+        if (_currentStepIndex >= _steps.Count)
+            return;
+
+        var step = _steps[_currentStepIndex];
+        _multiActionSubState = MultiActionSubState.WaitingForMove;
+        _roomTracker.ClearLineBuffer();
+        _logMessage($"🔮 Moving through revealed exit: {step.Command}");
+        _debugLog?.Write("MULTIACTION_MOVE", $"cmd='{step.Command}' toKey='{step.ToKey}'");
+        _roomTracker.OnPlayerCommand(step.Command);
+        _sendCommand(step.Command);
+        _clearRoomEnemies();
+        StartStepTimer();
+    }
+
+    /// <summary>
+    /// Start the delay timer between action commands.
+    /// Uses the configurable MultiActionDelayMs setting.
+    /// </summary>
+    private void StartMultiActionDelayTimer()
+    {
+        StopMultiActionDelayTimer();
+        var delayMs = _getMultiActionDelayMs();
+        _multiActionDelayTimer = new System.Timers.Timer(delayMs);
+        _multiActionDelayTimer.AutoReset = false;
+        _multiActionDelayTimer.Elapsed += (s, e) => OnMultiActionDelayElapsed();
+        _multiActionDelayTimer.Start();
+    }
+
+    /// <summary>
+    /// Stop the multi-action delay timer.
+    /// </summary>
+    private void StopMultiActionDelayTimer()
+    {
+        _multiActionDelayTimer?.Stop();
+        _multiActionDelayTimer?.Dispose();
+        _multiActionDelayTimer = null;
+    }
+
+    /// <summary>
+    /// Delay timer elapsed — send the next action command or the movement command.
+    /// </summary>
+    private void OnMultiActionDelayElapsed()
+    {
+        StopMultiActionDelayTimer();
+
+        if (_state != AutoWalkState.Walking || !_multiActionStepActive)
+            return;
+
+        if (_multiActionSteps != null && _multiActionCurrentIndex < _multiActionSteps.Count)
+        {
+            // More action commands to send
+            SendNextActionCommand();
+        }
+        else
+        {
+            // All action commands sent — send movement
+            SendMovementAfterMultiAction();
+        }
+    }
+
+    /// <summary>
+    /// Multi-action step failed — abort the walk.
+    /// </summary>
+    private void FailMultiActionStep(string reason)
+    {
+        ResetMultiActionState();
+        StopTimers();
+        SetState(AutoWalkState.Failed);
+        _logMessage($"❌ Auto-walk failed — {reason}");
+        _debugLog?.Write("MULTIACTION_FAIL", $"reason='{reason}'");
+        OnWalkFailed?.Invoke($"{reason}. The exit may require items or remote actions.");
+    }
+
+    /// <summary>
+    /// Reset all multi-action handling state.
+    /// </summary>
+    private void ResetMultiActionState()
+    {
+        _multiActionStepActive = false;
+        _multiActionSubState = MultiActionSubState.None;
+        _multiActionCurrentIndex = 0;
+        _multiActionSteps = null;
+        StopMultiActionDelayTimer();
+    }
+
+    #endregion
+
     #region Helpers
 
     private void SetState(AutoWalkState newState)
@@ -1372,6 +1760,10 @@ public class AutoWalkManager
         StopCombatRetryTimer();
         StopCombatVerificationTimer();
         StopCombatHeartbeatTimer();
+        StopMultiActionDelayTimer();
+        StopDoorBypassDelayTimer();
+        StopResyncTimer();
+        _resyncInProgress = false;
     }
 
     #endregion
