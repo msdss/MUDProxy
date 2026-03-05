@@ -52,6 +52,7 @@ public class SettingsDialog : Form
     private CheckBox _pickLockCheck = null!;
     private NumericUpDown _maxDoorAttemptsNum = null!;
     private NumericUpDown _maxSearchAttemptsNum = null!;
+    private NumericUpDown _multiActionDelayNum = null!;
 
     // BBS tab controls
     private TextBox _bbsAddressText = null!;
@@ -1224,49 +1225,89 @@ public class SettingsDialog : Form
         searchPanel.Controls.Add(searchHelpLabel);
         
         tab.Controls.Add(searchPanel);
-        
+
+        // ── Multi-Action Hidden Exits Panel ──
+        var multiActionPanel = new Panel
+        {
+            Location = new Point(10, 280),
+            Size = new Size(535, 100),
+            BackColor = Color.FromArgb(40, 40, 40)
+        };
+
+        int my = 8;
+        AddLabel(multiActionPanel, "── Multi-Action Hidden Exits ──", 10, my);
+        my += 28;
+
+        AddLabel(multiActionPanel, "Delay between actions (ms):", 15, my + 2);
+        _multiActionDelayNum = new NumericUpDown
+        {
+            Location = new Point(230, my),
+            Width = 80,
+            Minimum = 500,
+            Maximum = 10000,
+            Increment = 100,
+            Value = navSettings.MultiActionDelayMs,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White
+        };
+        multiActionPanel.Controls.Add(_multiActionDelayNum);
+        my += 30;
+
+        var multiActionHelpLabel = new Label
+        {
+            Text = "Some hidden exits require action commands (pull lever, say faith, etc.)\n" +
+                   "before they become traversable. This controls the delay between commands.",
+            Location = new Point(15, my),
+            Size = new Size(500, 30),
+            ForeColor = Color.FromArgb(180, 180, 180),
+            Font = new Font("Segoe UI", 8.5f)
+        };
+        multiActionPanel.Controls.Add(multiActionHelpLabel);
+
+        tab.Controls.Add(multiActionPanel);
+
         // ── Information Panel ──
         var infoPanel = new Panel
         {
-            Location = new Point(10, 280),
+            Location = new Point(10, 390),
             Size = new Size(535, 210),
             BackColor = Color.FromArgb(40, 40, 40)
         };
-        
+
         int iy = 8;
         AddLabel(infoPanel, "── Information ──", 10, iy);
         iy += 28;
-        
+
         var supportedLabel = new Label
         {
             Text = "The auto-walker automatically handles these special exits:\n\n" +
                    "  •  Text command exits (go path, enter portal, etc.)\n" +
                    "  •  Hidden passages (invisible but always traversable)\n" +
                    "  •  Doors (bashed or picked based on the setting above)\n" +
-                   "  •  Searchable hidden exits (searched based on the setting above)",
+                   "  •  Searchable hidden exits (searched based on the setting above)\n" +
+                   "  •  Multi-action hidden exits (pull lever, say password, etc.)",
             Location = new Point(15, iy),
-            Size = new Size(500, 95),
+            Size = new Size(500, 110),
             ForeColor = Color.White,
             Font = new Font("Segoe UI", 9)
         };
         infoPanel.Controls.Add(supportedLabel);
-        iy += 100;
-        
+        iy += 115;
+
         var unsupportedLabel = new Label
         {
             Text = "Not yet supported:\n\n" +
-                   "  •  Locked doors with high stat requirements\n" +
-                   "  •  Command sequence exits (pull lever, etc.)\n" +
-                   "  •  Exits requiring items, tolls, or level ranges",
+                   "  •  Key/item-required exits (requires inventory management)\n" +
+                   "  •  Exits requiring tolls, level ranges, or class/race gates",
             Location = new Point(15, iy),
-            Size = new Size(500, 80),
+            Size = new Size(500, 65),
             ForeColor = Color.FromArgb(140, 140, 140),
             Font = new Font("Segoe UI", 9)
         };
         infoPanel.Controls.Add(unsupportedLabel);
-        
+
         tab.Controls.Add(infoPanel);
-        
+
         return tab;
     }
     
@@ -1276,7 +1317,8 @@ public class SettingsDialog : Form
         {
             UsePicklockInsteadOfBash = _pickLockCheck.Checked,
             MaxDoorAttempts = (int)_maxDoorAttemptsNum.Value,
-            MaxSearchAttempts = (int)_maxSearchAttemptsNum.Value
+            MaxSearchAttempts = (int)_maxSearchAttemptsNum.Value,
+            MultiActionDelayMs = (int)_multiActionDelayNum.Value
         };
     }
     

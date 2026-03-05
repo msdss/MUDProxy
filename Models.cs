@@ -550,13 +550,22 @@ public class NavigationSettings
     /// </summary>
     public int MaxSearchAttempts { get; set; } = 10;
 
+    /// <summary>
+    /// Delay in milliseconds between action commands for multi-action hidden exits.
+    /// Server responses to action commands vary, so timer-based delays are used
+    /// instead of response pattern matching.
+    /// Default: 1500ms (1.5 seconds between each action command).
+    /// </summary>
+    public int MultiActionDelayMs { get; set; } = 1500;
+
     public NavigationSettings Clone()
     {
         return new NavigationSettings
         {
             UsePicklockInsteadOfBash = this.UsePicklockInsteadOfBash,
             MaxDoorAttempts = this.MaxDoorAttempts,
-            MaxSearchAttempts = this.MaxSearchAttempts
+            MaxSearchAttempts = this.MaxSearchAttempts,
+            MultiActionDelayMs = this.MultiActionDelayMs
         };
     }
 }
@@ -941,6 +950,19 @@ public class RoomExit
     public int DoorStatRequirement { get; set; } = 0;
 
     /// <summary>
+    /// Alternative commands to open a stat-gated door (e.g., "pull lever").
+    /// Parsed from unnumbered Action entries targeting Door exits.
+    /// When non-null, the walker uses these instead of bash/pick if the player lacks stats.
+    /// </summary>
+    public List<string>? DoorActionBypass { get; set; }
+
+    /// <summary>
+    /// Multi-action exit data. Non-null only when ExitType is MultiActionHidden.
+    /// Contains the parsed action prerequisites and their execution order.
+    /// </summary>
+    public MultiActionExitData? MultiActionData { get; set; }
+
+    /// <summary>
     /// Whether the pathfinder will use this exit.
     /// Phase 1: Only Normal exits are traversable.
     /// Future phases will expand this as exit mechanics are understood.
@@ -971,7 +993,65 @@ public enum RoomExitType
     SearchableHidden,
 
     /// <summary>Special command exit — uses a text command like "go crimson" instead of a direction.</summary>
-    Text
+    Text,
+
+    /// <summary>
+    /// Multi-action hidden exit — requires executing one or more action commands before traversal.
+    /// Action commands (e.g., "pull lever", "say faith") must be sent before the exit becomes usable.
+    /// </summary>
+    MultiActionHidden
+}
+
+/// <summary>
+/// A single action step required to unlock a multi-action hidden exit.
+/// The Commands list contains ALTERNATIVE commands — any one of them will work.
+/// For example, ["pull lever", "push lever", "move lever"] means any of those commands is valid.
+/// </summary>
+public class ExitAction
+{
+    /// <summary>1-based action number for ordering (matches Action#N in data).</summary>
+    public int StepNumber { get; set; }
+
+    /// <summary>Alternative commands for this step. Any one of these will work.</summary>
+    public List<string> Commands { get; set; } = new();
+
+    /// <summary>Whether this action requires an item (deferred — not yet supported).</summary>
+    public bool RequiresItem { get; set; }
+
+    /// <summary>Item ID required, if any. 0 = no item requirement.</summary>
+    public int RequiredItemId { get; set; }
+}
+
+/// <summary>
+/// Stores the complete action prerequisite data for a multi-action hidden exit.
+/// Attached to a RoomExit when ExitType is MultiActionHidden.
+/// </summary>
+public class MultiActionExitData
+{
+    /// <summary>Total number of actions required (from "Needs N Actions" in data).</summary>
+    public int RequiredActionCount { get; set; }
+
+    /// <summary>Whether actions must be executed in numbered order ("specific order"), or any order.</summary>
+    public bool RequiresSpecificOrder { get; set; }
+
+    /// <summary>Ordered list of action steps (sorted by StepNumber).</summary>
+    public List<ExitAction> Actions { get; set; } = new();
+
+    /// <summary>Whether any action targets a DIFFERENT room (remote actions — not yet supported).</summary>
+    public bool HasRemoteActions { get; set; }
+
+    /// <summary>Whether any action requires an item (deferred — not yet supported).</summary>
+    public bool HasItemRequirements { get; set; }
+
+    /// <summary>
+    /// Whether this exit can be automated: same-room actions only, no item requirements,
+    /// and all expected actions were parsed successfully with valid commands.
+    /// </summary>
+    public bool IsAutomatable =>
+        !HasRemoteActions
+        && !HasItemRequirements
+        && Actions.Count > 0
+        && Actions.All(a => a.Commands.Count > 0);
 }
 
 /// <summary>
@@ -1024,6 +1104,10 @@ public class PathStep
     public RoomExitType ExitType { get; set; } = RoomExitType.Normal;
     /// <summary>Picklocks/strength requirement for stat-gated doors. 0 = no requirement.</summary>
     public int DoorStatRequirement { get; set; } = 0;
+    /// <summary>Alternative commands to open a stat-gated door (e.g., "pull lever"). Null if none.</summary>
+    public List<string>? DoorActionBypass { get; set; }
+    /// <summary>Multi-action data for MultiActionHidden steps. Null for other exit types.</summary>
+    public MultiActionExitData? MultiActionData { get; set; }
     public override string ToString() => $"{Command} -> [{ToKey}] {ToName}";
 }
 
@@ -1038,6 +1122,9 @@ public class PathRequirements
 
     /// <summary>True if any step traverses a Door exit.</summary>
     public bool HasDoors { get; set; } = false;
+
+    /// <summary>True if any step traverses a MultiActionHidden exit.</summary>
+    public bool HasMultiActionExits { get; set; } = false;
 
     /// <summary>Highest level requirement across all steps. 0 = no level gates. (Future use)</summary>
     public int MaxLevel { get; set; } = 0;

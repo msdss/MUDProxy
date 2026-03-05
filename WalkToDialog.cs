@@ -66,7 +66,7 @@ public class WalkToDialog : Form
         this.Text = "Walk To...";
         this.Size = new Size(520, 620);
         this.MinimumSize = new Size(460, 560);
-        this.StartPosition = FormStartPosition.CenterParent;
+        this.StartPosition = FormStartPosition.Manual;
         this.BackColor = BgDark;
         this.ForeColor = TextWhite;
         this.FormBorderStyle = FormBorderStyle.Sizable;
@@ -376,6 +376,24 @@ public class WalkToDialog : Form
         };
     }
 
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+
+        if (Owner != null)
+        {
+            var ob = Owner.Bounds;
+            int x = ob.Left + (ob.Width - Width) / 2;
+            int y = ob.Top + (ob.Height - Height) / 2;
+
+            var work = Screen.FromControl(Owner).WorkingArea;
+            x = Math.Max(work.Left, Math.Min(x, work.Right - Width));
+            y = Math.Max(work.Top, Math.Min(y, work.Bottom - Height));
+
+            Location = new Point(x, y);
+        }
+    }
+
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         // Don't stop walk on close — let it continue in the background
@@ -386,13 +404,14 @@ public class WalkToDialog : Form
 
     #region Search
 
+    private static readonly System.Text.RegularExpressions.Regex RoomKeyRegex = new(
+        @"^(\d+)\s*/\s*(\d+)$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
     private void PerformSearch()
     {
         var query = _searchBox.Text.Trim();
         if (string.IsNullOrEmpty(query))
             return;
-
-        var results = _gameManager.RoomGraph.SearchByName(query, 200);
 
         _resultsList.Items.Clear();
         _previewPath = null;
@@ -400,6 +419,33 @@ public class WalkToDialog : Form
         _pathInfoLabel.Text = "Path: —";
         UpdateRequirementsDisplay(null);
         UpdateWalkButtonState();
+
+        // Direct room key lookup: "map/room" format (e.g., "9/62", "10/4")
+        var keyMatch = RoomKeyRegex.Match(query);
+        if (keyMatch.Success)
+        {
+            int map = int.Parse(keyMatch.Groups[1].Value);
+            int room = int.Parse(keyMatch.Groups[2].Value);
+            var directRoom = _gameManager.RoomGraph.GetRoom(map, room);
+
+            if (directRoom != null)
+            {
+                var item = new ListViewItem(new[] { directRoom.Key, directRoom.Name });
+                item.Tag = directRoom;
+                _resultsList.Items.Add(item);
+                _resultsList.Items[0].Selected = true;
+            }
+            else
+            {
+                var noResult = new ListViewItem(new[] { "", $"Room {map}/{room} not found" });
+                noResult.ForeColor = TextDim;
+                _resultsList.Items.Add(noResult);
+            }
+            return;
+        }
+
+        // Name search
+        var results = _gameManager.RoomGraph.SearchByName(query, 200);
 
         if (results.Count == 0)
         {
@@ -409,10 +455,10 @@ public class WalkToDialog : Form
             return;
         }
 
-        foreach (var room in results)
+        foreach (var rm in results)
         {
-            var item = new ListViewItem(new[] { room.Key, room.Name });
-            item.Tag = room;
+            var item = new ListViewItem(new[] { rm.Key, rm.Name });
+            item.Tag = rm;
             _resultsList.Items.Add(item);
         }
 
@@ -457,7 +503,7 @@ public class WalkToDialog : Form
         }
         else
         {
-            var path = _gameManager.RoomGraph.FindPath(currentRoom.Key, room.Key);
+            var path = _gameManager.RoomGraph.FindPath(currentRoom.Key, room.Key, _gameManager.GetDoorStatFilter());
             if (path.Success)
             {
                 _previewPath = path;

@@ -1,34 +1,29 @@
 # MUD Proxy Viewer — AI Knowledge Base
 
-> **Version:** 2.9.3
-> **Last Updated:** February 27, 2026
+> **Version:** 2.9.5
+> **Last Updated:** February 28, 2026
 > **Purpose:** Combat automation client for MajorMUD, replacing the deprecated MegaMUD client
 > **Platform:** Windows (.NET 8.0 WinForms)
-> **Status:** Active Development — **Combat Heartbeat Safety Net + Loop Editor UI**
+> **Status:** Active Development — **Room Tracker Noise Filters + Timeout Re-sync**
 
 ---
 
-## 🎉 Recent Major Update (v2.9.3)
+## 🎉 Recent Major Update (v2.9.5)
 
-**Combat Heartbeat Safety Net + Loop Editor UI improvements**
+**Room Tracker Noise Filters + Timeout Re-sync**
 
-17-hour soak test revealed the walker can get permanently stuck in `WaitingForCombat` when `*Combat Off*` is never received (TCP split/dropped). Added a damage heartbeat system: while in `WaitingForCombat`, a 10-second timer resets on every combat activity (damage ticks + dodge/miss messages). When no activity is detected for 10s, the system performs a non-aggressive room check. If the room is clear, walking resumes. If enemies are present, the heartbeat restarts.
+Two areas of improvement in this release:
 
-Also fixed an empty-room detection bug where `ClearAlsoHereDedup()` only cleared the dedup guard but left stale enemy lists intact — causing infinite heartbeat loops in empty rooms. Expanded to also clear `_currentRoomEnemies` and `_playersInRoom` while preserving `_currentTarget` (prevents harmful re-attack commands that change combat attack order).
+**1. Player Movement Message Filters** — Player departure messages (`"{Player} just left to the {direction}"` and `"You notice {Player} sneaking out to the {direction}"`) were not filtered from the room detection buffer, causing room name parsing to fail when these messages arrived mid-room-block. The existing `"You notice"` sneaking regex only matched arrivals (`"from the {direction}"`) — expanded to `(from|to) the {direction}` to catch both arrival and departure patterns. Added a new `"just left to the"` filter alongside the existing `"into the room"` filter.
 
-Loop Editor dialog improvements:
-- Dialog now centers on the main form's monitor (fixes wrong-monitor placement)
-- Collapses to minimal view during loop execution (hides steps list, add-room controls, notes — shows only loop name, status panel, and control buttons)
+**2. Timeout Re-sync (Disconnect-style Recovery)** — When a walk step times out twice, the walker now attempts a room re-sync before failing. Clears stale pending moves via new `RoomTracker.ClearPendingMoves()`, sends an empty command to trigger a room redisplay, then compares the detected room against the step's `FromKey`/`ToKey` — the same three-way check used by disconnect recovery. If the step actually completed (room == `ToKey`), advances and continues walking. If still at `FromKey` or ambiguous, fails normally so the caller can retry from the correct position. Includes a 10-second safety timeout in case the room display never arrives.
 
-### New/Modified Files (v2.9.3)
+### New/Modified Files (v2.9.5)
 
 | File | Change |
 |------|--------|
-| `CombatManager.cs` | `OnCombatActivityDetected` event, `ContainsPlayerSwing()` helper, combat activity detection for dodge/miss patterns, expanded `ClearAlsoHereDedup()` to clear stale enemy/player lists |
-| `AutoWalkManager.cs` | Heartbeat timer system: `OnCombatTick()`, `OnCombatHeartbeatTimeout()`, `OnCombatHeartbeatRecheck()`, start/stop helpers |
-| `GameManager.cs` | Wired `ClearAlsoHereDedup` delegate and `OnCombatActivityDetected` event |
-| `MainForm.cs` | Wired `OnCombatTick()` to `MessageRouter_OnCombatTickDetected` |
-| `LoopDialog.cs` | Center-on-parent positioning, collapse/expand UI during loop execution |
+| `RoomTracker.cs` | Added `ClearPendingMoves()` public method; added `"just left to the"` departure filter; expanded `"You notice"` sneaking regex to match `(from\|to) the {direction}` |
+| `AutoWalkManager.cs` | Added re-sync state (`_resyncInProgress`, `_resyncTimer`, `ResyncTimeoutMs`); `OnStepTimeout` triggers re-sync on second timeout; `OnResyncRoomDetected()` three-way FromKey/ToKey check; `OnResyncTimeout()` safety fallback; re-sync intercept in `OnRoomChanged()`; `StopTimers()` cleanup |
 
 ---
 
@@ -37,20 +32,15 @@ Loop Editor dialog improvements:
 1. [Game Overview](#game-overview)
 2. [Application Architecture](#application-architecture)
 3. [File Structure](#file-structure)
-4. [UI Styling Guidelines](#ui-styling-guidelines)
+4. [Auto-Pathing System](#auto-pathing-system)
 5. [Core Components](#core-components)
-6. [Data Models](#data-models)
-7. [Combat System](#combat-system)
-8. [Message Parsing](#message-parsing)
-9. [Game Data System](#game-data-system)
-10. [Configuration & Persistence](#configuration--persistence)
-11. [Character Profiles](#character-profiles)
-12. [UI Components](#ui-components)
-13. [Auto-Pathing System](#auto-pathing-system)
-14. [Code Organization](#code-organization)
-15. [Development Guidelines](#development-guidelines)
-16. [Known Patterns & Solutions](#known-patterns--solutions)
-17. [Refactoring History](#refactoring-history)
+6. [UI Styling Guidelines](#ui-styling-guidelines)
+7. [Code Organization](#code-organization)
+8. [Development Guidelines](#development-guidelines)
+9. [Known Patterns & Solutions](#known-patterns--solutions)
+10. [Refactoring History](#refactoring-history)
+11. [Version History](#version-history)
+12. [Important Notes for AI Assistants](#important-notes-for-ai-assistants)
 
 ---
 
@@ -150,25 +140,25 @@ MainForm (Entry Point — Partial Class Split)
     ├── LogRenderer (Log Display)
     │       └── ANSI color rendering for logs
     │
-    └── GameManager (Central Coordinator — owns all managers)
-            ├── ProfileManager (character profile persistence)
-            ├── PlayerStateManager (HP, mana, stats, exp, resting, training)
-            ├── PartyManager (party tracking, par, health requests)
-            ├── HealingManager (heal spells, HP threshold rules)
-            ├── CureManager (ailment detection, cure automation)
-            ├── CombatManager (enemy detection, attack automation)
-            ├── RemoteCommandManager (telepath-based remote control)
-            ├── PlayerDatabaseManager (friend/enemy tracking)
-            ├── MonsterDatabaseManager (monster data, overrides)
-            ├── RoomGraphManager (room graph, BFS pathfinding)
-            ├── RoomTracker (room detection, 7-strategy disambiguation)
-            ├── AutoWalkManager (walk execution, special exit handling)
-            ├── LoopManager (waypoint loop execution, lap counting)
-            ├── BuffManager (buff tracking and configuration)
-            ├── CastCoordinator (priority-based casting across heals/cures/buffs)
-            │
-            └── GameDataCache (Singleton)
-                    └── Game JSON files (Races, Classes, Items, etc.)
+    ├── GameManager (Central Coordinator — owns all managers)
+    │       ├── ProfileManager (character profile persistence)
+    │       ├── PlayerStateManager (HP, mana, stats, exp, resting, training)
+    │       ├── PartyManager (party tracking, par, health requests)
+    │       ├── HealingManager (heal spells, HP threshold rules)
+    │       ├── CureManager (ailment detection, cure automation)
+    │       ├── CombatManager (enemy detection, attack automation)
+    │       ├── RemoteCommandManager (telepath-based remote control)
+    │       ├── PlayerDatabaseManager (friend/enemy tracking)
+    │       ├── MonsterDatabaseManager (monster data, overrides)
+    │       ├── RoomGraphManager (room graph, BFS pathfinding)
+    │       ├── RoomTracker (room detection, 7-strategy disambiguation)
+    │       ├── AutoWalkManager (walk execution, special exit handling)
+    │       ├── LoopManager (waypoint loop execution, lap counting)
+    │       ├── BuffManager (buff tracking and configuration)
+    │       └── CastCoordinator (priority-based casting across heals/cures/buffs)
+    │
+    └── GameDataCache (Singleton — accessed directly via GameDataCache.Instance)
+            └── Game JSON files (Races, Classes, Items, etc.)
 ```
 
 ### Event Flow
@@ -192,9 +182,10 @@ MainForm (Entry Point — Partial Class Split)
 MudProxyViewer/
 │
 ├── Core Application (Main UI)
+│   ├── Program.cs                     # Application entry point
 │   ├── MainForm.cs                    # UI orchestration
-│   ├── MainForm.MenuHandlers.cs       # Menu/button event handlers
-│   └── MainForm.DisplayUpdates.cs     # UI refresh methods
+│   ├── MainForm_MenuHandlers.cs       # Menu/button event handlers
+│   └── MainForm_DisplayUpdates.cs     # UI refresh methods
 │
 ├── Network Layer
 │   └── TelnetConnection.cs            # Telnet protocol, IAC, reconnection
@@ -206,7 +197,8 @@ MudProxyViewer/
 │   ├── TerminalControl.cs             # VT100 terminal (UserControl)
 │   ├── ScreenBuffer.cs                # 2D character grid + scrollback
 │   ├── AnsiVtParser.cs                # ANSI escape sequence parser
-│   └── TerminalCell.cs                # Character cell struct
+│   ├── TerminalCell.cs                # Character cell struct
+│   └── BackscrollDialog.cs            # Scrollback history viewer with search
 │
 ├── Logging
 │   ├── LogRenderer.cs                 # ANSI color log rendering
@@ -216,27 +208,43 @@ MudProxyViewer/
 │   ├── GameManager.cs                 # Central coordinator (owns all managers)
 │   ├── BuffManager.cs                 # Buff tracking and configuration
 │   ├── PlayerStateManager.cs          # HP, mana, stats, experience
-│   ├── PartyManager.cs                # Party tracking
+│   ├── PartyManager.cs                # Party tracking, auto-invite
 │   ├── HealingManager.cs              # Heal spell automation
 │   ├── CureManager.cs                 # Ailment cure automation
 │   ├── CombatManager.cs               # Enemy detection, attack automation
-│   ├── CastCoordinator.cs             # Priority-based casting system
+│   ├── CastCoordinator.cs             # Priority-based casting (heals > cures > buffs)
 │   ├── RemoteCommandManager.cs        # Telepath-based remote control
-│   ├── PlayerDatabaseManager.cs       # Friend/enemy tracking
-│   └── MonsterDatabaseManager.cs      # Monster data, overrides
+│   ├── PlayerDatabaseManager.cs       # Known player tracking, permissions
+│   └── MonsterDatabaseManager.cs      # Monster data, per-character overrides
 │
 ├── Auto-Pathing System
 │   ├── RoomGraphManager.cs            # Room graph engine, BFS pathfinding, exit classification
 │   ├── RoomTracker.cs                 # Real-time room detection, 7-strategy disambiguation
 │   ├── AutoWalkManager.cs             # Walk execution, door/search state machines
-│   └── LoopManager.cs                 # Waypoint loop execution, lap counting
+│   ├── LoopManager.cs                 # Waypoint loop execution, lap counting
+│   └── LoopDefinition.cs             # Loop data model, .loop.json file I/O
 │
 ├── Dialogs
 │   ├── WalkToDialog.cs                # Walk destination search, path preview, loop UI
 │   ├── LoopDialog.cs                  # Loop editor, live stats, collapse-on-run UI
 │   ├── SettingsDialog.cs              # Character settings including Navigation tab
 │   ├── PathfindingTestDialog.cs       # Debug: manual path verification
-│   └── RoomDialogs.cs                 # Room detail viewer
+│   ├── PlayerDatabaseDialog.cs        # Known player database management UI
+│   └── MonsterDatabaseDialog.cs       # Monster override management UI
+│
+├── Configuration Dialogs
+│   ├── BuffConfigDialog.cs            # Individual buff spell configuration
+│   ├── BuffListDialog.cs              # Buff list management
+│   ├── HealingConfigDialog.cs         # Healing system configuration
+│   ├── HealSpellConfigDialog.cs       # Individual heal spell configuration
+│   ├── HealRuleConfigDialog.cs        # Heal rule (HP threshold) configuration
+│   ├── CureConfigDialog.cs            # Cure system configuration
+│   ├── CureSpellConfigDialog.cs       # Individual cure spell configuration
+│   └── AilmentConfigDialog.cs         # Ailment detection pattern configuration
+│
+├── UI Controls
+│   ├── PlayerStatusPanel.cs           # Player HP/mana bars, buff durations, status indicators
+│   └── Controls/CombatStatusPanel.cs  # Combat dashboard: tick timer, HP/mana, party list
 │
 ├── UI Helpers
 │   ├── MessageType.cs                 # Log message type enum
@@ -246,11 +254,23 @@ MudProxyViewer/
 ├── Data
 │   ├── Models.cs                      # All data models (buffs, combat, pathing, etc.)
 │   ├── GameDataCache.cs               # Singleton game data loader
-│   └── ProfileManager.cs             # Character profile persistence + AppSettings
+│   ├── ProfileManager.cs              # Character profile persistence + AppSettings
+│   ├── AbilityNames.cs                # Numeric ability ID → name lookup dictionary
+│   ├── MdbImporter.cs                 # MDB → JSON game data import engine
+│   └── MdbImportDialog.cs             # Import UI with progress bar and logging
 │
 └── Game Data Viewers
-    ├── *ViewerConfig.cs               # Grid column configurations
-    └── *DetailDialog.cs               # Detail view forms
+    ├── GameDataViewerDialog.cs        # Searchable data grid browser for game data tables
+    ├── GenericDetailDialog.cs         # Fallback detail view (key-value pairs + abilities)
+    ├── RoomDialogs.cs                 # Room detail viewer
+    ├── ItemDialogs.cs                 # Item detail viewer
+    ├── MonsterDialogs.cs              # Monster detail viewer
+    ├── SpellDialogs.cs                # Spell detail viewer
+    ├── ClassDialogs.cs                # Class detail viewer
+    ├── RaceDialogs.cs                 # Race detail viewer
+    ├── ShopDialogs.cs                 # Shop detail viewer
+    ├── LairDialogs.cs                 # Lair detail viewer
+    └── TextBlockDialogs.cs            # Text block detail viewer
 ```
 
 ---
@@ -259,7 +279,7 @@ MudProxyViewer/
 
 ### Overview
 
-The auto-pathing system navigates a player through a 56,375-room game world automatically. It handles directional movement, doors (bash/picklock), text command exits, invisible hidden passages, and searchable hidden exits.
+The auto-pathing system navigates a player through a 56,375-room game world automatically. It handles directional movement, doors (bash/picklock), text command exits, invisible hidden passages, searchable hidden exits, multi-action hidden exits, and door action bypasses (levers/switches).
 
 ### Exit Type Classification
 
@@ -268,10 +288,11 @@ The auto-pathing system navigates a player through a 56,375-room game world auto
 | **Normal** | ✅ Yes | Send direction command (`n`, `se`, etc.) | `1/298` |
 | **Text** | ✅ Yes | Send text command (`go crimson`, etc.) | `1/298 (Text: go crimson, enter crimson)` |
 | **Door** | ✅ Yes | Bash/pick then move; configurable strategy | `1/298 (Door)` |
+| **Door (stat-gated)** | ✅ Filtered | Player stats checked via `exitFilter`; action bypass if available | `1/298 (Door [1000 picklocks/strength])` + `Action [on E exit...]` |
 | **SearchableHidden** | ✅ Yes | Send `search`, parse result, retry on fail, then move | `1/298 (Hidden/Needs 1 Actions, any order)` + `Action#1` |
 | **Hidden (Passable)** | ✅ Yes | Send direction command (exit is invisible but passable) | `1/298 (Hidden/Passable)` |
-| **Locked** | ❌ No | Intentionally excluded (999+ stat requirements) | `1/298 (Door [1000 picklocks/strength])` |
-| **Hidden (Multi-Action)** | ❌ No | Complex multi-room prerequisites, deferred | `1/298 (Hidden/Needs 3 Actions, any order)` |
+| **MultiActionHidden** | ✅ If automatable | Send action commands with timer delays, then move | `1/298 (Hidden/Needs 3 Actions, any order)` + `Action#1..#3` |
+| **Locked** | ❌ No | No action bypass, 999+ stat requirements | `1/298 (Door [1000 picklocks/strength])` (no Action entry) |
 
 ### Key Components
 
@@ -280,26 +301,34 @@ The auto-pathing system navigates a player through a 56,375-room game world auto
 - BFS pathfinding in ~2ms
 - Exit type classification determines traversability
 - `FindPath()` returns `PathResult` with `PathStep` list including `ExitType` per step
+- Optional `Func<RoomExit, bool>? exitFilter` parameter for stat-gated door filtering
+- Two-pass graph building: Pass 2 associates Action entries with target exits (both `MultiActionHidden` and `Door`)
+- Door action bypass: unnumbered `Action [on DIR exit...]` entries stored as `DoorActionBypass` on Door exits
 
 **RoomTracker.cs** (~1,200 lines) — Room detection:
 - Parses MUD server output to determine current room
 - 7-strategy disambiguation (movement prediction, neighbor check, exact name, history, exit matching, tiebreaker, fallback)
 - 3-guard suppression system: Guard 1 (no-move redisplay), Guard 2 (party-follow within 750ms), Guard 3 (late follow with prediction check)
-- `GetDirectionalExitKeys()` — filters `RoomExitType.Text`, `Hidden`, and `SearchableHidden` from exit comparisons (none appear in "Obvious exits:")
+- Guards use `IsSubsetOf` (not `SetEquals`) — tolerates extra visible exits from action commands
+- `GetDirectionalExitKeys()` — filters `RoomExitType.Text`, `Hidden`, `SearchableHidden`, and `MultiActionHidden` from exit comparisons (none appear in "Obvious exits:")
 - Command queue: FIFO `Queue<PendingMove>` replaces single-slot tracking; uses `_currentRoom.Key` at consumption time; 10s staleness pruning, 15-command cap
 - HP prompt stripping, TCP reassembly handling, verbose mode support
 - `ClearLineBuffer()` for search/door state machine coordination
 - `OnBufferCleared` event to sync MessageRouter partial line clearing
 - `OnDisconnected()` clears command queue and stale state while preserving current room and history
+- `ClearPendingMoves()` clears pending move queue and buffer state without resetting current room (used by timeout re-sync)
+- Noise filtering: entity arrivals (`"into the room"`), departures (`"just left to the"`), sneaking messages (`(from|to) the {direction}`), combat actions, command echoes
 
 **AutoWalkManager.cs** — Walk execution:
 - State machine: Idle → Walking → WaitingForRoom → WaitingForCombat → Complete/Failed/Disconnected
-- Door state machine: sends bash/pick → parses response → opens → moves
+- Door state machine: sends bash/pick → parses response → opens → moves; door action bypass when player lacks stats (lever/switch/panel)
 - Search state machine: sends `search` → parses success/failure → retries → moves
+- Multi-action state machine: sends action commands with timer delays → moves
 - Combat pause/resume with RoomTracker→CombatManager direct forwarding
 - Combat verification: 5s timer clears stale enemies if combat never engages
 - Combat heartbeat: 10s timer resets on damage ticks and combat activity (dodge/miss). On timeout, sends non-aggressive room refresh. Clears stale enemy/player lists (but not `_currentTarget`) so empty rooms correctly read as 0 enemies. Resumes walking if clear, restarts heartbeat if enemies present.
 - Disconnect/reconnect: preserves step list and position, resumes in-place after reconnect (with bounds check for edge case)
+- Timeout re-sync: on second step timeout, clears pending moves, sends empty command for room redisplay, three-way `FromKey`/`ToKey` check (mirrors disconnect recovery logic) to determine actual position before failing
 - `TryResolveNearbyStep()`: 3-pass position resolver (nearby keys, full list, name-based proximity) before recalculation
 - Duplicate send prevention: `_lastSentStepIndex` + 500ms guard prevents rapid combat cycling from double-sending
 - Recursion guard: prevents infinite loops when position resolution doesn't make progress
@@ -331,15 +360,17 @@ public class MessageRouter
 {
     // Events
     public event Action<bool>? OnCombatStateChanged;
-    public event Action<int, int, int, int, string>? OnPlayerStatsUpdated;
+    public event Action<int, int, string>? OnPlayerStatsUpdated;  // currentHP, currentMana, manaType
     public event Action? OnCombatTickDetected;
     public event Action? OnPlayerDeath;
     public event Action? OnLoginComplete;
-    
+    public event Action<bool>? OnPauseStateChanged;
+
     // Methods
     public void ProcessMessage(string text);
     public void SetNextTickTime(DateTime nextTick);
     public void ResetLoginPhase();
+    public void ClearPartialLine();
 }
 ```
 
@@ -390,6 +421,28 @@ Central coordinator (owns all 15 sub-managers):
 - Disconnect/reconnect lifecycle coordination
 - Forwards events to MainForm for UI updates
 
+### ProfileManager.cs
+
+Character profile persistence:
+- Save/load character profiles as JSON files
+- App-level settings persistence (auto-load last character, display preferences)
+- Profile path management, unsaved-changes tracking
+
+### PlayerStateManager.cs
+
+Player state tracking:
+- HP, mana, combat/resting status, login phase
+- Parses stat and exp data from game output via regex
+- Fires events on state changes (player info updated, training screen, game exited)
+
+### PartyManager.cs
+
+Party management:
+- Party membership, leader status, member health tracking
+- Automated party commands (periodic `par`, health requests)
+- Detects party join/leave/disband events from game text
+- Auto-invite players detected in room
+
 ### BuffManager.cs
 
 Buff tracking and configuration:
@@ -402,16 +455,50 @@ Buff tracking and configuration:
 Combat automation:
 - Enemy detection from "Also here:" lines (with direct RoomTracker forwarding)
 - Attack automation (melee and spell)
-- Monster override support
-- Target tracking
+- Monster override support, target tracking
+- Combat activity detection (dodge/miss patterns) via `OnCombatActivityDetected` event
 
-### HealingManager.cs & CureManager.cs
+### HealingManager.cs
 
-Health management:
-- Heal spell configurations
-- HP threshold monitoring
-- Ailment detection and curing
-- Party healing rules
+Heal spell automation:
+- Heal spell configurations with HP threshold rules
+- Priority-based heal target selection (self and party)
+- Mana reserve awareness
+
+### CureManager.cs
+
+Ailment cure automation:
+- Ailment detection from game text (poison, disease, etc.)
+- Cure spell configurations with priority ordering
+- Party cure support, poison status tracking
+
+### CastCoordinator.cs
+
+Priority-based casting system:
+- Orchestrates casting priority: heals > cures > buffs
+- Cast timing, cooldown enforcement, failure detection
+- Delegates evaluation to HealingManager, CureManager, BuffManager
+
+### RemoteCommandManager.cs
+
+Telepath-based remote control:
+- Processes commands from other players via telepath/say/gangpath messages
+- Permission checking through PlayerDatabaseManager before execution
+- Supports toggling combat/heal/buff, reporting stats, hangup/relog
+
+### PlayerDatabaseManager.cs
+
+Known player tracking:
+- In-memory database of known players with CRUD operations
+- Per-player data: alignment, class, permission level
+- Populated from character profiles and in-game `who` command
+
+### MonsterDatabaseManager.cs
+
+Monster data management:
+- Loads monster data from imported MajorMUD game data JSON
+- Per-character monster overrides (custom danger levels, attack preferences)
+- Overrides stored in character profile
 
 ---
 
@@ -445,14 +532,14 @@ public partial class MainForm : Form
     // ... core initialization and orchestration
 }
 
-// MainForm.MenuHandlers.cs - Event handlers
+// MainForm_MenuHandlers.cs - Event handlers
 public partial class MainForm
 {
     private void ConnectMenuItem_Click(object? sender, EventArgs e) { }
     private void SaveCharacter_Click(object? sender, EventArgs e) { }
 }
 
-// MainForm.DisplayUpdates.cs - UI updates
+// MainForm_DisplayUpdates.cs - UI updates
 public partial class MainForm
 {
     private void RefreshBuffDisplay() { }
@@ -485,12 +572,12 @@ private TelnetConnection _telnetConnection = null!;  // Initialized in construct
 
 ### Adding New Features
 
-1. **New Manager:** Create class, inject into BuffManager, wire events
+1. **New Manager:** Create class, inject into GameManager constructor, wire events
 2. **New UI Component:** Extract to separate UserControl or Form
 3. **New Network Feature:** Add to TelnetConnection.cs
 4. **New Message Processing:** Add to MessageRouter.cs
-5. **New Display Logic:** Add to MainForm.DisplayUpdates.cs
-6. **New Menu Handler:** Add to MainForm.MenuHandlers.cs
+5. **New Display Logic:** Add to MainForm_DisplayUpdates.cs
+6. **New Menu Handler:** Add to MainForm_MenuHandlers.cs
 
 ---
 
@@ -530,6 +617,20 @@ private void SomeMethod(string data)
 ---
 
 ## Refactoring History
+
+### Version 2.9.5 — Room Tracker Noise Filters + Timeout Re-sync (February 2026)
+
+- **Player departure message filters:** Added `"just left to the"` filter for `"{Player} just left to the {direction}"` departure messages. Expanded `"You notice"` sneaking regex from `from the {direction}` to `(from|to) the {direction}` to catch both arrival (`"sneak in from the"`) and departure (`"sneaking out to the"`) patterns. These messages were corrupting the room detection buffer, causing room name parsing to return empty and desyncing the room tracker from the character's actual position.
+- **Timeout re-sync:** On second step timeout, AutoWalkManager now attempts a room re-sync before failing. Mirrors the disconnect recovery pattern: clears stale pending moves via `RoomTracker.ClearPendingMoves()`, sends an empty command to trigger a room redisplay, then performs a three-way check comparing the detected room against the step's `FromKey` and `ToKey`. If the step actually completed (`ToKey` match), advances and continues. If still at `FromKey` or ambiguous, fails normally so LoopManager/UI can retry from the correct position. Includes a 10-second safety timeout.
+- **`RoomTracker.ClearPendingMoves()`:** New public method that clears the pending move queue and line buffer without resetting the current room or history. Used by timeout re-sync to ensure the next room display is treated as a fresh detection rather than consumed as movement confirmation.
+
+### Version 2.9.4 — Door Action Bypass + Guard Fix + UI Improvements (February 2026)
+
+- **Guard bypass fix:** Guards 1/2/3 in `RoomTracker.ProcessRoomDetection()` changed from `SetEquals` to `IsSubsetOf` — database directional exits must be a subset of visible exits, tolerating extra visible exits from action commands. `GetDirectionalExitKeys()` now excludes `MultiActionHidden` (Phase 5e omission).
+- **BFS door stat filtering:** Added `Func<RoomExit, bool>? exitFilter` parameter to `FindPath()`. Filter checks player strength/picklocks against `DoorStatRequirement`, allowing doors the player can traverse or those with action bypasses.
+- **Door action bypass:** Pass 2 of `BuildGraph()` expanded to recognize unnumbered `Action [on DIR exit...]` entries targeting Door exits. Commands stored as `DoorActionBypass` on `RoomExit`. AutoWalkManager sends bypass command (lever/switch/panel) with timer delay when player lacks stats to bash/pick.
+- **Current room display:** `_roomLabel` in MainForm status bar shows `"Current Room: 9 / 68"` (white) or `"Current Room: ? / ?"` (gray). Lifecycle-aware: updates on profile load, game entry, room changes, disconnect.
+- **WalkToDialog UI:** Fixed focus stealing (`ActiveForm == this` guard), added map/room number input (regex → `GetRoom()` lookup), prevented multiple instances (field tracking + `Activate()`), fixed positioning (`Manual` + `OnLoad()` centering).
 
 ### Version 2.9.3 — Combat Heartbeat Safety Net + Loop Editor UI (February 2026)
 
@@ -622,6 +723,8 @@ private void SomeMethod(string data)
 
 | Version | Changes |
 |---------|---------|
+| **2.9.5** | **Room Tracker Noise Filters + Timeout Re-sync** — Player departure messages (`"just left to the"`, `"sneaking out to the"`) now filtered from room detection buffer. Expanded sneaking regex from `from the` to `(from\|to) the` to catch both arrivals and departures. Timeout re-sync: on second step timeout, clears pending moves, sends empty command for room redisplay, three-way FromKey/ToKey check (mirrors disconnect recovery) before failing. New `ClearPendingMoves()` on RoomTracker. |
+| **2.9.4** | **Door Action Bypass + Guard Fix + UI Improvements** — Guards 1/2/3 changed to `IsSubsetOf`, `MultiActionHidden` excluded from exit comparisons. BFS door stat filtering via `exitFilter` predicate. Door action bypass (levers/switches) recognized and executed when player lacks stats. Current room status display on status bar. WalkToDialog: focus fix, map/room input, single instance, positioning. |
 | **2.9.3** | **Combat Heartbeat Safety Net + Loop Editor UI** — 10s damage heartbeat timer resets on combat activity (damage + dodge/miss). On timeout, non-aggressive room refresh checks if combat ended. Empty room fix: `ClearAlsoHereDedup()` clears stale enemy/player lists while preserving `_currentTarget`. Loop Editor: centers on parent monitor, collapses to minimal view during execution. |
 | **2.9.2** | **Combat verification safety net** — `OnCombatStateChanged(true)` now restarts the verification timer after `StopTimers()`. `OnCombatVerificationRecheck` restarts timer when enemies confirmed. Fixes permanent WaitingForCombat deadlock when `*Combat Off*` is never detected (1,219 lap soak test). |
 | **2.9.1** | **Hidden exit contamination fix** — `GetDirectionalExitKeys()` now excludes Hidden + SearchableHidden exits (not just Text). Strategy 1.5 and Strategy 4 use filtered exits instead of raw exits. Fixes Guard 1/2/3 suppression failure in rooms with hidden exits that caused tracker position corruption during combat pause in same-name areas. |
@@ -647,7 +750,7 @@ private void SomeMethod(string data)
 1. **GameManager is the central coordinator** — Owns all 15 sub-managers. Access via `_gameManager.CombatManager`, `_gameManager.RoomTracker`, etc. MainForm's `_buffManager` is a shortcut reference to `_gameManager.BuffManager`.
 2. **BuffManager is focused** — Only handles buff tracking/configuration. It does NOT own other managers.
 3. **Code is now highly modular** — Look for logic in appropriate extracted classes
-4. **MainForm is a partial class** — Check MenuHandlers.cs and DisplayUpdates.cs for methods
+4. **MainForm is a partial class** — Check `MainForm_MenuHandlers.cs` and `MainForm_DisplayUpdates.cs` for methods
 5. **Network logic is in TelnetConnection** — Don't add network code to MainForm
 6. **Message processing is in MessageRouter** — Don't add parsing to MainForm
 7. **Terminal rendering is in TerminalControl** — Complete VT100 emulator with scrollback
@@ -656,17 +759,22 @@ private void SomeMethod(string data)
 10. **Zero warnings policy** — All nullable references must be initialized or marked `= null!`
 11. **Combat ticks are critical** — Timing handled by MessageRouter
 12. **Character profiles are comprehensive** — ALL settings in one JSON file
-13. **Auto-pathing handles special exits** — Normal, Text, Door, SearchableHidden, and Hidden/Passable are all traversable. Locked doors and multi-action hidden exits remain excluded.
+13. **Auto-pathing handles special exits** — Normal, Text, Door, SearchableHidden, Hidden/Passable, and MultiActionHidden (automatable) are all traversable. Stat-gated doors are filtered by player stats but traversable via action bypass (lever/switch) when available. Locked doors without action bypass and non-automatable multi-action exits remain excluded.
 14. **RoomTracker is complex (~1,200 lines)** — 7 disambiguation strategies, 3 suppression guards, command queue, HP prompt stripping, TCP reassembly. Changes require careful verification.
 15. **Buffer clearing coordination** — `ClearLineBuffer()` + `OnBufferCleared` must fire to prevent contamination between room detection cycles.
-16. **Disconnect/reconnect resume** — Walks and loops survive disconnections. RoomTracker clears command queue, GameManager chains resume with 5s delay, TryResolveNearbyStep handles drift.
+16. **Disconnect/reconnect resume** — Walks and loops survive disconnections. RoomTracker clears command queue, GameManager chains resume with 5s delay, TryResolveNearbyStep handles drift. Timeout re-sync uses the same FromKey/ToKey pattern to recover from tracker desync during walk step timeouts.
 17. **Combat verification timer** — 5s timer in WaitingForCombat clears stale enemies. Runs continuously: restarted after combat engages and after each recheck that finds enemies. This ensures the walker never gets permanently stuck if `*Combat Off*` is missed.
 18. **Combat heartbeat** — 10s damage heartbeat timer resets on damage ticks and combat activity (dodge/miss messages). On timeout, `ClearAlsoHereDedup()` clears enemy/player lists (but NOT `_currentTarget`) and sends a room refresh. If room is clear, walker resumes. If enemies present, heartbeat restarts. `_currentTarget` must be preserved to prevent the "already fighting" guard from being bypassed — sending a redundant attack changes combat attack order (monster attacks first).
 19. **WalkToDialog is non-modal** — Uses `Show()` not `ShowDialog()` so main window stays interactive during walks.
 20. **Command queue** — `_pendingMoveQueue` (`Queue<PendingMove>`) replaces single-slot `_pendingMoveCommand`. Uses `_currentRoom.Key` at consumption time (not pre-computed FromKey). 10s staleness pruning, 15-command cap. Dequeues one entry per room detection.
-21. **Guard system** — Guard 1 (no-move redisplay), Guard 2 (party-follow within 750ms), Guard 3 (late follow with prediction). All use `GetDirectionalExitKeys()` to exclude text exits from comparison.
-22. **Non-visible exit filtering** — `RoomExitType.Text`, `Hidden`, and `SearchableHidden` exits never appear in "Obvious exits:" display. `GetDirectionalExitKeys()` must be used for ANY exit comparison against visible exits. Including non-visible exits causes `SetEquals` to fail, breaking guard suppression and strategy matching.
+21. **Guard system** — Guard 1 (no-move redisplay), Guard 2 (party-follow within 750ms), Guard 3 (late follow with prediction). All use `GetDirectionalExitKeys()` to exclude non-visible exits and `IsSubsetOf` (not `SetEquals`) to tolerate extra visible exits from action commands.
+22. **Non-visible exit filtering** — `RoomExitType.Text`, `Hidden`, `SearchableHidden`, and `MultiActionHidden` exits never appear in "Obvious exits:" display. `GetDirectionalExitKeys()` must be used for ANY exit comparison against visible exits. Guards use `IsSubsetOf` (database exits ⊆ visible exits) to tolerate extra visible exits.
 23. **Loop Editor dialog** — `LoopDialog.cs` creates/edits/runs loops. Centers on parent form via manual positioning in `OnLoad`. Collapses to minimal view (name + status + buttons) when loop starts; expands on stop/fail. Each open creates a new instance — no state persistence between opens.
+24. **Door stat filtering** — `FindPath()` accepts optional `Func<RoomExit, bool>? exitFilter` predicate. `GameManager.GetDoorStatFilter()` builds a filter that allows doors if player has sufficient stats OR door has `DoorActionBypass`. AutoWalkManager and WalkToDialog both use this filter.
+25. **Door action bypass** — Unnumbered `Action [on DIR exit...]` entries target Door exits (not MultiActionHidden). Pass 2 stores commands as `DoorActionBypass` on `RoomExit`. AutoWalkManager sends bypass command with timer delay only when player lacks stats — if player can bash/pick, normal door mechanics are used.
+26. **Current room status display** — `_roomLabel` in MainForm status bar shows map/room number. Lifecycle-aware: profile load, game entry, room changes, disconnect. Located at Point(200, 5) in the status panel.
+27. **WalkToDialog/LoopDialog instance tracking** — `_walkToDialog` and `_loopDialog` fields on MainForm prevent multiple instances. Click handlers use `Activate()` to bring existing dialog to front. `FormClosed` event nulls the reference.
+28. **WalkToDialog map/room input** — `PerformSearch()` detects `map/room` patterns (e.g., "9/62") via `RoomKeyRegex` and routes to `GetRoom(map, room)` direct lookup instead of name search.
 
 ### When Adding New Features
 
@@ -674,8 +782,8 @@ private void SomeMethod(string data)
 - **Message processing** → Add to `MessageRouter.cs`
 - **Player state tracking** → Add to `PlayerStateManager.cs`
 - **Party features** → Add to `PartyManager.cs`
-- **UI event handlers** → Add to `MainForm.MenuHandlers.cs`
-- **Display updates** → Add to `MainForm.DisplayUpdates.cs`
+- **UI event handlers** → Add to `MainForm_MenuHandlers.cs`
+- **Display updates** → Add to `MainForm_DisplayUpdates.cs`
 - **Core orchestration** → Add to `MainForm.cs`
 - **Game logic** → Add to appropriate Manager class
 - **Auto-pathing / walk execution** → Add to `AutoWalkManager.cs`
@@ -686,4 +794,4 @@ private void SomeMethod(string data)
 
 ---
 
-*This document provides comprehensive context for AI assistants working on this project. Version 2.9.3 adds a combat heartbeat safety net (10s damage heartbeat with dodge/miss detection, empty-room fix preserving `_currentTarget`) and Loop Editor UI improvements (center-on-parent, collapse-on-run). See AutoPathing_Plan.md for the full pathing plan.*
+*This document provides comprehensive context for AI assistants working on this project. Version 2.9.5 adds player departure message filters (sneaking out/just left) to prevent room detection buffer corruption, and timeout re-sync that mirrors disconnect recovery logic (three-way FromKey/ToKey check) to recover from tracker desync during walk timeouts. See AutoPathing_Plan.md for the full pathing plan.*

@@ -104,6 +104,27 @@ public class GameManager
     /// </summary>
     public void SendCommand(string command) => OnSendCommand?.Invoke(command);
     
+    /// <summary>
+    /// Build a BFS exit filter that skips stat-gated doors the player can't handle.
+    /// Doors with action bypasses (levers/switches) always pass regardless of stats.
+    /// </summary>
+    public Func<RoomExit, bool> GetDoorStatFilter()
+    {
+        var info = _playerStateManager.PlayerInfo;
+        var str = info.Strength;
+        var pick = info.Picklocks;
+        return exit =>
+        {
+            if (exit.ExitType != RoomExitType.Door || exit.DoorStatRequirement <= 0)
+                return true;  // Not a stat-gated door — always pass
+
+            if (exit.DoorActionBypass != null)
+                return true;  // Has action bypass (lever/switch) — always passable
+
+            return str >= exit.DoorStatRequirement || pick >= exit.DoorStatRequirement;
+        };
+    }
+
     // Profile data
     public BbsSettings BbsSettings => _bbsSettings;
     
@@ -235,6 +256,9 @@ public class GameManager
             () => _navigationSettings.UsePicklockInsteadOfBash,
             () => _navigationSettings.MaxDoorAttempts,
             () => _navigationSettings.MaxSearchAttempts,
+            () => _navigationSettings.MultiActionDelayMs,
+            () => GetDoorStatFilter(),
+            () => _playerStateManager.PlayerInfo,
             cmd => OnSendCommand?.Invoke(cmd),
             msg => OnLogMessage?.Invoke(msg)
         );

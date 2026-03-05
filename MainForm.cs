@@ -49,6 +49,9 @@ public partial class MainForm : Form
     private SplitContainer _terminalSplitContainer = null!;  // Vertical split: MUD output / logs
     private Label _statusLabel = null!;
     private Label _expStatusLabel = null!;  // Experience status on right side
+    private Label _roomLabel = null!;  // Current room display in status bar
+    private WalkToDialog? _walkToDialog;
+    private LoopDialog? _loopDialog;
     private Button _connectButton = null!;
     private CheckBox _autoScrollLogsCheckBox = null!;
     private CheckBox _showTimestampsCheckBox = null!;
@@ -191,6 +194,8 @@ public partial class MainForm : Form
         {
             UpdateConnectionUI(false);
             UpdateStatus("Disconnected", Color.White);
+            _roomLabel.Text = "Current Room: ? / ?";
+            _roomLabel.ForeColor = Color.Gray;
             _gameManager.OnDisconnected();
             
             // Auto-save profile on disconnect to preserve last known room
@@ -269,6 +274,7 @@ public partial class MainForm : Form
         _isInLoginPhase = false;
         LogMessage("✅ Login complete - entered game", MessageType.System);
         _gameManager.OnLoginComplete();
+        UpdateRoomDisplay(_gameManager.RoomTracker.CurrentRoom);
     }
     
     private void MessageRouter_OnPauseStateChanged(bool isPaused)
@@ -292,6 +298,7 @@ public partial class MainForm : Form
                     RefreshPlayerInfo();
                     RefreshBuffDisplay();
                     UpdateToggleButtonStates();
+                    UpdateRoomDisplay(_gameManager.RoomTracker.CurrentRoom);
                     LogMessage($"DEBUG: CombatEnabled={_gameManager.CombatManager.CombatEnabled}, CombatAutoEnabled={_gameManager.CombatAutoEnabled}", MessageType.System);
                     ApplyWindowSettings();
                     LogMessage("Character loaded. Click Connect to connect to the server.", MessageType.System);
@@ -374,6 +381,9 @@ public partial class MainForm : Form
             }
         });
         
+        // Room tracker → status bar display
+        _gameManager.RoomTracker.OnRoomChanged += room => BeginInvoke(() => UpdateRoomDisplay(room));
+
         // Initialize CombatManager with dependencies
         _gameManager.CombatManager.Initialize(
             _gameManager.PlayerDatabase,
@@ -945,7 +955,16 @@ public partial class MainForm : Form
             Location = new Point(10, 5)
         };
         statusPanel.Controls.Add(_statusLabel);
-        
+
+        _roomLabel = new Label
+        {
+            Text = "Current Room: ? / ?",
+            ForeColor = Color.Gray,
+            AutoSize = true,
+            Location = new Point(200, 5)
+        };
+        statusPanel.Controls.Add(_roomLabel);
+
         _expStatusLabel = new Label
         {
             Text = "",
@@ -1318,8 +1337,9 @@ public partial class MainForm : Form
         // Mark screen as dirty - will be rendered on next timer tick
         _screenDirty = true;
         
-        // Give focus to the terminal for typing
-        if (_isConnected)
+        // Give focus to the terminal for typing — but only when the main form is active.
+        // Don't steal focus from owned dialogs (WalkToDialog, LoopDialog, etc.)
+        if (_isConnected && ActiveForm == this)
         {
             _terminalControl.Focus();
         }
@@ -1457,6 +1477,20 @@ private void LogMessage(string message, MessageType type)
         }
         _statusLabel.Text = $"Status: {message}";
         _statusLabel.ForeColor = color;
+    }
+
+    private void UpdateRoomDisplay(RoomNode? room)
+    {
+        if (room != null)
+        {
+            _roomLabel.Text = $"Current Room: {room.Key.Replace("/", " / ")}";
+            _roomLabel.ForeColor = Color.White;
+        }
+        else
+        {
+            _roomLabel.Text = "Current Room: Unknown";
+            _roomLabel.ForeColor = Color.Gray;
+        }
     }
 
     private void ApplySystemLogVisibility()

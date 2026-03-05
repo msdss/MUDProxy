@@ -46,6 +46,7 @@ public partial class MainForm
             {
                 ApplyWindowSettings();
                 UpdateToggleButtonStates();
+                UpdateRoomDisplay(_gameManager.RoomTracker.CurrentRoom);
                 MessageBox.Show(message, "Character Loaded", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 UpdateTitle();
             }
@@ -268,21 +269,28 @@ public partial class MainForm
         using var dialog = new BuffListDialog(_buffManager);
         dialog.ShowDialog(this);
     }
-/*     // this one blocks clicks
     private void WalkTo_Click(object? sender, EventArgs e)
     {
-        using var dialog = new WalkToDialog(_gameManager);
-        dialog.ShowDialog(this);
-    }
-*/
-private void WalkTo_Click(object? sender, EventArgs e) // this one is aids
-    {
-        new WalkToDialog(_gameManager).Show(this);
+        if (_walkToDialog != null && !_walkToDialog.IsDisposed)
+        {
+            _walkToDialog.Activate();
+            return;
+        }
+        _walkToDialog = new WalkToDialog(_gameManager);
+        _walkToDialog.FormClosed += (s, args) => _walkToDialog = null;
+        _walkToDialog.Show(this);
     }
 
     private void LoopEditor_Click(object? sender, EventArgs e)
     {
-        new LoopDialog(_gameManager).Show(this);
+        if (_loopDialog != null && !_loopDialog.IsDisposed)
+        {
+            _loopDialog.Activate();
+            return;
+        }
+        _loopDialog = new LoopDialog(_gameManager);
+        _loopDialog.FormClosed += (s, args) => _loopDialog = null;
+        _loopDialog.Show(this);
     }
 
     private void OpenSettings_Click(object? sender, EventArgs e)

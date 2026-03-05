@@ -96,16 +96,18 @@ public class RoomTracker
     ///   - Text: uses a text command ("go crimson"), not shown as a direction
     ///   - Hidden: invisible exits (passable or multi-action), not shown until revealed
     ///   - SearchableHidden: requires "search" to reveal, not shown until found
+    ///   - MultiActionHidden: requires multiple actions to reveal, not shown until performed
     ///
-    /// Including these causes SetEquals to always fail for rooms with non-visible
-    /// exits, breaking Guard 1/2/3 suppression and Strategy 1.5/4 exit matching.
+    /// Including these causes IsSubsetOf to produce false positives for rooms with
+    /// non-visible exits, breaking Guard 1/2/3 suppression and Strategy 1.5/4 exit matching.
     /// </summary>
     private static HashSet<string> GetDirectionalExitKeys(RoomNode room)
     {
         return room.Exits
             .Where(e => e.ExitType != RoomExitType.Text &&
                         e.ExitType != RoomExitType.Hidden &&
-                        e.ExitType != RoomExitType.SearchableHidden)
+                        e.ExitType != RoomExitType.SearchableHidden &&
+                        e.ExitType != RoomExitType.MultiActionHidden)
             .Select(e => e.Direction)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
@@ -222,6 +224,24 @@ public class RoomTracker
         _currentRoom = room;
         _currentRoomName = room.Name;
         _lastDetectionTime = DateTime.MinValue;
+    }
+
+    /// <summary>
+    /// Clear the pending move queue and line buffer without resetting the current room.
+    /// Used by AutoWalkManager during timeout re-sync: clears stale in-flight move
+    /// state so the next room display (triggered by an empty command) is treated as
+    /// a fresh detection rather than consumed as a movement confirmation.
+    /// </summary>
+    public void ClearPendingMoves()
+    {
+        _pendingMoveQueue.Clear();
+        _lineBuffer.Clear();
+        _capturingExitsLine = false;
+        _exitsLineBuffer = "";
+        _bufferState = BufferState.Idle;
+        _inYouNoticeContinuation = false;
+        _inAlsoHereContinuation = false;
+        _lastSentCommand = null;
     }
 
     /// <summary>
@@ -353,6 +373,12 @@ public class RoomTracker
             return;
         }
 
+        // "{PlayerName} just left to the {direction}." — player departure messages.
+        if (trimmedRight.Contains("just left to the", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
         // ── Filter party/entity action messages ──
         // "Tester moves to attack nasty thug." / "Tester breaks off combat."
         // These party action lines can land in the buffer between room displays
@@ -429,13 +455,15 @@ public class RoomTracker
         // "You notice ..." — buffer it, check if it continues
         if (YouNoticeRegex.IsMatch(trimmedRight))
         {
-            // Filter out "You notice Xyz sneaking in from the north." — these are player/monster
+            // Filter out "You notice Xyz sneaking in from the north." and
+            // "You notice Xyz sneaking out to the east." — these are player/monster
             // movement messages, not room item listings. Room item lines always contain "here."
             // or end without a direction phrase.
-            if (Regex.IsMatch(trimmedRight, @"from the (north|south|east|west|northeast|southeast|northwest|southwest|above|below)[.!]", RegexOptions.IgnoreCase))
+            if (Regex.IsMatch(trimmedRight, @"(from|to) the (north|south|east|west|northeast|southeast|northwest|southwest|above|below)[.!]", RegexOptions.IgnoreCase))
             {
                 // This is a movement message (e.g., "You notice Tester sneaking in
-                // from the north."), not a room item listing. Discard it as noise.
+                // from the north." or "You notice Peter sneaking out to the east."),
+                // not a room item listing. Discard it as noise.
                 // Do NOT clear the buffer — a valid room name may already be stored
                 // there waiting for the exits line to trigger detection.
                 return;
@@ -629,7 +657,7 @@ public class RoomTracker
                 .Select(e => e.DirectionKey)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            if (currentDirExits.SetEquals(visibleExitDirs))
+            if (currentDirExits.IsSubsetOf(visibleExitDirs))
             {
                 _lineBuffer.Clear();
                 return;  // Same exits → redisplay, suppress
@@ -658,7 +686,7 @@ public class RoomTracker
                 .Select(e => e.DirectionKey)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            if (currentDirExits.SetEquals(visibleExitDirs))
+            if (currentDirExits.IsSubsetOf(visibleExitDirs))
             {
                 _lineBuffer.Clear();
                 return;  // Same exits → redisplay, suppress
@@ -681,7 +709,7 @@ public class RoomTracker
                 .Select(e => e.DirectionKey)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-            if (currentDirExits.SetEquals(visibleExitDirs))
+            if (currentDirExits.IsSubsetOf(visibleExitDirs))
             {
                 var predicted = PredictRoomFromMovement(_currentRoom.Key, PeekPendingCommand()!);
                 if (predicted != null && !predicted.Name.Equals(roomName, StringComparison.OrdinalIgnoreCase))
