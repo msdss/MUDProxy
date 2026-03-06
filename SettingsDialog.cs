@@ -53,6 +53,7 @@ public class SettingsDialog : Form
     private NumericUpDown _maxDoorAttemptsNum = null!;
     private NumericUpDown _maxSearchAttemptsNum = null!;
     private NumericUpDown _multiActionDelayNum = null!;
+    private NumericUpDown _maxRemoteActionRetriesNum = null!;
 
     // BBS tab controls
     private TextBox _bbsAddressText = null!;
@@ -1266,11 +1267,50 @@ public class SettingsDialog : Form
 
         tab.Controls.Add(multiActionPanel);
 
+        // ── Remote Action Exits Panel ──
+        var remoteActionPanel = new Panel
+        {
+            Location = new Point(10, 390),
+            Size = new Size(535, 100),
+            BackColor = Color.FromArgb(40, 40, 40)
+        };
+
+        int ry = 8;
+        AddLabel(remoteActionPanel, "── Remote Action Exits ──", 10, ry);
+        ry += 28;
+
+        AddLabel(remoteActionPanel, "Max retry attempts when exit doesn't open:", 15, ry + 2);
+        _maxRemoteActionRetriesNum = new NumericUpDown
+        {
+            Location = new Point(330, ry),
+            Width = 60,
+            Minimum = 0,
+            Maximum = 10,
+            Value = navSettings.MaxRemoteActionRetries,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White
+        };
+        remoteActionPanel.Controls.Add(_maxRemoteActionRetriesNum);
+        ry += 30;
+
+        var remoteActionHelpLabel = new Label
+        {
+            Text = "When an exit requires actions in remote rooms (pull lever in another room),\n" +
+                   "the walker will retry the prerequisite sequence up to this many times if the exit doesn't open.",
+            Location = new Point(15, ry),
+            Size = new Size(500, 30),
+            ForeColor = Color.FromArgb(180, 180, 180),
+            Font = new Font("Segoe UI", 8.5f)
+        };
+        remoteActionPanel.Controls.Add(remoteActionHelpLabel);
+
+        tab.Controls.Add(remoteActionPanel);
+
         // ── Information Panel ──
         var infoPanel = new Panel
         {
-            Location = new Point(10, 390),
-            Size = new Size(535, 210),
+            Location = new Point(10, 500),
+            Size = new Size(535, 230),
             BackColor = Color.FromArgb(40, 40, 40)
         };
 
@@ -1285,14 +1325,15 @@ public class SettingsDialog : Form
                    "  •  Hidden passages (invisible but always traversable)\n" +
                    "  •  Doors (bashed or picked based on the setting above)\n" +
                    "  •  Searchable hidden exits (searched based on the setting above)\n" +
-                   "  •  Multi-action hidden exits (pull lever, say password, etc.)",
+                   "  •  Multi-action hidden exits (pull lever, say password, etc.)\n" +
+                   "  •  Remote-action exits (pull lever in room A to open exit in room B)",
             Location = new Point(15, iy),
-            Size = new Size(500, 110),
+            Size = new Size(500, 125),
             ForeColor = Color.White,
             Font = new Font("Segoe UI", 9)
         };
         infoPanel.Controls.Add(supportedLabel);
-        iy += 115;
+        iy += 130;
 
         var unsupportedLabel = new Label
         {
@@ -1318,7 +1359,8 @@ public class SettingsDialog : Form
             UsePicklockInsteadOfBash = _pickLockCheck.Checked,
             MaxDoorAttempts = (int)_maxDoorAttemptsNum.Value,
             MaxSearchAttempts = (int)_maxSearchAttemptsNum.Value,
-            MultiActionDelayMs = (int)_multiActionDelayNum.Value
+            MultiActionDelayMs = (int)_multiActionDelayNum.Value,
+            MaxRemoteActionRetries = (int)_maxRemoteActionRetriesNum.Value
         };
     }
     

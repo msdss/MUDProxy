@@ -105,23 +105,54 @@ public class GameManager
     public void SendCommand(string command) => OnSendCommand?.Invoke(command);
     
     /// <summary>
-    /// Build a BFS exit filter that skips stat-gated doors the player can't handle.
+    /// Build a BFS exit filter that checks player eligibility for restricted exits.
+    /// Filters: stat-gated doors, level restrictions, class restrictions, race restrictions.
     /// Doors with action bypasses (levers/switches) always pass regardless of stats.
+    /// Guards (> 0) ensure the filter doesn't block exits when player data isn't loaded yet.
     /// </summary>
-    public Func<RoomExit, bool> GetDoorStatFilter()
+    public Func<RoomExit, bool> GetExitFilter()
     {
         var info = _playerStateManager.PlayerInfo;
         var str = info.Strength;
         var pick = info.Picklocks;
+        var level = info.Level;
+        var classId = _roomGraphManager.GetClassId(info.Class);
+        var raceId = _roomGraphManager.GetRaceId(info.Race);
+
         return exit =>
         {
-            if (exit.ExitType != RoomExitType.Door || exit.DoorStatRequirement <= 0)
-                return true;  // Not a stat-gated door — always pass
+            // Door stat check (existing logic)
+            if (exit.ExitType == RoomExitType.Door && exit.DoorStatRequirement > 0)
+            {
+                if (exit.DoorActionBypass == null)
+                {
+                    if (str < exit.DoorStatRequirement && pick < exit.DoorStatRequirement)
+                        return false;
+                }
+            }
 
-            if (exit.DoorActionBypass != null)
-                return true;  // Has action bypass (lever/switch) — always passable
+            // Level restriction check — skip if player level unknown (pre-stat)
+            if (exit.LevelRestriction != null && level > 0)
+            {
+                if (!exit.LevelRestriction.IsSatisfiedBy(level))
+                    return false;
+            }
 
-            return str >= exit.DoorStatRequirement || pick >= exit.DoorStatRequirement;
+            // Class restriction check — skip if player class unknown
+            if (exit.ClassRestriction != null && classId > 0)
+            {
+                if (!exit.ClassRestriction.IsSatisfiedBy(classId))
+                    return false;
+            }
+
+            // Race restriction check — skip if player race unknown
+            if (exit.RaceRestriction != null && raceId > 0)
+            {
+                if (!exit.RaceRestriction.IsSatisfiedBy(raceId))
+                    return false;
+            }
+
+            return true;
         };
     }
 
@@ -257,7 +288,8 @@ public class GameManager
             () => _navigationSettings.MaxDoorAttempts,
             () => _navigationSettings.MaxSearchAttempts,
             () => _navigationSettings.MultiActionDelayMs,
-            () => GetDoorStatFilter(),
+            () => _navigationSettings.MaxRemoteActionRetries,
+            () => GetExitFilter(),
             () => _playerStateManager.PlayerInfo,
             cmd => OnSendCommand?.Invoke(cmd),
             msg => OnLogMessage?.Invoke(msg)

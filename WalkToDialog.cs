@@ -25,10 +25,7 @@ public class WalkToDialog : Form
     private ProgressBar _progressBar = null!;
     private Label _progressLabel = null!;
     private Label _stateLabel = null!;
-    private Label _strReqLabel = null!;
-    private Label _pickReqLabel = null!;
-    private Label _levelReqLabel = null!;
-    private Label _itemsReqLabel = null!;
+    private Label _blockingReasonsLabel = null!;
     private Button _walkButton = null!;
     private Button _stopButton = null!;
     private Button _closeButton = null!;
@@ -184,56 +181,21 @@ public class WalkToDialog : Form
         statusGroup.Controls.Add(_pathInfoLabel);
         sy += 20;
 
-        // ── Path requirements row 1: STR / Picklocks ──
-        _strReqLabel = new Label
+        // ── Blocking reasons (shown when path is blocked by restrictions) ──
+        _blockingReasonsLabel = new Label
         {
             Text = "",
             Location = new Point(10, sy),
-            Size = new Size(180, 16),
-            ForeColor = TextDim,
-            Font = new Font("Segoe UI", 8.5f),
-            Visible = false
-        };
-        statusGroup.Controls.Add(_strReqLabel);
-
-        _pickReqLabel = new Label
-        {
-            Text = "",
-            Location = new Point(190, sy),
-            Size = new Size(200, 16),
-            ForeColor = TextDim,
-            Font = new Font("Segoe UI", 8.5f),
-            Visible = false
-        };
-        statusGroup.Controls.Add(_pickReqLabel);
-        sy += 16;
-
-        // ── Path requirements row 2: Level ──
-        _levelReqLabel = new Label
-        {
-            Text = "",
-            Location = new Point(10, sy),
-            Size = new Size(300, 16),
-            ForeColor = TextDim,
-            Font = new Font("Segoe UI", 8.5f),
-            Visible = false
-        };
-        statusGroup.Controls.Add(_levelReqLabel);
-        sy += 16;
-
-        // ── Path requirements row 3: Items ──
-        _itemsReqLabel = new Label
-        {
-            Text = "",
-            Location = new Point(10, sy),
-            Size = new Size(statusGroup.Width - 20, 16),
-            ForeColor = TextDim,
+            Size = new Size(statusGroup.Width - 20, 80),
+            ForeColor = AccentYellow,
             Font = new Font("Segoe UI", 8.5f),
             Visible = false,
+            AutoSize = false,
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
         };
-        statusGroup.Controls.Add(_itemsReqLabel);
-        sy += 22;
+        statusGroup.Controls.Add(_blockingReasonsLabel);
+
+        sy += 2;
 
         _progressBar = new ProgressBar
         {
@@ -417,7 +379,6 @@ public class WalkToDialog : Form
         _previewPath = null;
         _destinationLabel.Text = "Destination: (none selected)";
         _pathInfoLabel.Text = "Path: —";
-        UpdateRequirementsDisplay(null);
         UpdateWalkButtonState();
 
         // Direct room key lookup: "map/room" format (e.g., "9/62", "10/4")
@@ -480,6 +441,7 @@ public class WalkToDialog : Form
             _previewPath = null;
             _destinationLabel.Text = "Destination: (none selected)";
             _pathInfoLabel.Text = "Path: —";
+            _blockingReasonsLabel.Visible = false;
             UpdateWalkButtonState();
             return;
         }
@@ -494,31 +456,53 @@ public class WalkToDialog : Form
             _pathInfoLabel.Text = "Path: Current location unknown — cannot calculate";
             _pathInfoLabel.ForeColor = AccentYellow;
             _previewPath = null;
+            _blockingReasonsLabel.Visible = false;
         }
         else if (currentRoom.Key == room.Key)
         {
             _pathInfoLabel.Text = "Path: You are already here!";
             _pathInfoLabel.ForeColor = AccentGreen;
             _previewPath = null;
+            _blockingReasonsLabel.Visible = false;
         }
         else
         {
-            var path = _gameManager.RoomGraph.FindPath(currentRoom.Key, room.Key, _gameManager.GetDoorStatFilter());
+            var path = _gameManager.RoomGraph.FindPath(currentRoom.Key, room.Key, _gameManager.GetExitFilter());
             if (path.Success)
             {
                 _previewPath = path;
-                _pathInfoLabel.Text = $"Path: {path.Steps.Count} steps";
+                _blockingReasonsLabel.Visible = false;
+                var notes = new List<string>();
+                if (path.Requirements.HasRemoteActionExits) notes.Add("remote-action detours");
+                if (path.Requirements.HasTeleportExits) notes.Add("teleports");
+                var noteText = notes.Count > 0 ? $" (includes {string.Join(", ", notes)})" : "";
+                _pathInfoLabel.Text = $"Path: {path.Steps.Count} steps{noteText}";
                 _pathInfoLabel.ForeColor = TextGray;
             }
             else
             {
                 _previewPath = null;
-                _pathInfoLabel.Text = "Path: No route found (rooms may not be connected)";
-                _pathInfoLabel.ForeColor = AccentRed;
+                _blockingReasonsLabel.Visible = false;
+
+                // Re-run without filter to diagnose WHY the path is blocked
+                var unfilteredPath = _gameManager.RoomGraph.FindPath(currentRoom.Key, room.Key, includeAllExits: true);
+                if (unfilteredPath.Success)
+                {
+                    // Path exists but player can't traverse it — find the blockers
+                    var reasons = AnalyzeBlockingReasons(unfilteredPath);
+                    _pathInfoLabel.Text = "Path: No route found — blocked by exit restrictions:";
+                    _pathInfoLabel.ForeColor = AccentRed;
+                    _blockingReasonsLabel.Text = string.Join("\n", reasons);
+                    _blockingReasonsLabel.Visible = true;
+                }
+                else
+                {
+                    _pathInfoLabel.Text = "Path: No route found (rooms are not connected)";
+                    _pathInfoLabel.ForeColor = AccentRed;
+                }
             }
         }
 
-        UpdateRequirementsDisplay(_previewPath);
         UpdateWalkButtonState();
     }
 
@@ -541,7 +525,21 @@ public class WalkToDialog : Form
         _walkLog?.Close();
         _walkLog = DebugLogWriter.Create("walk");
         _gameManager.AutoWalkManager.SetDebugLog(_walkLog);
-        _gameManager.AutoWalkManager.StartWalk(_previewPath);
+
+        // Expand remote-action exits into linear prerequisite sequences
+        var expander = new RemoteActionPathExpander(
+            _gameManager.RoomGraph,
+            () => _gameManager.GetExitFilter());
+        var expandedPath = expander.Expand(_previewPath);
+
+        if (!expandedPath.Success)
+        {
+            _pathInfoLabel.Text = $"Path: Failed to expand remote-action prerequisites";
+            _pathInfoLabel.ForeColor = AccentRed;
+            return;
+        }
+
+        _gameManager.AutoWalkManager.StartWalk(expandedPath);
 
         // Disable search during walk
         _searchBox.Enabled = false;
@@ -649,69 +647,140 @@ public class WalkToDialog : Form
         _walkLog = null;
     }
 
-    private void UpdateRequirementsDisplay(PathResult? path)
+    /// <summary>
+    /// Analyze an unfiltered path to find which exits block the player.
+    /// Called when the filtered path fails but the unfiltered path succeeds.
+    /// </summary>
+    private List<string> AnalyzeBlockingReasons(PathResult unfilteredPath)
     {
-        if (path == null || !path.Requirements.HasDoors)
-        {
-            // No path or no special exits — hide requirement labels
-            _strReqLabel.Visible = false;
-            _pickReqLabel.Visible = false;
-            _levelReqLabel.Visible = false;
-            _itemsReqLabel.Visible = false;
-            return;
-        }
-
-        var reqs = path.Requirements;
+        var reasons = new List<string>();
         var playerInfo = _gameManager.PlayerStateManager.PlayerInfo;
+        var exitFilter = _gameManager.GetExitFilter();
+        var graph = _gameManager.RoomGraph;
 
-        // STR Req
-        if (reqs.MaxDoorStatRequirement > 0)
+        foreach (var step in unfilteredPath.Steps)
         {
-            _strReqLabel.Text = $"STR Req: {reqs.MaxDoorStatRequirement}";
-            _strReqLabel.ForeColor = playerInfo.Strength >= reqs.MaxDoorStatRequirement ? AccentGreen : AccentRed;
-            _strReqLabel.Visible = true;
+            // Look up the actual exit on the source room to check all properties
+            var room = graph.GetRoom(step.FromKey);
+            if (room == null) continue;
 
-            _pickReqLabel.Text = $"Picklocks Req: {reqs.MaxDoorStatRequirement}";
-            _pickReqLabel.ForeColor = playerInfo.Picklocks >= reqs.MaxDoorStatRequirement ? AccentGreen : AccentRed;
-            _pickReqLabel.Visible = true;
-        }
-        else
-        {
-            // Doors exist but no stat requirement
-            _strReqLabel.Text = "STR Req: None";
-            _strReqLabel.ForeColor = AccentGreen;
-            _strReqLabel.Visible = true;
+            var exit = room.Exits.FirstOrDefault(e =>
+                e.Direction == step.Direction && e.DestinationKey == step.ToKey);
+            if (exit == null) continue;
 
-            _pickReqLabel.Text = "Picklocks Req: None";
-            _pickReqLabel.ForeColor = AccentGreen;
-            _pickReqLabel.Visible = true;
+            // Check if this exit would be filtered out
+            if (!exit.Traversable || !exitFilter(exit))
+            {
+                var roomName = room.Name;
+                var reason = DescribeBlockingReason(exit, playerInfo, graph);
+                reasons.Add($"  [{step.FromKey}] {roomName} {exit.Direction}: {reason}");
+            }
         }
 
-        // Level Req (future — always None for now)
-        if (reqs.MaxLevel > 0)
-        {
-            _levelReqLabel.Text = $"Level Req: {reqs.MaxLevel}";
-            _levelReqLabel.ForeColor = playerInfo.Level >= reqs.MaxLevel ? AccentGreen : AccentRed;
-        }
-        else
-        {
-            _levelReqLabel.Text = "Level Req: None";
-            _levelReqLabel.ForeColor = AccentGreen;
-        }
-        _levelReqLabel.Visible = true;
+        if (reasons.Count == 0)
+            reasons.Add("  Unknown restriction");
 
-        // Items Req (future — always None/red for now since no inventory)
-        if (reqs.RequiredItems.Count > 0)
+        return reasons;
+    }
+
+    /// <summary>
+    /// Describe why a specific exit blocks the player.
+    /// </summary>
+    private string DescribeBlockingReason(RoomExit exit, PlayerInfo playerInfo, RoomGraphManager graph)
+    {
+        // Non-traversable exit types
+        if (exit.ExitType == RoomExitType.Locked)
         {
-            _itemsReqLabel.Text = $"Items Req: {string.Join(", ", reqs.RequiredItems)}";
-            _itemsReqLabel.ForeColor = AccentRed;  // Always red until inventory system exists
+            if (exit.KeyItemId > 0)
+            {
+                var keyName = graph.GetItemName(exit.KeyItemId);
+                return !string.IsNullOrEmpty(keyName)
+                    ? $"Locked (requires {keyName})"
+                    : $"Locked (requires key #{exit.KeyItemId})";
+            }
+            return "Locked (key required)";
         }
-        else
+
+        if (exit.ExitType == RoomExitType.SearchableHidden)
+            return "Hidden (requires search)";
+
+        if (exit.ExitType == RoomExitType.MultiActionHidden)
         {
-            _itemsReqLabel.Text = "Items Req: None";
-            _itemsReqLabel.ForeColor = AccentGreen;
+            var data = exit.MultiActionData;
+            if (data != null && data.HasItemRequirements)
+                return "Multi-action (requires items)";
+            if (data != null && data.HasRemoteActions)
+                return "Multi-action (remote actions not reachable)";
+            return "Multi-action (deferred)";
         }
-        _itemsReqLabel.Visible = true;
+
+        if (exit.ExitType == RoomExitType.Teleport)
+        {
+            var reasons = new List<string>();
+            // Level restriction (promoted from TeleportConditions.MinLevel/MaxLevel)
+            if (exit.LevelRestriction != null)
+                reasons.Add($"{exit.LevelRestriction} (you are level {playerInfo.Level})");
+            // Runtime conditions
+            var conds = exit.TeleportConditions;
+            if (conds != null)
+            {
+                if (conds.RoomItemId > 0)
+                {
+                    var name = graph.GetItemName(conds.RoomItemId);
+                    reasons.Add(!string.IsNullOrEmpty(name) ? $"room item: {name}" : $"room item #{conds.RoomItemId}");
+                }
+                if (conds.CheckItemId > 0)
+                {
+                    var name = graph.GetItemName(conds.CheckItemId);
+                    reasons.Add(!string.IsNullOrEmpty(name) ? $"requires: {name}" : $"requires item #{conds.CheckItemId}");
+                }
+                if (conds.RequiresNoMonsters) reasons.Add("no monsters in room");
+                if (conds.RequiresMonster) reasons.Add("monster must be present");
+                if (!string.IsNullOrEmpty(conds.TestSkill)) reasons.Add($"skill: {conds.TestSkill}");
+                if (conds.RequiresAbilityCheck) reasons.Add("ability check");
+                if (conds.RequiresEvil) reasons.Add("evil alignment");
+                if (conds.RequiresGood) reasons.Add("good alignment");
+            }
+            return reasons.Count > 0
+                ? $"Teleport \"{exit.Command}\": {string.Join(", ", reasons)}"
+                : $"Teleport \"{exit.Command}\": unknown condition";
+        }
+
+        // Stat-gated door
+        if (exit.ExitType == RoomExitType.Door && exit.DoorStatRequirement > 0)
+            return $"Door (requires {exit.DoorStatRequirement} STR or Picklocks)";
+
+        // Level restriction
+        if (exit.LevelRestriction != null)
+        {
+            var lr = exit.LevelRestriction;
+            string range = lr.ToString();
+            return $"{range} (you are level {playerInfo.Level})";
+        }
+
+        // Class restriction
+        if (exit.ClassRestriction != null)
+        {
+            var names = exit.ClassRestriction.AllowedClassIds
+                .Select(id => graph.GetClassName(id))
+                .Where(n => !string.IsNullOrEmpty(n));
+            return $"Class: {string.Join(", ", names)} only (you are {playerInfo.Class})";
+        }
+
+        // Race restriction
+        if (exit.RaceRestriction != null)
+        {
+            var names = exit.RaceRestriction.AllowedRaceIds
+                .Select(id => graph.GetRaceName(id))
+                .Where(n => !string.IsNullOrEmpty(n));
+            return $"Race: {string.Join(", ", names)} only (you are {playerInfo.Race})";
+        }
+
+        // Non-traversable for unknown reason
+        if (!exit.Traversable)
+            return $"Non-traversable ({exit.ExitType})";
+
+        return "Unknown restriction";
     }
 
     private void UpdateWalkButtonState()

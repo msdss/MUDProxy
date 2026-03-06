@@ -30,6 +30,7 @@ public class AutoWalkManager
     private readonly Func<int> _getMaxDoorAttempts;       // NavigationSettings.MaxDoorAttempts
     private readonly Func<int> _getMaxSearchAttempts;    // NavigationSettings.MaxSearchAttempts
     private readonly Func<int> _getMultiActionDelayMs;  // NavigationSettings.MultiActionDelayMs
+    private readonly Func<int> _getMaxRemoteActionRetries;  // NavigationSettings.MaxRemoteActionRetries
     private readonly Func<Func<RoomExit, bool>> _getExitFilter;  // BFS door stat filter
     private readonly Func<PlayerInfo> _getPlayerInfo;             // Player stats for door bypass decisions
     private readonly Action<string> _sendCommand;
@@ -101,6 +102,11 @@ public class AutoWalkManager
     private List<ExitAction>? _multiActionSteps = null;
     private System.Timers.Timer? _multiActionDelayTimer;
 
+    // ── Remote action step handling state ──
+    private bool _remoteActionStepActive = false;
+    private System.Timers.Timer? _remoteActionDelayTimer;
+    private int _remoteActionRetryCount = 0;
+
     private static readonly Dictionary<string, string> DirectionFullNames = new(StringComparer.OrdinalIgnoreCase)
     {
         ["n"] = "north", ["s"] = "south", ["e"] = "east", ["w"] = "west",
@@ -130,6 +136,7 @@ public class AutoWalkManager
         Func<int> getMaxDoorAttempts,
         Func<int> getMaxSearchAttempts,
         Func<int> getMultiActionDelayMs,
+        Func<int> getMaxRemoteActionRetries,
         Func<Func<RoomExit, bool>> getExitFilter,
         Func<PlayerInfo> getPlayerInfo,
         Action<string> sendCommand,
@@ -145,6 +152,7 @@ public class AutoWalkManager
         _getMaxDoorAttempts = getMaxDoorAttempts;
         _getMaxSearchAttempts = getMaxSearchAttempts;
         _getMultiActionDelayMs = getMultiActionDelayMs;
+        _getMaxRemoteActionRetries = getMaxRemoteActionRetries;
         _getExitFilter = getExitFilter;
         _getPlayerInfo = getPlayerInfo;
         _sendCommand = sendCommand;
@@ -164,6 +172,7 @@ public class AutoWalkManager
     public bool DoorStepActive => _doorStepActive;
     public bool SearchStepActive => _searchStepActive;
     public bool MultiActionStepActive => _multiActionStepActive;
+    public bool RemoteActionStepActive => _remoteActionStepActive;
 
     #endregion
 
@@ -189,6 +198,7 @@ public class AutoWalkManager
         _currentStepIndex = 0;
         _destinationKey = path.DestinationKey;
         _recalcCount = 0;
+        _remoteActionRetryCount = 0;
         _walkMode = mode;
         _lastSentStepIndex = -1;
         _lastStepSendTime = DateTime.MinValue;
@@ -218,6 +228,7 @@ public class AutoWalkManager
         ResetDoorState();
         ResetSearchState();
         ResetMultiActionState();
+        ResetRemoteActionState();
         var wasActive = IsActive;
         SetState(AutoWalkState.Idle);
 
@@ -471,6 +482,18 @@ public class AutoWalkManager
 
         OnWalkProgress?.Invoke(_currentStepIndex + 1, _steps.Count, step.ToName);
 
+        // Remote action steps: send command in-place, wait delay, advance (no room change expected)
+        if (step.ExitType == RoomExitType.RemoteAction)
+        {
+            _remoteActionStepActive = true;
+            _logMessage($"🔧 Remote action: sending '{step.Command}' in [{step.FromKey}]");
+            _debugLog?.Write("REMOTE_ACTION", $"step={_currentStepIndex + 1}/{_steps.Count} cmd='{step.Command}' room=[{step.FromKey}]");
+            _roomTracker.OnPlayerCommand(step.Command);
+            _sendCommand(step.Command);
+            StartRemoteActionDelayTimer();
+            return;
+        }
+
         // Door exits require bash/pick before movement command
         if (step.ExitType == RoomExitType.Door)
         {
@@ -495,6 +518,8 @@ public class AutoWalkManager
             return;
         }
 
+        if (step.ExitType == RoomExitType.Teleport)
+            _logMessage($"🌀 Teleport: sending '{step.Command}' from [{step.FromKey}] to [{step.ToKey}]");
         _logMessage($"🔬 WALK DEBUG: Step {_currentStepIndex + 1}/{_steps.Count} cmd='{step.Command}' toKey='{step.ToKey}' fromKey='{step.FromKey}' trackerRoom='{_roomTracker.CurrentRoomKey}'");
         _debugLog?.Write("STEP", $"{_currentStepIndex + 1}/{_steps.Count} cmd='{step.Command}' from=[{step.FromKey}] to=[{step.ToKey}] exit={step.ExitType} tracker=[{_roomTracker.CurrentRoomKey}]");
         _roomTracker.OnPlayerCommand(step.Command);
@@ -543,6 +568,11 @@ public class AutoWalkManager
         // During multi-action handling (before movement is sent), action commands
         // may trigger room redisplays. Ignore these — we haven't moved yet.
         if (_multiActionStepActive && _multiActionSubState != MultiActionSubState.WaitingForMove)
+            return;
+
+        // During remote action handling, action commands (pull lever, push button, etc.)
+        // may trigger room text redisplays. Ignore these — we haven't moved yet.
+        if (_remoteActionStepActive)
             return;
 
         // Room arrival after door step — clean up door state
@@ -767,12 +797,19 @@ public class AutoWalkManager
             return;
         }
 
+        // Expand any remote-action exits in the new path
+        var expander = new RemoteActionPathExpander(_roomGraph, _getExitFilter);
+        var expanded = expander.Expand(newPath);
+        if (expanded.Success)
+            newPath = expanded;
+
         // Replace remaining steps with new path
         _steps = new List<PathStep>(newPath.Steps);
         _currentStepIndex = 0;
         ResetDoorState();
         ResetSearchState();
         ResetMultiActionState();
+        ResetRemoteActionState();
 
         OnLogMessage?.Invoke($"🔄 Path recalculated: {_steps.Count} steps remaining");
         _debugLog?.Write("RECALC", $"attempt={_recalcCount}/{MaxRecalculations} from=[{currentRoom.Key}] newSteps={_steps.Count}");
@@ -809,6 +846,29 @@ public class AutoWalkManager
     {
         if (_state != AutoWalkState.WaitingForCombat)
             return;
+
+        // Always defer the first check after *Combat Off*.
+        // CombatManager.OnCombatEnded() fires AFTER OnCombatStateChanged(false)
+        // in the MessageRouter event chain, so on this first call the enemy list
+        // is stale — OnCombatEngaged() already removed the current target, making
+        // the list appear empty even when the enemy survived (e.g., self-heal
+        // triggers *Combat Off* without killing the enemy). The deferral gives
+        // OnCombatEnded()'s room refresh time to repopulate the enemy list.
+        if (_combatResumeRetries == 0)
+        {
+            _combatResumeRetries = 1;
+            _debugLog?.Write("COMBAT_RESUME_DEFER", "deferring resume check — waiting for room refresh");
+            StopCombatRetryTimer();
+            _combatRetryTimer = new System.Timers.Timer(CombatResumeRetryMs);
+            _combatRetryTimer.AutoReset = false;
+            _combatRetryTimer.Elapsed += (s, e) =>
+            {
+                StopCombatRetryTimer();
+                TryResumeAfterCombat();
+            };
+            _combatRetryTimer.Start();
+            return;
+        }
 
         var enemyCount = _getEnemyCount();
         if (enemyCount > 0)
@@ -975,6 +1035,33 @@ public class AutoWalkManager
         _logMessage("❌ Room re-sync timed out — no room detected");
         _debugLog?.Write("RESYNC_TIMEOUT", $"step={_currentStepIndex + 1}/{_steps.Count}");
 
+        // Remote-action exit retry on re-sync timeout: if we can't detect the room
+        // but the step has OriginalMultiActionData, attempt a retry from current position
+        if (_currentStepIndex < _steps.Count)
+        {
+            var step = _steps[_currentStepIndex];
+            var maxRetries = _getMaxRemoteActionRetries();
+            if (step.OriginalMultiActionData != null && _remoteActionRetryCount < maxRetries)
+            {
+                _remoteActionRetryCount++;
+                _logMessage($"🔄 Remote action exit — re-sync failed, retrying prerequisites (attempt {_remoteActionRetryCount}/{maxRetries})");
+                _debugLog?.Write("REMOTE_ACTION_RETRY_RESYNC_TIMEOUT", $"attempt={_remoteActionRetryCount}/{maxRetries}");
+
+                var expander = new RemoteActionPathExpander(_roomGraph, _getExitFilter);
+                var prerequisiteSteps = expander.ExpandSingle(step.OriginalMultiActionData, step.FromKey);
+
+                if (prerequisiteSteps != null && prerequisiteSteps.Count > 0)
+                {
+                    _steps.InsertRange(_currentStepIndex, prerequisiteSteps);
+                    _hasRetriedCurrentStep = false;
+
+                    SetState(AutoWalkState.Walking);
+                    SendNextStep();
+                    return;
+                }
+            }
+        }
+
         SetState(AutoWalkState.Failed);
         _logMessage("❌ Auto-walk failed — step timed out after retry");
         OnWalkFailed?.Invoke("Movement timed out. The path may be blocked.");
@@ -1012,10 +1099,46 @@ public class AutoWalkManager
         }
         else if (detectedRoom.Key == step.FromKey)
         {
-            // Still at the same room — step didn't complete. Fail normally so
-            // the caller (LoopManager/UI) can decide how to retry.
+            // Still at the same room — step didn't complete.
             _logMessage($"🔄 Re-sync: still at [{detectedRoom.Key}] {detectedRoom.Name} — step did not complete");
             _debugLog?.Write("RESYNC_SAME_POSITION", $"room=[{detectedRoom.Key}] {detectedRoom.Name} step={_currentStepIndex + 1}/{_steps.Count}");
+
+            // Remote-action exit retry: if this step has OriginalMultiActionData, the exit
+            // likely didn't open because levers/buttons reset. Re-expand prerequisites and retry.
+            var maxRetries = _getMaxRemoteActionRetries();
+            if (step.OriginalMultiActionData != null && _remoteActionRetryCount < maxRetries)
+            {
+                _remoteActionRetryCount++;
+                _logMessage($"🔄 Remote action exit timed out — re-executing prerequisites (attempt {_remoteActionRetryCount}/{maxRetries})");
+                _debugLog?.Write("REMOTE_ACTION_RETRY", $"attempt={_remoteActionRetryCount}/{maxRetries} step={_currentStepIndex + 1}/{_steps.Count}");
+
+                var expander = new RemoteActionPathExpander(_roomGraph, _getExitFilter);
+                var prerequisiteSteps = expander.ExpandSingle(step.OriginalMultiActionData, step.FromKey);
+
+                if (prerequisiteSteps != null && prerequisiteSteps.Count > 0)
+                {
+                    // Insert prerequisite steps before the current exit step
+                    _steps.InsertRange(_currentStepIndex, prerequisiteSteps);
+                    _hasRetriedCurrentStep = false;
+
+                    _logMessage($"🔧 Inserted {prerequisiteSteps.Count} prerequisite steps for retry");
+                    _debugLog?.Write("REMOTE_ACTION_RETRY_EXPANDED", $"inserted={prerequisiteSteps.Count} totalSteps={_steps.Count}");
+
+                    SetState(AutoWalkState.Walking);
+                    SendNextStep();
+                    return;
+                }
+                else
+                {
+                    _logMessage("❌ Failed to expand remote action prerequisites for retry");
+                    _debugLog?.Write("REMOTE_ACTION_RETRY_FAIL", "expansion returned null");
+                }
+            }
+            else if (step.OriginalMultiActionData != null && _remoteActionRetryCount >= maxRetries)
+            {
+                _logMessage($"❌ Remote action exit failed after {maxRetries} retry attempt(s)");
+                _debugLog?.Write("REMOTE_ACTION_RETRIES_EXHAUSTED", $"attempts={_remoteActionRetryCount}/{maxRetries}");
+            }
 
             SetState(AutoWalkState.Failed);
             OnWalkFailed?.Invoke("Movement timed out. The path may be blocked.");
@@ -1742,6 +1865,58 @@ public class AutoWalkManager
 
     #endregion
 
+    #region Remote Action Handling
+
+    /// <summary>
+    /// Start the remote action delay timer — waits MultiActionDelayMs before advancing to next step.
+    /// </summary>
+    private void StartRemoteActionDelayTimer()
+    {
+        StopRemoteActionDelayTimer();
+        var delayMs = _getMultiActionDelayMs();  // Reuse same delay setting
+        _remoteActionDelayTimer = new System.Timers.Timer(delayMs);
+        _remoteActionDelayTimer.AutoReset = false;
+        _remoteActionDelayTimer.Elapsed += (s, e) => OnRemoteActionDelayElapsed();
+        _remoteActionDelayTimer.Start();
+    }
+
+    /// <summary>
+    /// Stop the remote action delay timer.
+    /// </summary>
+    private void StopRemoteActionDelayTimer()
+    {
+        _remoteActionDelayTimer?.Stop();
+        _remoteActionDelayTimer?.Dispose();
+        _remoteActionDelayTimer = null;
+    }
+
+    /// <summary>
+    /// Remote action delay elapsed — advance to next step.
+    /// </summary>
+    private void OnRemoteActionDelayElapsed()
+    {
+        StopRemoteActionDelayTimer();
+
+        if (_state != AutoWalkState.Walking || !_remoteActionStepActive)
+            return;
+
+        _remoteActionStepActive = false;
+        _currentStepIndex++;
+        _debugLog?.Write("REMOTE_ACTION_DONE", $"advancing to step {_currentStepIndex + 1}/{_steps.Count}");
+        SendNextStep();
+    }
+
+    /// <summary>
+    /// Reset remote action handling state.
+    /// </summary>
+    private void ResetRemoteActionState()
+    {
+        _remoteActionStepActive = false;
+        StopRemoteActionDelayTimer();
+    }
+
+    #endregion
+
     #region Helpers
 
     private void SetState(AutoWalkState newState)
@@ -1762,6 +1937,7 @@ public class AutoWalkManager
         StopCombatHeartbeatTimer();
         StopMultiActionDelayTimer();
         StopDoorBypassDelayTimer();
+        StopRemoteActionDelayTimer();
         StopResyncTimer();
         _resyncInProgress = false;
     }
