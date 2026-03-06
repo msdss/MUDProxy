@@ -1,29 +1,37 @@
 # MUD Proxy Viewer — AI Knowledge Base
 
-> **Version:** 2.9.5
-> **Last Updated:** February 28, 2026
+> **Version:** 2.10.0
+> **Last Updated:** March 6, 2026
 > **Purpose:** Combat automation client for MajorMUD, replacing the deprecated MegaMUD client
 > **Platform:** Windows (.NET 8.0 WinForms)
-> **Status:** Active Development — **Room Tracker Noise Filters + Timeout Re-sync**
+> **Status:** Active Development — **TextBlock Teleport Exits + Level/Class/Race Restrictions + Blocking Reasons UI**
 
 ---
 
-## 🎉 Recent Major Update (v2.9.5)
+## 🎉 Recent Major Update (v2.10.0)
 
-**Room Tracker Noise Filters + Timeout Re-sync**
+**TextBlock Teleport Exits + Level/Class/Race Restrictions + Remote Action Orchestration + Blocking Reasons UI**
 
-Two areas of improvement in this release:
+Four major areas of auto-pathing expansion in this release:
 
-**1. Player Movement Message Filters** — Player departure messages (`"{Player} just left to the {direction}"` and `"You notice {Player} sneaking out to the {direction}"`) were not filtered from the room detection buffer, causing room name parsing to fail when these messages arrived mid-room-block. The existing `"You notice"` sneaking regex only matched arrivals (`"from the {direction}"`) — expanded to `(from|to) the {direction}` to catch both arrival and departure patterns. Added a new `"just left to the"` filter alongside the existing `"into the room"` filter.
+**1. TextBlock Teleport Exits (Phase 5f)** — 1,071 rooms have a CMD field linking to TextBlock entries that define special commands (e.g., "go portal", "enter hole") which teleport players to distant rooms. A new Pass 4 in `BuildGraph()` parses these TextBlocks — following LinkTo chains with cycle detection — to create virtual `Teleport` exits on the room graph. Conditions (level gates, item requirements, skill checks, alignment) are parsed from the TextBlock format. Unconditional and level-only-gated teleports are BFS-traversable; teleports requiring items, skills, monsters, or alignment are marked non-traversable. Level gates are promoted to standard `ExitLevelRestriction` for filter handling.
 
-**2. Timeout Re-sync (Disconnect-style Recovery)** — When a walk step times out twice, the walker now attempts a room re-sync before failing. Clears stale pending moves via new `RoomTracker.ClearPendingMoves()`, sends an empty command to trigger a room redisplay, then compares the detected room against the step's `FromKey`/`ToKey` — the same three-way check used by disconnect recovery. If the step actually completed (room == `ToKey`), advances and continues walking. If still at `FromKey` or ambiguous, fails normally so the caller can retry from the correct position. Includes a 10-second safety timeout in case the room display never arrives.
+**2. Level/Class/Race Exit Restrictions (Phase 5d)** — Directional exits can now have level, class, and race restrictions parsed from the `ExitExtra` field in room data. `ExitLevelRestriction` (min/max level), `ExitClassRestriction` (allowed class IDs), and `ExitRaceRestriction` (allowed race IDs) are typed model classes with `IsSatisfiedBy()` methods. `GameManager.GetExitFilter()` checks all three restriction types, with guards to skip filtering when player data isn't loaded yet.
 
-### New/Modified Files (v2.9.5)
+**3. Remote Action Path Orchestration (Phase 5e)** — Multi-action hidden exits that require actions in remote rooms (not the exit room itself) are now traversable. `RemoteActionPathExpander` post-processes a `PathResult` to linearize the multi-room prerequisite sequence: walk to each prerequisite room → send action command → walk back to exit room → traverse the exit. This converts a single `MultiActionHidden` step into a flat sequence the walker can process without a nested state machine. Item-gated remote actions remain deferred.
+
+**4. Blocking Reasons UI (Phase 5g)** — When no path exists through eligible exits, `WalkToDialog` re-runs BFS with `includeAllExits: true` to find a path through ALL exits. Each non-traversable exit on the unfiltered path is analyzed and displayed with specific blocking reasons: locked doors with key item names resolved from Items.json, level/class/race restrictions with player values shown, teleport conditions (items, skills, alignment), stat-gated doors, and multi-action requirements.
+
+### New/Modified Files (v2.10.0)
 
 | File | Change |
 |------|--------|
-| `RoomTracker.cs` | Added `ClearPendingMoves()` public method; added `"just left to the"` departure filter; expanded `"You notice"` sneaking regex to match `(from\|to) the {direction}` |
-| `AutoWalkManager.cs` | Added re-sync state (`_resyncInProgress`, `_resyncTimer`, `ResyncTimeoutMs`); `OnStepTimeout` triggers re-sync on second timeout; `OnResyncRoomDetected()` three-way FromKey/ToKey check; `OnResyncTimeout()` safety fallback; re-sync intercept in `OnRoomChanged()`; `StopTimers()` cleanup |
+| `Models.cs` | Added `RemoteAction` and `Teleport` to `RoomExitType` enum; `TeleportConditions` class; `ExitLevelRestriction`, `ExitClassRestriction`, `ExitRaceRestriction` typed restriction classes; fields on `RoomExit`, `PathStep`, `PathRequirements` |
+| `RoomGraphManager.cs` | Pass 4 (`BuildTeleportExits`) parses CMD TextBlocks into virtual teleport exits; level/class/race restriction parsing from `ExitExtra`; `_itemIdToName` dictionary for item name lookups; remote-action automatability evaluation in Pass 2b |
+| `RemoteActionPathExpander.cs` | New file — linearizes remote-action multi-step sequences into flat walk/action/walk/traverse steps |
+| `AutoWalkManager.cs` | Teleport exit handling (sends command like Text exits); remote action step logging |
+| `WalkToDialog.cs` | Blocking reasons display via `DescribeBlockingReason()` with item name resolution; `includeAllExits` diagnostic path; path info label updates |
+| `GameManager.cs` | `GetExitFilter()` expanded with level, class, and race restriction checks alongside door stat filtering |
 
 ---
 
@@ -220,12 +228,13 @@ MudProxyViewer/
 ├── Auto-Pathing System
 │   ├── RoomGraphManager.cs            # Room graph engine, BFS pathfinding, exit classification
 │   ├── RoomTracker.cs                 # Real-time room detection, 7-strategy disambiguation
-│   ├── AutoWalkManager.cs             # Walk execution, door/search state machines
+│   ├── AutoWalkManager.cs             # Walk execution, door/search/teleport state machines
+│   ├── RemoteActionPathExpander.cs    # Linearizes remote-action multi-room prerequisite sequences
 │   ├── LoopManager.cs                 # Waypoint loop execution, lap counting
 │   └── LoopDefinition.cs             # Loop data model, .loop.json file I/O
 │
 ├── Dialogs
-│   ├── WalkToDialog.cs                # Walk destination search, path preview, loop UI
+│   ├── WalkToDialog.cs                # Walk destination search, path preview, blocking reasons, loop UI
 │   ├── LoopDialog.cs                  # Loop editor, live stats, collapse-on-run UI
 │   ├── SettingsDialog.cs              # Character settings including Navigation tab
 │   ├── PathfindingTestDialog.cs       # Debug: manual path verification
@@ -279,9 +288,9 @@ MudProxyViewer/
 
 ### Overview
 
-The auto-pathing system navigates a player through a 56,375-room game world automatically. It handles directional movement, doors (bash/picklock), text command exits, invisible hidden passages, searchable hidden exits, multi-action hidden exits, and door action bypasses (levers/switches).
+The auto-pathing system navigates a player through a 56,375-room game world automatically. It handles directional movement, doors (bash/picklock), text command exits, invisible hidden passages, searchable hidden exits, multi-action hidden exits (including remote-action sequences across multiple rooms), TextBlock teleport commands, door action bypasses (levers/switches), and exit restrictions based on player level, class, and race. When no eligible path exists, blocking reasons are displayed with specific details (required items, levels, classes, stats).
 
-### Exit Type Classification
+### Exit Type Classification (9 Types)
 
 | Exit Type | BFS Traversable | Walk Handling | Example Data |
 |-----------|----------------|---------------|--------------|
@@ -292,18 +301,37 @@ The auto-pathing system navigates a player through a 56,375-room game world auto
 | **SearchableHidden** | ✅ Yes | Send `search`, parse result, retry on fail, then move | `1/298 (Hidden/Needs 1 Actions, any order)` + `Action#1` |
 | **Hidden (Passable)** | ✅ Yes | Send direction command (exit is invisible but passable) | `1/298 (Hidden/Passable)` |
 | **MultiActionHidden** | ✅ If automatable | Send action commands with timer delays, then move | `1/298 (Hidden/Needs 3 Actions, any order)` + `Action#1..#3` |
-| **Locked** | ❌ No | No action bypass, 999+ stat requirements | `1/298 (Door [1000 picklocks/strength])` (no Action entry) |
+| **RemoteAction** | ✅ Via expander | In-place action command sent in a prerequisite room; `RemoteActionPathExpander` linearizes the multi-room sequence | Injected steps — no room data source |
+| **Teleport** | ✅ If filterable | Send text command (same as Text); virtual exit from CMD TextBlock | `1/2684 CMD → TextBlock → teleport 8/1366` |
+| **Locked** | ❌ No | No action bypass, 999+ stat requirements, or key/ticket-gated | `1/298 (Door [1000 picklocks/strength])` (no Action entry) |
+
+**Exit Restrictions** (applied via `exitFilter` predicate on any traversable exit):
+
+| Restriction | Filter Behavior |
+|-------------|----------------|
+| **Level** | Exit has min/max level range; player level must satisfy `IsSatisfiedBy()` |
+| **Class** | Exit allows specific class IDs; player class must be in allowed list |
+| **Race** | Exit allows specific race IDs; player race must be in allowed list |
+| **Door Stats** | Door requires minimum strength or picklocks; bypassed if action bypass exists |
 
 ### Key Components
 
 **RoomGraphManager.cs** — Graph engine and pathfinding:
-- 56,375 rooms, 136,245 total exits parsed
+- 56,375 rooms, ~136,500+ total exits parsed (including teleport virtual exits)
 - BFS pathfinding in ~2ms
-- Exit type classification determines traversability
+- Exit type classification determines traversability (9 types)
 - `FindPath()` returns `PathResult` with `PathStep` list including `ExitType` per step
-- Optional `Func<RoomExit, bool>? exitFilter` parameter for stat-gated door filtering
-- Two-pass graph building: Pass 2 associates Action entries with target exits (both `MultiActionHidden` and `Door`)
+- Optional `Func<RoomExit, bool>? exitFilter` parameter for stat-gated doors, level/class/race restrictions
+- Optional `includeAllExits` flag for blocking reasons diagnostic (includes non-traversable exits in BFS)
+- 5-pass graph building:
+  - **Pass 1:** Parse all rooms and exits from Rooms.json (exit type classification, restriction parsing)
+  - **Pass 2:** Associate Action entries with target exits (MultiActionHidden and Door bypasses)
+  - **Pass 2b:** Clean up action data, evaluate automatability, identify remote-action exits
+  - **Pass 3:** Apply user-defined overrides from RoomOverrides.json
+  - **Pass 4:** Parse CMD TextBlocks into virtual `Teleport` exits (LinkTo chain following, condition parsing)
 - Door action bypass: unnumbered `Action [on DIR exit...]` entries stored as `DoorActionBypass` on Door exits
+- Item name lookups: `_itemIdToName` dictionary (2,678 items) for key/ticket exit descriptions and blocking reasons
+- Level/class/race restrictions: parsed from `ExitExtra` field into typed `ExitLevelRestriction`, `ExitClassRestriction`, `ExitRaceRestriction` objects
 
 **RoomTracker.cs** (~1,200 lines) — Room detection:
 - Parses MUD server output to determine current room
@@ -324,6 +352,8 @@ The auto-pathing system navigates a player through a 56,375-room game world auto
 - Door state machine: sends bash/pick → parses response → opens → moves; door action bypass when player lacks stats (lever/switch/panel)
 - Search state machine: sends `search` → parses success/failure → retries → moves
 - Multi-action state machine: sends action commands with timer delays → moves
+- Teleport exits: sends text command (same as Text exits) — no special walker logic needed
+- Remote action steps: sends command and waits delay (no room change expected) — `RemoteActionPathExpander` pre-linearizes the sequence
 - Combat pause/resume with RoomTracker→CombatManager direct forwarding
 - Combat verification: 5s timer clears stale enemies if combat never engages
 - Combat heartbeat: 10s timer resets on damage ticks and combat activity (dodge/miss). On timeout, sends non-aggressive room refresh. Clears stale enemy/player lists (but not `_currentTarget`) so empty rooms correctly read as 0 enemies. Resumes walking if clear, restarts heartbeat if enemies present.
@@ -347,6 +377,7 @@ The auto-pathing system navigates a player through a 56,375-room game world auto
 
 - **Door Handling:** Bash only / Picklock only / Both (bash first, then pick)
 - **Max Search Attempts:** Configurable retry limit for searchable hidden exits (default: 5)
+- **Exit Filtering:** Level, class, and race restrictions automatically applied based on current player data; door stat requirements checked against player strength/picklocks
 - Settings persisted per character profile
 
 ---
@@ -420,6 +451,7 @@ Central coordinator (owns all 15 sub-managers):
 - Profile save/load via ProfileManager
 - Disconnect/reconnect lifecycle coordination
 - Forwards events to MainForm for UI updates
+- `GetExitFilter()` builds exit filter predicate checking: door stats (strength/picklocks with action bypass passthrough), level restrictions, class restrictions, race restrictions — with guards to skip filtering when player data isn't loaded
 
 ### ProfileManager.cs
 
@@ -618,6 +650,18 @@ private void SomeMethod(string data)
 
 ## Refactoring History
 
+### Version 2.10.0 — TextBlock Teleport Exits + Level/Class/Race Restrictions + Remote Actions + Blocking Reasons (March 2026)
+
+- **TextBlock teleport exits (Phase 5f):** New Pass 4 in `BuildGraph()` parses CMD TextBlocks into virtual `Teleport` exits. 1,071 rooms have CMD fields linking to TextBlock entries. Parser follows LinkTo chains (with cycle detection), splits action lines, extracts user commands and conditions (level, items, skills, alignment, monsters), and creates `RoomExit` objects with `ExitType = Teleport`. Unconditional and level-only-gated teleports are BFS-traversable. Level gates promoted to standard `ExitLevelRestriction` for filter handling.
+- **`TeleportConditions` model:** New class tracking all teleport conditions (`MinLevel`, `MaxLevel`, `RoomItemId`, `CheckItemId`, `RequiresNoMonsters`, `RequiresMonster`, `TestSkill`, `RequiresAbilityCheck`, `RequiresEvil`, `RequiresGood`). `IsGraphTimeFilterable` returns true when only level conditions exist (no runtime state needed).
+- **Level/class/race exit restrictions (Phase 5d):** Directional exits now support `ExitLevelRestriction` (min/max level), `ExitClassRestriction` (allowed class IDs), and `ExitRaceRestriction` (allowed race IDs) parsed from `ExitExtra` field. Typed model classes with `IsSatisfiedBy()` methods. `GameManager.GetExitFilter()` expanded to check all three, with guards when player data not loaded.
+- **Remote action path orchestration (Phase 5e):** `RemoteActionPathExpander` post-processes `PathResult` to linearize remote-action exit sequences. Converts a single `MultiActionHidden` step requiring remote prerequisite rooms into: walk to prereq room → send action → walk back to exit → traverse. New `RemoteAction` exit type for injected in-place action steps.
+- **Blocking reasons UI (Phase 5g):** `WalkToDialog.DescribeBlockingReason()` analyzes non-traversable exits when filtered path fails. Handles 8+ exit type/restriction cases: locked doors (with key item names from Items.json), searchable hidden, multi-action (items, remote, deferred), teleport conditions (level, items, skills, alignment, monsters), stat-gated doors, level/class/race restrictions with player values shown.
+- **`includeAllExits` BFS flag:** `FindPath()` accepts `includeAllExits: true` to include non-traversable exits in BFS, used by blocking reasons to find any path and identify which exits block the player.
+- **Item name resolution:** `_itemIdToName` dictionary (2,678 items from Items.json) provides human-readable names for key items, ticket items, and teleport condition items in blocking reasons and exit descriptions.
+- **Item/Ticket exits as Locked:** Exits requiring a key item (`DoorKey > 0`) or a ticket (`Param > 0` on specific exit types) are classified as `Locked` with the item name stored in `LockDescription`.
+- **Teleport blocking reason fix:** Level-gated teleports now correctly show "Requires level X+" in blocking reasons instead of "unknown condition" — the level restriction is checked from `TeleportConditions` when the exit's `LevelRestriction` is null.
+
 ### Version 2.9.5 — Room Tracker Noise Filters + Timeout Re-sync (February 2026)
 
 - **Player departure message filters:** Added `"just left to the"` filter for `"{Player} just left to the {direction}"` departure messages. Expanded `"You notice"` sneaking regex from `from the {direction}` to `(from|to) the {direction}` to catch both arrival (`"sneak in from the"`) and departure (`"sneaking out to the"`) patterns. These messages were corrupting the room detection buffer, causing room name parsing to return empty and desyncing the room tracker from the character's actual position.
@@ -723,6 +767,7 @@ private void SomeMethod(string data)
 
 | Version | Changes |
 |---------|---------|
+| **2.10.0** | **TextBlock Teleport Exits + Level/Class/Race Restrictions + Remote Actions + Blocking Reasons UI** — Pass 4 parses CMD TextBlocks into virtual Teleport exits (1,071 rooms with CMD). Level/class/race restrictions on directional exits with typed model classes and `IsSatisfiedBy()`. `RemoteActionPathExpander` linearizes multi-room prerequisite sequences. Blocking reasons UI shows specific conditions (items, levels, classes, stats, teleport conditions) when no eligible path exists. Item name resolution from Items.json. `includeAllExits` BFS flag for diagnostic paths. |
 | **2.9.5** | **Room Tracker Noise Filters + Timeout Re-sync** — Player departure messages (`"just left to the"`, `"sneaking out to the"`) now filtered from room detection buffer. Expanded sneaking regex from `from the` to `(from\|to) the` to catch both arrivals and departures. Timeout re-sync: on second step timeout, clears pending moves, sends empty command for room redisplay, three-way FromKey/ToKey check (mirrors disconnect recovery) before failing. New `ClearPendingMoves()` on RoomTracker. |
 | **2.9.4** | **Door Action Bypass + Guard Fix + UI Improvements** — Guards 1/2/3 changed to `IsSubsetOf`, `MultiActionHidden` excluded from exit comparisons. BFS door stat filtering via `exitFilter` predicate. Door action bypass (levers/switches) recognized and executed when player lacks stats. Current room status display on status bar. WalkToDialog: focus fix, map/room input, single instance, positioning. |
 | **2.9.3** | **Combat Heartbeat Safety Net + Loop Editor UI** — 10s damage heartbeat timer resets on combat activity (damage + dodge/miss). On timeout, non-aggressive room refresh checks if combat ended. Empty room fix: `ClearAlsoHereDedup()` clears stale enemy/player lists while preserving `_currentTarget`. Loop Editor: centers on parent monitor, collapses to minimal view during execution. |
@@ -759,7 +804,7 @@ private void SomeMethod(string data)
 10. **Zero warnings policy** — All nullable references must be initialized or marked `= null!`
 11. **Combat ticks are critical** — Timing handled by MessageRouter
 12. **Character profiles are comprehensive** — ALL settings in one JSON file
-13. **Auto-pathing handles special exits** — Normal, Text, Door, SearchableHidden, Hidden/Passable, and MultiActionHidden (automatable) are all traversable. Stat-gated doors are filtered by player stats but traversable via action bypass (lever/switch) when available. Locked doors without action bypass and non-automatable multi-action exits remain excluded.
+13. **Auto-pathing handles 9 exit types** — Normal, Text, Door, SearchableHidden, Hidden/Passable, MultiActionHidden (automatable), RemoteAction (injected prerequisite steps), and Teleport (CMD TextBlock virtual exits) are all traversable. Stat-gated doors are filtered by player stats but traversable via action bypass (lever/switch) when available. Level/class/race restrictions filter exits based on player data. Locked doors (key/ticket-gated or no action bypass), non-automatable multi-action exits, and runtime-conditional teleports (items, skills, alignment) remain excluded.
 14. **RoomTracker is complex (~1,200 lines)** — 7 disambiguation strategies, 3 suppression guards, command queue, HP prompt stripping, TCP reassembly. Changes require careful verification.
 15. **Buffer clearing coordination** — `ClearLineBuffer()` + `OnBufferCleared` must fire to prevent contamination between room detection cycles.
 16. **Disconnect/reconnect resume** — Walks and loops survive disconnections. RoomTracker clears command queue, GameManager chains resume with 5s delay, TryResolveNearbyStep handles drift. Timeout re-sync uses the same FromKey/ToKey pattern to recover from tracker desync during walk step timeouts.
@@ -770,11 +815,17 @@ private void SomeMethod(string data)
 21. **Guard system** — Guard 1 (no-move redisplay), Guard 2 (party-follow within 750ms), Guard 3 (late follow with prediction). All use `GetDirectionalExitKeys()` to exclude non-visible exits and `IsSubsetOf` (not `SetEquals`) to tolerate extra visible exits from action commands.
 22. **Non-visible exit filtering** — `RoomExitType.Text`, `Hidden`, `SearchableHidden`, and `MultiActionHidden` exits never appear in "Obvious exits:" display. `GetDirectionalExitKeys()` must be used for ANY exit comparison against visible exits. Guards use `IsSubsetOf` (database exits ⊆ visible exits) to tolerate extra visible exits.
 23. **Loop Editor dialog** — `LoopDialog.cs` creates/edits/runs loops. Centers on parent form via manual positioning in `OnLoad`. Collapses to minimal view (name + status + buttons) when loop starts; expands on stop/fail. Each open creates a new instance — no state persistence between opens.
-24. **Door stat filtering** — `FindPath()` accepts optional `Func<RoomExit, bool>? exitFilter` predicate. `GameManager.GetDoorStatFilter()` builds a filter that allows doors if player has sufficient stats OR door has `DoorActionBypass`. AutoWalkManager and WalkToDialog both use this filter.
+24. **Exit filtering** — `FindPath()` accepts optional `Func<RoomExit, bool>? exitFilter` predicate. `GameManager.GetExitFilter()` builds a combined filter checking: door stats (strength/picklocks with action bypass passthrough), level restrictions, class restrictions, and race restrictions. Guards skip each check when player data isn't loaded. AutoWalkManager and WalkToDialog both use this filter.
 25. **Door action bypass** — Unnumbered `Action [on DIR exit...]` entries target Door exits (not MultiActionHidden). Pass 2 stores commands as `DoorActionBypass` on `RoomExit`. AutoWalkManager sends bypass command with timer delay only when player lacks stats — if player can bash/pick, normal door mechanics are used.
 26. **Current room status display** — `_roomLabel` in MainForm status bar shows map/room number. Lifecycle-aware: profile load, game entry, room changes, disconnect. Located at Point(200, 5) in the status panel.
 27. **WalkToDialog/LoopDialog instance tracking** — `_walkToDialog` and `_loopDialog` fields on MainForm prevent multiple instances. Click handlers use `Activate()` to bring existing dialog to front. `FormClosed` event nulls the reference.
 28. **WalkToDialog map/room input** — `PerformSearch()` detects `map/room` patterns (e.g., "9/62") via `RoomKeyRegex` and routes to `GetRoom(map, room)` direct lookup instead of name search.
+29. **TextBlock teleport exits** — Pass 4 in `BuildGraph()` parses CMD TextBlocks into virtual `Teleport` exits. Follows LinkTo chains with cycle detection, splits action lines by `\n`, extracts user command (text before first `:`), parses conditions between colons, extracts destination from `teleport MapNum RoomNum`. Deduplicates by destination (keeps shortest command). `TeleportConditions.IsGraphTimeFilterable` determines traversability — only level-gated teleports pass.
+30. **Level/class/race restrictions** — `ExitLevelRestriction`, `ExitClassRestriction`, `ExitRaceRestriction` are typed model classes on `RoomExit`. Parsed from `ExitExtra` field in Pass 1. Each has `IsSatisfiedBy()` method. Teleport level gates are promoted to `ExitLevelRestriction` in Pass 4. All checked in `GameManager.GetExitFilter()`.
+31. **Remote action path expansion** — `RemoteActionPathExpander.ExpandRemoteActions()` post-processes `PathResult` to replace single `MultiActionHidden` steps with linearized sequences: sub-path to each prerequisite room → `RemoteAction` step (send command, no room change) → sub-path back to exit room → original exit traversal. Requires `RoomGraphManager` for sub-path BFS.
+32. **Blocking reasons** — `WalkToDialog.DescribeBlockingReason()` provides human-readable reasons when exits on a diagnostic path are non-traversable. Item names resolved from `_itemIdToName` dictionary. Handles: Locked (key items), SearchableHidden, MultiActionHidden (item-gated, remote, deferred), Teleport (8 condition types), Door (stat-gated), LevelRestriction, ClassRestriction, RaceRestriction. Fallback for unknown restrictions.
+33. **`includeAllExits` BFS mode** — `FindPath(includeAllExits: true)` includes non-traversable exits (Locked, non-filterable Teleport, etc.) in BFS. Used by WalkToDialog to find any path when the filtered path fails, then analyze blocking reasons for each non-traversable step.
+34. **Item name dictionary** — `RoomGraphManager._itemIdToName` maps item IDs to names from Items.json (2,678 items). Accessed via `GetItemName(id)`. Used for key/ticket lock descriptions and teleport condition item names in blocking reasons.
 
 ### When Adding New Features
 
@@ -794,4 +845,4 @@ private void SomeMethod(string data)
 
 ---
 
-*This document provides comprehensive context for AI assistants working on this project. Version 2.9.5 adds player departure message filters (sneaking out/just left) to prevent room detection buffer corruption, and timeout re-sync that mirrors disconnect recovery logic (three-way FromKey/ToKey check) to recover from tracker desync during walk timeouts. See AutoPathing_Plan.md for the full pathing plan.*
+*This document provides comprehensive context for AI assistants working on this project. Version 2.10.0 adds TextBlock teleport exits (CMD→TextBlock→virtual Teleport exit on room graph), level/class/race exit restrictions with typed model classes, remote action path orchestration via RemoteActionPathExpander, blocking reasons UI with item name resolution, and exit filter expansion to cover all restriction types. See AutoPathing_Plan.md for the full pathing plan.*
