@@ -453,6 +453,12 @@ public class LoopManager
             return false;
         }
 
+        // Expand any remote-action exits in the path
+        var remoteExpander = new RemoteActionPathExpander(_roomGraph);
+        var remoteExpanded = remoteExpander.Expand(path);
+        if (remoteExpanded.Success)
+            path = remoteExpanded;
+
         _debugLog?.Write($"START_NEXT_LAP: expanded to {path.Steps.Count} steps, calling StartWalk");
         var result = _autoWalkManager.StartWalk(path);
         _debugLog?.Write($"START_NEXT_LAP: StartWalk returned {result}, walkerState={_autoWalkManager.State}");

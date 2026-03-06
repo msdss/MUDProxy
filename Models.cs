@@ -558,6 +558,13 @@ public class NavigationSettings
     /// </summary>
     public int MultiActionDelayMs { get; set; } = 1500;
 
+    /// <summary>
+    /// Maximum number of retry attempts for remote-action exits when the exit doesn't open
+    /// (e.g., levers reset before the player reaches the exit). 0 = no retries.
+    /// Default: 2.
+    /// </summary>
+    public int MaxRemoteActionRetries { get; set; } = 2;
+
     public NavigationSettings Clone()
     {
         return new NavigationSettings
@@ -565,7 +572,8 @@ public class NavigationSettings
             UsePicklockInsteadOfBash = this.UsePicklockInsteadOfBash,
             MaxDoorAttempts = this.MaxDoorAttempts,
             MaxSearchAttempts = this.MaxSearchAttempts,
-            MultiActionDelayMs = this.MultiActionDelayMs
+            MultiActionDelayMs = this.MultiActionDelayMs,
+            MaxRemoteActionRetries = this.MaxRemoteActionRetries
         };
     }
 }
@@ -949,6 +957,9 @@ public class RoomExit
     /// <summary>Picklocks/strength requirement for stat-gated doors. 0 = no requirement.</summary>
     public int DoorStatRequirement { get; set; } = 0;
 
+    /// <summary>Key item ID required for locked exits. 0 = no key requirement.</summary>
+    public int KeyItemId { get; set; } = 0;
+
     /// <summary>
     /// Alternative commands to open a stat-gated door (e.g., "pull lever").
     /// Parsed from unnumbered Action entries targeting Door exits.
@@ -962,6 +973,21 @@ public class RoomExit
     /// </summary>
     public MultiActionExitData? MultiActionData { get; set; }
 
+    /// <summary>Level restriction on this exit (e.g., "Level: 10 to 999"). Null if no restriction.</summary>
+    public ExitLevelRestriction? LevelRestriction { get; set; }
+
+    /// <summary>Class restriction on this exit (e.g., "Class: 13 OK, 0 NO"). Null if no restriction.</summary>
+    public ExitClassRestriction? ClassRestriction { get; set; }
+
+    /// <summary>Race restriction on this exit (e.g., "Race: 13 OK, 0 NO"). Null if no restriction.</summary>
+    public ExitRaceRestriction? RaceRestriction { get; set; }
+
+    /// <summary>Teleport conditions for CMD TextBlock exits. Null for non-teleport exits.</summary>
+    public TeleportConditions? TeleportConditions { get; set; }
+
+    /// <summary>TextBlock number that defines this teleport. 0 for non-teleport exits.</summary>
+    public int TextBlockNumber { get; set; }
+
     /// <summary>
     /// Whether the pathfinder will use this exit.
     /// Phase 1: Only Normal exits are traversable.
@@ -970,6 +996,105 @@ public class RoomExit
     public bool Traversable { get; set; } = true;
 
     public override string ToString() => $"{Direction} -> {DestinationKey} ({ExitType}, cmd: {Command})";
+}
+
+/// <summary>
+/// Level range restriction on an exit. Player must be within [MinLevel, MaxLevel] to pass.
+/// A value of 0 means "no limit" on that end.
+/// </summary>
+public class ExitLevelRestriction
+{
+    /// <summary>Minimum level required (0 = no minimum).</summary>
+    public int MinLevel { get; set; }
+
+    /// <summary>Maximum level allowed (0 = no maximum).</summary>
+    public int MaxLevel { get; set; }
+
+    /// <summary>Check if a player level satisfies this restriction.</summary>
+    public bool IsSatisfiedBy(int playerLevel)
+    {
+        if (MinLevel > 0 && playerLevel < MinLevel) return false;
+        if (MaxLevel > 0 && playerLevel > MaxLevel) return false;
+        return true;
+    }
+
+    public override string ToString()
+    {
+        if (MinLevel > 0 && MaxLevel > 0) return $"Level {MinLevel}-{MaxLevel}";
+        if (MinLevel > 0) return $"Level {MinLevel}+";
+        if (MaxLevel > 0) return $"Level 1-{MaxLevel}";
+        return "Level: any";
+    }
+}
+
+/// <summary>
+/// Class restriction on an exit. Specifies which class IDs are allowed or denied.
+/// Format from data: "Class: 13 OK, 0 NO" — ID 13 is allowed, 0 means "no exclusion".
+/// </summary>
+public class ExitClassRestriction
+{
+    /// <summary>Class IDs explicitly allowed (OK entries). Empty = no allowlist.</summary>
+    public List<int> AllowedClassIds { get; set; } = new();
+
+    /// <summary>Class IDs explicitly denied (NO entries). Empty = no denylist.</summary>
+    public List<int> DeniedClassIds { get; set; } = new();
+
+    /// <summary>Check if a class ID satisfies this restriction.</summary>
+    public bool IsSatisfiedBy(int classId)
+    {
+        if (AllowedClassIds.Count > 0)
+            return AllowedClassIds.Contains(classId);
+        if (DeniedClassIds.Count > 0)
+            return !DeniedClassIds.Contains(classId);
+        return true;
+    }
+}
+
+/// <summary>
+/// Race restriction on an exit. Same structure as class restriction.
+/// Format from data: "Race: 13 OK, 0 NO" — ID 13 is allowed, 0 means "no exclusion".
+/// </summary>
+public class ExitRaceRestriction
+{
+    /// <summary>Race IDs explicitly allowed (OK entries). Empty = no allowlist.</summary>
+    public List<int> AllowedRaceIds { get; set; } = new();
+
+    /// <summary>Race IDs explicitly denied (NO entries). Empty = no denylist.</summary>
+    public List<int> DeniedRaceIds { get; set; } = new();
+
+    /// <summary>Check if a race ID satisfies this restriction.</summary>
+    public bool IsSatisfiedBy(int raceId)
+    {
+        if (AllowedRaceIds.Count > 0)
+            return AllowedRaceIds.Contains(raceId);
+        if (DeniedRaceIds.Count > 0)
+            return !DeniedRaceIds.Contains(raceId);
+        return true;
+    }
+}
+
+/// <summary>
+/// Conditions extracted from a TextBlock teleport command that gate traversal.
+/// </summary>
+public class TeleportConditions
+{
+    public int MinLevel { get; set; }
+    public int MaxLevel { get; set; }
+    public int RoomItemId { get; set; }
+    public int CheckItemId { get; set; }
+    public bool RequiresNoMonsters { get; set; }
+    public bool RequiresMonster { get; set; }
+    public string TestSkill { get; set; } = string.Empty;
+    public bool RequiresAbilityCheck { get; set; }
+    public bool RequiresEvil { get; set; }
+    public bool RequiresGood { get; set; }
+
+    /// <summary>True when only level conditions exist (no runtime state needed).</summary>
+    public bool IsGraphTimeFilterable =>
+        RoomItemId == 0 && CheckItemId == 0
+        && !RequiresNoMonsters && !RequiresMonster
+        && string.IsNullOrEmpty(TestSkill)
+        && !RequiresAbilityCheck && !RequiresEvil && !RequiresGood;
 }
 
 /// <summary>
@@ -999,7 +1124,20 @@ public enum RoomExitType
     /// Multi-action hidden exit — requires executing one or more action commands before traversal.
     /// Action commands (e.g., "pull lever", "say faith") must be sent before the exit becomes usable.
     /// </summary>
-    MultiActionHidden
+    MultiActionHidden,
+
+    /// <summary>
+    /// Remote action step — an in-place action command (e.g., "pull lever") sent in a prerequisite room
+    /// as part of a remote-action exit sequence. FromKey == ToKey (no room change expected).
+    /// Generated by RemoteActionPathExpander when expanding remote-action exits into linear steps.
+    /// </summary>
+    RemoteAction,
+
+    /// <summary>
+    /// TextBlock teleport exit — a virtual exit created from a room's CMD TextBlock.
+    /// The player types a text command (e.g., "go portal") and is teleported to the destination.
+    /// </summary>
+    Teleport
 }
 
 /// <summary>
@@ -1020,6 +1158,13 @@ public class ExitAction
 
     /// <summary>Item ID required, if any. 0 = no item requirement.</summary>
     public int RequiredItemId { get; set; }
+
+    /// <summary>
+    /// Room key ("MapNum/RoomNum") where this action must be performed.
+    /// Null means the action is performed in the same room as the exit.
+    /// Non-null means the player must walk to this room first (remote action).
+    /// </summary>
+    public string? ActionRoomKey { get; set; }
 }
 
 /// <summary>
@@ -1037,21 +1182,75 @@ public class MultiActionExitData
     /// <summary>Ordered list of action steps (sorted by StepNumber).</summary>
     public List<ExitAction> Actions { get; set; } = new();
 
-    /// <summary>Whether any action targets a DIFFERENT room (remote actions — not yet supported).</summary>
+    /// <summary>Whether any action targets a DIFFERENT room (remote actions requiring travel to prerequisite rooms).</summary>
     public bool HasRemoteActions { get; set; }
 
     /// <summary>Whether any action requires an item (deferred — not yet supported).</summary>
     public bool HasItemRequirements { get; set; }
 
     /// <summary>
-    /// Whether this exit can be automated: same-room actions only, no item requirements,
-    /// and all expected actions were parsed successfully with valid commands.
+    /// Whether this exit can be automated as a same-room multi-action exit:
+    /// no remote actions, no item requirements, and all actions have valid commands.
     /// </summary>
     public bool IsAutomatable =>
         !HasRemoteActions
         && !HasItemRequirements
         && Actions.Count > 0
         && Actions.All(a => a.Commands.Count > 0);
+
+    /// <summary>
+    /// Whether this exit can be automated as a remote-action exit:
+    /// has remote actions, no item requirements, all actions have valid commands,
+    /// and all prerequisite rooms are reachable. Set during Pass 2b graph building.
+    /// </summary>
+    public bool IsRemoteActionAutomatable { get; set; }
+}
+
+/// <summary>
+/// A user-defined override to correct or supplement action data for a specific room exit.
+/// Loaded from RoomOverrides.json in the Game Data folder.
+/// Applied after the main data import to fix data export errors or missing entries.
+/// </summary>
+public class RoomExitOverride
+{
+    /// <summary>Room key in "MapNum/RoomNum" format (e.g., "12/2227").</summary>
+    public string RoomKey { get; set; } = string.Empty;
+
+    /// <summary>Exit direction (e.g., "W", "N", "SE").</summary>
+    public string ExitDirection { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Override operation: "replaceActions" replaces all action data for this exit.
+    /// Future operations may include "addAction", "removeAction", etc.
+    /// </summary>
+    public string Override { get; set; } = string.Empty;
+
+    /// <summary>Optional comment explaining why this override exists.</summary>
+    public string? Comment { get; set; }
+
+    /// <summary>Total number of actions required (overrides RequiredActionCount if set).</summary>
+    public int? RequiredActionCount { get; set; }
+
+    /// <summary>Whether actions must be in specific order (overrides RequiresSpecificOrder if set).</summary>
+    public bool? RequiresSpecificOrder { get; set; }
+
+    /// <summary>Action steps for "replaceActions" override.</summary>
+    public List<RoomExitOverrideAction>? Actions { get; set; }
+}
+
+/// <summary>
+/// A single action step within a RoomExitOverride.
+/// </summary>
+public class RoomExitOverrideAction
+{
+    /// <summary>1-based step number for ordering.</summary>
+    public int Step { get; set; }
+
+    /// <summary>Alternative commands for this step (any one works).</summary>
+    public List<string> Commands { get; set; } = new();
+
+    /// <summary>Room key where this action must be performed. Null = same room as exit.</summary>
+    public string? ActionRoom { get; set; }
 }
 
 /// <summary>
@@ -1108,6 +1307,25 @@ public class PathStep
     public List<string>? DoorActionBypass { get; set; }
     /// <summary>Multi-action data for MultiActionHidden steps. Null for other exit types.</summary>
     public MultiActionExitData? MultiActionData { get; set; }
+    /// <summary>
+    /// Preserves the original MultiActionExitData on the exit-traversal step after remote-action expansion.
+    /// Used by the retry mechanism: if the exit doesn't open (lever reset), the walker uses this data
+    /// to re-expand prerequisites and retry. Null for non-remote-action steps.
+    /// </summary>
+    public MultiActionExitData? OriginalMultiActionData { get; set; }
+
+    /// <summary>Level restriction on this step's exit. Null if none.</summary>
+    public ExitLevelRestriction? LevelRestriction { get; set; }
+
+    /// <summary>Class restriction on this step's exit. Null if none.</summary>
+    public ExitClassRestriction? ClassRestriction { get; set; }
+
+    /// <summary>Race restriction on this step's exit. Null if none.</summary>
+    public ExitRaceRestriction? RaceRestriction { get; set; }
+
+    /// <summary>Teleport conditions for CMD TextBlock steps. Null for non-teleport steps.</summary>
+    public TeleportConditions? TeleportConditions { get; set; }
+
     public override string ToString() => $"{Command} -> [{ToKey}] {ToName}";
 }
 
@@ -1126,9 +1344,9 @@ public class PathRequirements
     /// <summary>True if any step traverses a MultiActionHidden exit.</summary>
     public bool HasMultiActionExits { get; set; } = false;
 
-    /// <summary>Highest level requirement across all steps. 0 = no level gates. (Future use)</summary>
-    public int MaxLevel { get; set; } = 0;
+    /// <summary>True if any step traverses a remote-action exit (actions in different rooms).</summary>
+    public bool HasRemoteActionExits { get; set; } = false;
 
-    /// <summary>Items/keys required along the path. (Future use)</summary>
-    public List<string> RequiredItems { get; set; } = new();
+    /// <summary>True if any step uses a TextBlock teleport exit.</summary>
+    public bool HasTeleportExits { get; set; } = false;
 }
