@@ -45,6 +45,7 @@ Zero warnings policy — all builds must produce 0 warnings, 0 errors.
 | Data models | `Models.cs` |
 | Menu handlers | `MainForm_MenuHandlers.cs` |
 | Health/mana automation | `HealthManager.cs` |
+| Party wait coordination | `PartyManager.cs` (wait logic), `RemoteCommandManager.cs` (@wait/@ok recognition) |
 | Display updates | `MainForm_DisplayUpdates.cs` |
 
 ## Auto-Pathing Key Concepts
@@ -80,6 +81,8 @@ Zero warnings policy — all builds must produce 0 warnings, 0 errors.
 
 **ALL OFF gating** — HealthManager.Evaluate(), OnCombatEnded(), OnRestingStateChanged() check `_isAnyAutomationEnabled()`. PartyManager.CheckParCommand() and OnCombatTick() check `_isAutomationEnabled()`. Hangup has its own `AllowHangInAllOff` gate above the ALL OFF check.
 
+**Party wait coordination** — Party members coordinate rest stops via `@Wait`/`@Ok` telepath commands. **Leader side:** `RemoteCommandManager` recognizes `@wait`/`@ok` (bypasses `HasPermission`), fires events → `GameManager` wires to `PartyManager.HandleWaitCommand()`/`HandleOkCommand()`. Tracks waiting members in `_waitingMembers` HashSet; all must send `@Ok` before `ShouldPauseForPartyWait` clears. Proactive health monitoring: `ShouldPauseForPartyWait` also checks `EffectiveHealthPercent < PartyWaitHealthThreshold` dynamically. Configurable timeout (`PartyWaitTimeoutMinutes`, default 2m) silently resumes. **Follower side:** `HealthManager.OnHealthActionChanged` → `PartyManager.OnHealthActionChanged()` sends `/{leaderName} @Wait` on Resting/Meditating, `/{leaderName} @Ok` on recovery. `_followerWaitSent` flag prevents duplicate sends. `_partyLeaderName` captured from "You are now following {name}" message. **Pause mechanism:** `AutoWalkManager._shouldPauseForPartyWait` delegate (same pattern as `_shouldPauseForHealth`), checked in `SendNextStep()` and `OnPausePollTick()`. Loops pause naturally since LoopManager delegates to AutoWalkManager. **ALL OFF:** Leader wait stays active (social feature). Follower wait only fires when HealthManager is active (requires automation on).
+
 **Session messages** — `DisplayMudTextDirect()` with ANSI codes injects `[Session ended]` / `[Connection lost]` / `[EMERGENCY HANGUP]` into the terminal on disconnect. Must call `_terminalControl.InvalidateTerminal()` after because `RenderTimer_Tick` requires `_isConnected` which is already false.
 
 ## Common Pitfalls
@@ -93,3 +96,8 @@ Zero warnings policy — all builds must produce 0 warnings, 0 errors.
 - `RenderTimer_Tick` requires `_isConnected` — force `InvalidateTerminal()` when injecting terminal text during disconnect
 - `OnStatusChanged` fires for intermediate states ("Connecting...", "Retrying...") — filter by specific statusMessage values, not catch-all else
 - `_postCombatPauseWalking` must be cleared before the ALL OFF early-return in Evaluate() to prevent stuck walking pause
+- `@wait`/`@ok` bypass `HasPermission` in RemoteCommandManager — party membership validated by PartyManager instead
+- Leader acknowledges `@Wait` with `{Ok}` (informational telepath), NOT `@Ok` (which would be parsed as a command)
+- `_followerWaitSent` must gate `@Wait` sends — HealthManager re-fires Resting on interruption, causing duplicate sends without the flag
+- `_waitingMembers` must be cleaned up when members leave party, party disbands, or on disconnect — stale entries block walking permanently
+- `ShouldPauseForPartyWait` is NOT gated by ALL OFF — it's a social coordination feature that should work regardless of automation state
