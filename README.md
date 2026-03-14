@@ -1,33 +1,35 @@
 # MUD Proxy Viewer — AI Knowledge Base
 
-> **Version:** 2.11.0
-> **Last Updated:** March 7, 2026
+> **Version:** 2.12.0
+> **Last Updated:** March 14, 2026
 > **Purpose:** Combat automation client for MajorMUD, replacing the deprecated MegaMUD client
 > **Platform:** Windows (.NET 8.0 WinForms)
-> **Status:** Active Development — **Health/Mana Management + Session Messages**
+> **Status:** Active Development — **Party Wait Coordination**
 
 ---
 
-## 🎉 Recent Major Update (v2.11.0)
+## 🎉 Recent Major Update (v2.12.0)
 
-**Health/Mana Management + ALL OFF Toggle + Session Messages**
+**Party Wait Coordination**
 
-Three major feature areas in this release:
+Party members coordinate rest stops via `@Wait`/`@Ok` telepath commands:
 
-**1. Health/Mana Management (HealthManager)** — New `HealthManager` class automates recovery decisions via a 7-priority evaluation chain: Hang (emergency disconnect) > Run (flee) > Meditate (priority, when both HP and mana low) > Rest HP > Meditate/Rest Mana > Stop Resting > Stop Meditating. Uses two-threshold hysteresis: START threshold begins recovery, MAX threshold ends it. `_restingForMana` flag tracks whether rest was triggered for HP or mana so Priority 6 checks the correct max threshold. Post-combat 250ms delay (`_postCombatPauseWalking`) prevents rest/meditate on stale enemy data while keeping walking paused. Deferred eval timer in `OnCombatEnded()` fires `Evaluate()` when delay expires. `ShouldPauseWalking` pauses AutoWalkManager without blocking CastCoordinator. `OnRestingStateChanged()` re-sends rest/meditate using MAX threshold when interrupted by buff casts. Emergency hangup disconnects immediately and blocks reconnect until manual.
+**1. Leader behavior** — `RemoteCommandManager` recognizes `@wait`/`@ok` as known commands (bypasses `HasPermission`), fires `OnWaitCommandReceived`/`OnOkCommandReceived` events. `PartyManager.HandleWaitCommand()` validates sender is a party member, adds to `_waitingMembers` HashSet, acknowledges with `{Ok}`. All waiting members must send `@Ok` before `ShouldPauseForPartyWait` clears. Proactive health monitoring: pauses if any member's `EffectiveHealthPercent` < configurable threshold. Configurable timeout (default 2m) silently resumes. "Ignore party @Wait" option responds with `{Currently ignoring @Wait messages.}`.
 
-**2. ALL OFF Toggle** — The ALL OFF button now gates all automation including rest/meditate/par. `HealthManager.Evaluate()`, `OnCombatEnded()`, and `OnRestingStateChanged()` check `_isAnyAutomationEnabled()`. `PartyManager.CheckParCommand()` and `OnCombatTick()` check `_isAutomationEnabled()` delegate. Hangup retains its own `AllowHangInAllOff` gate above the ALL OFF check. `_postCombatPauseWalking` is cleared before the ALL OFF return to prevent stuck walking pause.
+**2. Follower behavior** — `HealthManager.OnHealthActionChanged` wired to `PartyManager.OnHealthActionChanged()`. Sends `/{leaderName} @Wait` when action becomes Resting/Meditating, `/{leaderName} @Ok` on recovery. `_followerWaitSent` flag prevents duplicate sends. `_partyLeaderName` captured from "You are now following" message.
 
-**3. Session Messages** — ANSI-colored session messages injected into the game terminal on disconnect via `DisplayMudTextDirect()`: blue background for `[Session ended]` and `[Connection lost]`, red background for `[EMERGENCY HANGUP - Session ended]`. Forces `_terminalControl.InvalidateTerminal()` after injection because `RenderTimer_Tick` requires `_isConnected`. Filters `statusMessage` to exclude intermediate states ("Connecting...", "Retrying...").
+**3. Pause mechanism** — `AutoWalkManager._shouldPauseForPartyWait` delegate (same pattern as `_shouldPauseForHealth`), checked in `SendNextStep()` and `OnPausePollTick()`. Loops pause naturally since LoopManager delegates to AutoWalkManager. Leader wait is NOT gated by ALL OFF (social feature).
 
-### New/Modified Files (v2.11.0)
+### New/Modified Files (v2.12.0)
 
 | File | Change |
 |------|--------|
-| `HealthManager.cs` | New file — 7-priority health/mana evaluation, rest/meditate/flee/hangup automation, `_restingForMana` tracking, post-combat delay, ALL OFF gating |
-| `PartyManager.cs` | Added `_isAutomationEnabled` delegate, gated `CheckParCommand()` and `OnCombatTick()` behind ALL OFF |
-| `GameManager.cs` | Wires HealthManager events, passes automation-enabled delegate to PartyManager, updated sub-manager count to 16 |
-| `MainForm.cs` | Session ended/lost/hangup terminal messages with ANSI color, `_pendingHangupDisconnect` flag, `InvalidateTerminal()` forced repaint |
+| `PartyManager.cs` | Party wait logic: `HandleWaitCommand()`, `HandleOkCommand()`, `OnHealthActionChanged()`, `ShouldPauseForPartyWait`, `_partyLeaderName` tracking, timeout timer, 3 new settings |
+| `RemoteCommandManager.cs` | `@wait`/`@ok` recognition, 2 new events, permission bypass for party commands |
+| `GameManager.cs` | Wires RemoteCommandManager/HealthManager events to PartyManager, party-wait pause delegate, profile save/load |
+| `AutoWalkManager.cs` | `_shouldPauseForPartyWait` delegate, pause check in `SendNextStep()` and `OnPausePollTick()` |
+| `Models.cs` | 3 new `CharacterProfile` properties: `IgnorePartyWait`, `PartyWaitHealthThreshold`, `PartyWaitTimeoutMinutes` |
+| `SettingsDialog.cs` | Party Wait System section on Party tab with 3 new controls |
 
 ---
 
@@ -216,12 +218,12 @@ MudProxyViewer/
 │   ├── GameManager.cs                 # Central coordinator (owns all managers)
 │   ├── BuffManager.cs                 # Buff tracking and configuration
 │   ├── PlayerStateManager.cs          # HP, mana, stats, experience
-│   ├── PartyManager.cs                # Party tracking, auto-invite
+│   ├── PartyManager.cs                # Party tracking, auto-invite, wait coordination
 │   ├── HealingManager.cs              # Heal spell automation
 │   ├── CureManager.cs                 # Ailment cure automation
 │   ├── CombatManager.cs               # Enemy detection, attack automation
 │   ├── CastCoordinator.cs             # Priority-based casting (heals > cures > buffs)
-│   ├── RemoteCommandManager.cs        # Telepath-based remote control
+│   ├── RemoteCommandManager.cs        # Telepath-based remote control, @wait/@ok
 │   ├── PlayerDatabaseManager.cs       # Known player tracking, permissions
 │   ├── MonsterDatabaseManager.cs      # Monster data, per-character overrides
 │   └── HealthManager.cs              # Health/mana threshold automation (rest/meditate/flee/hangup)
@@ -470,11 +472,18 @@ Player state tracking:
 
 ### PartyManager.cs
 
-Party management:
+Party management and wait coordination:
 - Party membership, leader status, member health tracking
 - Automated party commands (periodic `par`, health requests)
 - Detects party join/leave/disband events from game text
 - Auto-invite players detected in room
+- **Party wait system:** Coordinates rest stops between party members via `@Wait`/`@Ok` telepaths
+  - **Leader:** Tracks `_waitingMembers` HashSet, pauses walking via `ShouldPauseForPartyWait`, acknowledges with `{Ok}`
+  - **Follower:** Sends `@Wait` to leader on rest/meditate, `@Ok` on recovery (reacts to `HealthManager.OnHealthActionChanged`)
+  - Proactive health monitoring: pauses if any member's `EffectiveHealthPercent` < configurable threshold
+  - Configurable timeout (default 2m) silently resumes movement
+  - `_followerWaitSent` prevents duplicate sends when HealthManager re-fires on interruption
+  - `_partyLeaderName` captured from "You are now following" message
 
 ### BuffManager.cs
 
@@ -531,6 +540,7 @@ Telepath-based remote control:
 - Processes commands from other players via telepath/say/gangpath messages
 - Permission checking through PlayerDatabaseManager before execution
 - Supports toggling combat/heal/buff, reporting stats, hangup/relog
+- **Party commands:** `@wait`/`@ok` recognized as known commands, bypass `HasPermission` check, fire `OnWaitCommandReceived`/`OnOkCommandReceived` events (party membership validated by PartyManager)
 
 ### PlayerDatabaseManager.cs
 
@@ -781,6 +791,7 @@ private void SomeMethod(string data)
 
 | Version | Changes |
 |---------|---------|
+| **2.12.0** | **Party Wait Coordination** — Party members coordinate rest stops via `@Wait`/`@Ok` telepaths. Leader pauses walking when followers need rest, resumes when all send `@Ok`. Proactive health threshold monitoring pauses for low-HP members. Configurable timeout (default 2m). `RemoteCommandManager` recognizes `@wait`/`@ok` (bypasses permission check), fires events wired to `PartyManager`. Follower auto-sends `@Wait` on rest/meditate via `HealthManager.OnHealthActionChanged`. Three new settings: Ignore party @Wait, health threshold %, wait timeout minutes. |
 | **2.11.0** | **Health/Mana Management + ALL OFF Toggle + Session Messages** — New `HealthManager` with 7-priority evaluation chain (hang/run/meditate/rest/stop), two-threshold hysteresis, `_restingForMana` tracking, post-combat delay, deferred eval timer. ALL OFF toggle gates HealthManager and PartyManager auto-par. ANSI-colored session ended/lost/hangup messages on game terminal with forced repaint. |
 | **2.10.0** | **TextBlock Teleport Exits + Level/Class/Race Restrictions + Remote Actions + Blocking Reasons UI** — Pass 4 parses CMD TextBlocks into virtual Teleport exits (1,071 rooms with CMD). Level/class/race restrictions on directional exits with typed model classes and `IsSatisfiedBy()`. `RemoteActionPathExpander` linearizes multi-room prerequisite sequences. Blocking reasons UI shows specific conditions (items, levels, classes, stats, teleport conditions) when no eligible path exists. Item name resolution from Items.json. `includeAllExits` BFS flag for diagnostic paths. |
 | **2.9.5** | **Room Tracker Noise Filters + Timeout Re-sync** — Player departure messages (`"just left to the"`, `"sneaking out to the"`) now filtered from room detection buffer. Expanded sneaking regex from `from the` to `(from\|to) the` to catch both arrivals and departures. Timeout re-sync: on second step timeout, clears pending moves, sends empty command for room redisplay, three-way FromKey/ToKey check (mirrors disconnect recovery) before failing. New `ClearPendingMoves()` on RoomTracker. |
@@ -860,4 +871,4 @@ private void SomeMethod(string data)
 
 ---
 
-*This document provides comprehensive context for AI assistants working on this project. Version 2.10.0 adds TextBlock teleport exits (CMD→TextBlock→virtual Teleport exit on room graph), level/class/race exit restrictions with typed model classes, remote action path orchestration via RemoteActionPathExpander, blocking reasons UI with item name resolution, and exit filter expansion to cover all restriction types. See AutoPathing_Plan.md for the full pathing plan.*
+*This document provides comprehensive context for AI assistants working on this project. Version 2.12.0 adds party wait coordination via `@Wait`/`@Ok` telepaths for coordinated rest stops between party members. See AutoPathing_Plan.md for the full pathing plan.*
