@@ -1,35 +1,40 @@
 # MUD Proxy Viewer — AI Knowledge Base
 
-> **Version:** 2.12.0
-> **Last Updated:** March 14, 2026
+> **Version:** 2.13.0
+> **Last Updated:** March 15, 2026
 > **Purpose:** Combat automation client for MajorMUD, replacing the deprecated MegaMUD client
 > **Platform:** Windows (.NET 8.0 WinForms)
-> **Status:** Active Development — **Party Wait Coordination**
+> **Status:** Active Development — **Party Awareness + Inventory Tracking**
 
 ---
 
-## 🎉 Recent Major Update (v2.12.0)
+## 🎉 Recent Major Update (v2.13.0)
 
-**Party Wait Coordination**
+**Inventory Tracking + Party Awareness + Auto-Invite Wait**
 
-Party members coordinate rest stops via `@Wait`/`@Ok` telepath commands:
+**1. Inventory Tracking** — New `InventoryManager` parses `i` command output (multi-line capture) and tracks incremental changes (pick up, drop, equip, give, buy, sell, currency). Thread-safe via `_inventoryLock`. `MessageRouter` intercepts inventory lines before `RoomTracker`. The `i` command fires during login in `PlayerStateManager` startup sequences. `HasItem()`/`HasItemById()` enables Phase 6 item-gated exit traversal.
 
-**1. Leader behavior** — `RemoteCommandManager` recognizes `@wait`/`@ok` as known commands (bypasses `HasPermission`), fires `OnWaitCommandReceived`/`OnOkCommandReceived` events. `PartyManager.HandleWaitCommand()` validates sender is a party member, adds to `_waitingMembers` HashSet, acknowledges with `{Ok}`. All waiting members must send `@Ok` before `ShouldPauseForPartyWait` clears. Proactive health monitoring: pauses if any member's `EffectiveHealthPercent` < configurable threshold. Configurable timeout (default 2m) silently resumes. "Ignore party @Wait" option responds with `{Currently ignoring @Wait messages.}`.
+**2. Party Awareness** — Followers cannot start or continue walks/loops (hard block via `_isFollower` delegate, abort via `OnBecameFollower` event). Followers don't send auto-invites. Party invitations declined with reasons ("following X" / "leading a party"). `@join` routed through `ExecuteCommands` permission (not `JoinPartyIfInvited`). MUD invite messages use `JoinPartyIfInvited`. Unknown players silently ignored.
 
-**2. Follower behavior** — `HealthManager.OnHealthActionChanged` wired to `PartyManager.OnHealthActionChanged()`. Sends `/{leaderName} @Wait` when action becomes Resting/Meditating, `/{leaderName} @Ok` on recovery. `_followerWaitSent` flag prevents duplicate sends. `_partyLeaderName` captured from "You are now following" message.
+**3. Auto-Invite Wait** — When auto-inviting a player during a walk/loop, walking pauses for a configurable duration (`AutoInviteWaitSeconds`, default 15s, 0=disabled) to let the player join. Clears immediately on join (`SomeoneFollowingYouRegex`) or after timeout. 30-second `_recentlyInvited` cooldown prevents invite spam on rapid room scans.
 
-**3. Pause mechanism** — `AutoWalkManager._shouldPauseForPartyWait` delegate (same pattern as `_shouldPauseForHealth`), checked in `SendNextStep()` and `OnPausePollTick()`. Loops pause naturally since LoopManager delegates to AutoWalkManager. Leader wait is NOT gated by ALL OFF (social feature).
+**4. Message Processing Order** — PartyManager now runs BEFORE RemoteCommandManager in `MessageRouter.ProcessMessage()` so party state is current when `@join`/`@wait`/`@ok` are evaluated. Multi-message text blocks handled with `Matches()` and priority ordering (`PartyDisbandedRegex` before individual leave patterns).
 
-### New/Modified Files (v2.12.0)
+### New/Modified Files (v2.13.0)
 
 | File | Change |
 |------|--------|
-| `PartyManager.cs` | Party wait logic: `HandleWaitCommand()`, `HandleOkCommand()`, `OnHealthActionChanged()`, `ShouldPauseForPartyWait`, `_partyLeaderName` tracking, timeout timer, 3 new settings |
-| `RemoteCommandManager.cs` | `@wait`/`@ok` recognition, 2 new events, permission bypass for party commands |
-| `GameManager.cs` | Wires RemoteCommandManager/HealthManager events to PartyManager, party-wait pause delegate, profile save/load |
-| `AutoWalkManager.cs` | `_shouldPauseForPartyWait` delegate, pause check in `SendNextStep()` and `OnPausePollTick()` |
-| `Models.cs` | 3 new `CharacterProfile` properties: `IgnorePartyWait`, `PartyWaitHealthThreshold`, `PartyWaitTimeoutMinutes` |
-| `SettingsDialog.cs` | Party Wait System section on Party tab with 3 new controls |
+| `InventoryManager.cs` | **NEW** — Full inventory parsing, incremental tracking, thread-safe state, `HasItem()`/`HasItemById()` |
+| `PartyManager.cs` | `IsFollower`, `OnBecameFollower`, `TryJoinParty()`, `ShouldPauseForInviteWait`, `_pendingInviteJoins`, `_recentlyInvited` cooldown, party-aware `CheckPartyInvitation()`, multi-message fix, `AutoInviteWaitSeconds` setting |
+| `RemoteCommandManager.cs` | `@join` moved to `ExecuteCommands` permission, `HandleJoinRequest()`, `_tryJoinParty` delegate |
+| `AutoWalkManager.cs` | `_shouldPauseForInviteWait` + `_isFollower` delegates, pause/block checks |
+| `LoopManager.cs` | `_isFollower` delegate, block check in `Start()` |
+| `GameManager.cs` | Wires all new delegates/events, invite-wait pause, follower checks, abort on become-follower |
+| `MessageRouter.cs` | Inventory interception before RoomTracker, PartyManager before RemoteCommandManager |
+| `PlayerStateManager.cs` | `i` command in all 3 startup sequences |
+| `Models.cs` | `AutoInviteWaitSeconds` on `CharacterProfile` |
+| `SettingsDialog.cs` | Auto-Invite section on Party tab |
+
 
 ---
 
@@ -152,11 +157,11 @@ MainForm (Entry Point — Partial Class Split)
     ├── GameManager (Central Coordinator — owns all managers)
     │       ├── ProfileManager (character profile persistence)
     │       ├── PlayerStateManager (HP, mana, stats, exp, resting, training)
-    │       ├── PartyManager (party tracking, par, health requests)
+    │       ├── PartyManager (party tracking, par, health requests, auto-invite, follower awareness)
     │       ├── HealingManager (heal spells, HP threshold rules)
     │       ├── CureManager (ailment detection, cure automation)
     │       ├── CombatManager (enemy detection, attack automation)
-    │       ├── RemoteCommandManager (telepath-based remote control)
+    │       ├── RemoteCommandManager (telepath-based remote control, @join/@wait/@ok)
     │       ├── PlayerDatabaseManager (friend/enemy tracking)
     │       ├── MonsterDatabaseManager (monster data, overrides)
     │       ├── RoomGraphManager (room graph, BFS pathfinding)
@@ -165,7 +170,8 @@ MainForm (Entry Point — Partial Class Split)
     │       ├── LoopManager (waypoint loop execution, lap counting)
     │       ├── BuffManager (buff tracking and configuration)
     │       ├── CastCoordinator (priority-based casting across heals/cures/buffs)
-    │       └── HealthManager (health/mana thresholds, rest/meditate/flee/hangup)
+    │       ├── HealthManager (health/mana thresholds, rest/meditate/flee/hangup)
+    │       └── InventoryManager (inventory parsing, item tracking)
     │
     └── GameDataCache (Singleton — accessed directly via GameDataCache.Instance)
             └── Game JSON files (Races, Classes, Items, etc.)
@@ -218,15 +224,16 @@ MudProxyViewer/
 │   ├── GameManager.cs                 # Central coordinator (owns all managers)
 │   ├── BuffManager.cs                 # Buff tracking and configuration
 │   ├── PlayerStateManager.cs          # HP, mana, stats, experience
-│   ├── PartyManager.cs                # Party tracking, auto-invite, wait coordination
+│   ├── PartyManager.cs                # Party tracking, auto-invite, wait coordination, follower awareness
 │   ├── HealingManager.cs              # Heal spell automation
 │   ├── CureManager.cs                 # Ailment cure automation
 │   ├── CombatManager.cs               # Enemy detection, attack automation
 │   ├── CastCoordinator.cs             # Priority-based casting (heals > cures > buffs)
-│   ├── RemoteCommandManager.cs        # Telepath-based remote control, @wait/@ok
+│   ├── RemoteCommandManager.cs        # Telepath-based remote control, @wait/@ok/@join
 │   ├── PlayerDatabaseManager.cs       # Known player tracking, permissions
 │   ├── MonsterDatabaseManager.cs      # Monster data, per-character overrides
-│   └── HealthManager.cs              # Health/mana threshold automation (rest/meditate/flee/hangup)
+│   ├── HealthManager.cs              # Health/mana threshold automation (rest/meditate/flee/hangup)
+│   └── InventoryManager.cs           # Inventory parsing, item tracking, currency
 │
 ├── Auto-Pathing System
 │   ├── RoomGraphManager.cs            # Room graph engine, BFS pathfinding, exit classification
@@ -472,11 +479,14 @@ Player state tracking:
 
 ### PartyManager.cs
 
-Party management and wait coordination:
+Party management, wait coordination, and follower awareness:
 - Party membership, leader status, member health tracking
 - Automated party commands (periodic `par`, health requests)
-- Detects party join/leave/disband events from game text
-- Auto-invite players detected in room
+- Detects party join/leave/disband events from game text (uses `Matches()` for multi-message blocks, checks `PartyDisbandedRegex` before individual leave patterns)
+- Auto-invite players detected in room with 30-second `_recentlyInvited` cooldown to prevent spam on rapid room scans
+- **Auto-invite wait:** Pauses walking via `ShouldPauseForInviteWait` when inviting a player, clears on join or timeout (`AutoInviteWaitSeconds`, default 15s)
+- **Follower awareness:** `IsFollower` property blocks walks/loops, `OnBecameFollower` event aborts active walks/loops, followers don't send auto-invites
+- **Party-aware invitations:** Declines with reasons ("following X" / "leading a party"), `TryJoinParty()` called by RemoteCommandManager for `@join`
 - **Party wait system:** Coordinates rest stops between party members via `@Wait`/`@Ok` telepaths
   - **Leader:** Tracks `_waitingMembers` HashSet, pauses walking via `ShouldPauseForPartyWait`, acknowledges with `{Ok}`
   - **Follower:** Sends `@Wait` to leader on rest/meditate, `@Ok` on recovery (reacts to `HealthManager.OnHealthActionChanged`)
@@ -541,6 +551,18 @@ Telepath-based remote control:
 - Permission checking through PlayerDatabaseManager before execution
 - Supports toggling combat/heal/buff, reporting stats, hangup/relog
 - **Party commands:** `@wait`/`@ok` recognized as known commands, bypass `HasPermission` check, fire `OnWaitCommandReceived`/`OnOkCommandReceived` events (party membership validated by PartyManager)
+- **`@join`:** Requires `ExecuteCommands` permission (not `JoinPartyIfInvited`), delegates to `PartyManager.TryJoinParty()` via `_tryJoinParty` delegate, returns party-state-aware error messages
+
+### InventoryManager.cs
+
+Inventory tracking and item detection:
+- Parses `i` command output via multi-line capture (detects "You are carrying:" header, captures until prompt)
+- Incremental tracking: pick up, drop, equip, remove, give, receive, buy, sell
+- Currency tracking: runic coins, platinum, gold, silver, copper (both pickup and full inventory parse)
+- Wealth and encumbrance parsing from inventory footer
+- Thread-safe via `_inventoryLock` — all public API access is synchronized
+- `HasItem(itemName)` / `HasItemById(itemId)` for item-gated exit traversal (Phase 6)
+- `OnInventoryChanged` event fires on any state change
 
 ### PlayerDatabaseManager.cs
 
@@ -791,6 +813,7 @@ private void SomeMethod(string data)
 
 | Version | Changes |
 |---------|---------|
+| **2.13.0** | **Inventory Tracking + Party Awareness + Auto-Invite Wait** — New `InventoryManager` with full inventory parsing, incremental tracking, and `HasItem()`/`HasItemById()` for Phase 6 item-gated exits. Party awareness: followers blocked from walks/loops, party-aware invitation handling, `@join` routed through `ExecuteCommands` permission. Auto-invite wait pauses walking for invited players (configurable timeout). Message processing order fix (PartyManager before RemoteCommandManager). Multi-message text block handling with `Matches()` and disbanded-first priority. |
 | **2.12.0** | **Party Wait Coordination** — Party members coordinate rest stops via `@Wait`/`@Ok` telepaths. Leader pauses walking when followers need rest, resumes when all send `@Ok`. Proactive health threshold monitoring pauses for low-HP members. Configurable timeout (default 2m). `RemoteCommandManager` recognizes `@wait`/`@ok` (bypasses permission check), fires events wired to `PartyManager`. Follower auto-sends `@Wait` on rest/meditate via `HealthManager.OnHealthActionChanged`. Three new settings: Ignore party @Wait, health threshold %, wait timeout minutes. |
 | **2.11.0** | **Health/Mana Management + ALL OFF Toggle + Session Messages** — New `HealthManager` with 7-priority evaluation chain (hang/run/meditate/rest/stop), two-threshold hysteresis, `_restingForMana` tracking, post-combat delay, deferred eval timer. ALL OFF toggle gates HealthManager and PartyManager auto-par. ANSI-colored session ended/lost/hangup messages on game terminal with forced repaint. |
 | **2.10.0** | **TextBlock Teleport Exits + Level/Class/Race Restrictions + Remote Actions + Blocking Reasons UI** — Pass 4 parses CMD TextBlocks into virtual Teleport exits (1,071 rooms with CMD). Level/class/race restrictions on directional exits with typed model classes and `IsSatisfiedBy()`. `RemoteActionPathExpander` linearizes multi-room prerequisite sequences. Blocking reasons UI shows specific conditions (items, levels, classes, stats, teleport conditions) when no eligible path exists. Item name resolution from Items.json. `includeAllExits` BFS flag for diagnostic paths. |
