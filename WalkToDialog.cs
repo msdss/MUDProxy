@@ -708,7 +708,21 @@ public class WalkToDialog : Form
         {
             var data = exit.MultiActionData;
             if (data != null && data.HasItemRequirements)
-                return "Multi-action (requires items)";
+            {
+                // Show specific item names when possible
+                var itemActions = data.Actions.Where(a => a.RequiresItem && a.RequiredItemId > 0).ToList();
+                if (itemActions.Count > 0)
+                {
+                    var itemNames = itemActions.Select(a =>
+                    {
+                        var name = graph.GetItemName(a.RequiredItemId);
+                        return !string.IsNullOrEmpty(name) ? name : $"item #{a.RequiredItemId}";
+                    }).Distinct().ToList();
+                    var itemList = string.Join(", ", itemNames);
+                    return $"Requires item: {itemList} (not in inventory)";
+                }
+                return "Multi-action (requires items — not in inventory)";
+            }
             if (data != null && data.HasRemoteActions)
                 return "Multi-action (remote actions not reachable)";
             return "Multi-action (deferred)";

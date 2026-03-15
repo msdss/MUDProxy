@@ -209,13 +209,15 @@ public class PlayerStateManager
             _isExiting = false;
             _logMessage("🎮 Player re-entered game - automation resumed");
             
-            // Refresh character state (party, stats, exp may have changed)
+            // Refresh character state (party, stats, exp, inventory may have changed)
             Task.Run(async () =>
             {
                 await Task.Delay(500);
                 _sendCommand("stat");
                 await Task.Delay(500);
                 _sendCommand("exp");
+                await Task.Delay(500);
+                _sendCommand("i");
             });
         }
         // If we see the HP prompt, we're back in the game
@@ -232,6 +234,8 @@ public class PlayerStateManager
                 _sendCommand("stat");
                 await Task.Delay(500);
                 _sendCommand("exp");
+                await Task.Delay(500);
+                _sendCommand("i");
             });
         }
         
@@ -249,6 +253,8 @@ public class PlayerStateManager
                 _sendCommand("stat");
                 await Task.Delay(500);
                 _sendCommand("exp");
+                await Task.Delay(500);
+                _sendCommand("i");
             });
         }
         

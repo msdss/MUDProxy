@@ -24,6 +24,8 @@ public class RemoteCommandManager
     private readonly Action<bool> _setBuffEnabled;
     private Func<string, bool>? _isPartyMember;
     public void SetPartyMemberCheck(Func<string, bool> isPartyMember) => _isPartyMember = isPartyMember;
+    private Func<string, string?>? _tryJoinParty;
+    public void SetJoinPartyHandler(Func<string, string?> tryJoinParty) => _tryJoinParty = tryJoinParty;
     
     // Experience tracking delegates
     private readonly Func<int> _getLevel;
@@ -208,7 +210,6 @@ public class RemoteCommandManager
             OnOkCommandReceived?.Invoke(senderName);
             return;
         }
-
         // Only process known commands - ignore user-defined messages like @diseased
         if (!IsKnownCommand(command))
         {
@@ -275,8 +276,7 @@ public class RemoteCommandManager
                 break;
                 
             case "@join":
-                // @join is sent TO other players, not a command we process
-                OnLogMessage?.Invoke($"📡 Ignoring @join (outbound command)");
+                HandleJoinRequest(senderName, player);
                 break;
         }
     }
@@ -305,7 +305,7 @@ public class RemoteCommandManager
             "@hangup" => true,
             "@relog" => true,
             "@divert" => true,
-            "@join" => true,  // Known but ignored (outbound)
+            "@join" => true,  // Party join (requires ExecuteCommands permission)
             "@wait" => true,  // Party coordination (handled before permission check)
             "@ok" => true,    // Party coordination (handled before permission check)
             _ => false
@@ -371,11 +371,29 @@ public class RemoteCommandManager
     {
         if (!HasPermission(player, p => p.RequestInvite, senderName))
             return;
-        
+
         OnLogMessage?.Invoke($"📡 Inviting {senderName} to party");
         OnSendCommand?.Invoke($"invite {senderName}");
     }
-    
+
+    private void HandleJoinRequest(string senderName, PlayerData? player)
+    {
+        if (!HasPermission(player, p => p.ExecuteCommands, senderName))
+            return;
+
+        var errorMessage = _tryJoinParty?.Invoke(senderName);
+        if (errorMessage != null)
+        {
+            OnLogMessage?.Invoke($"📡 Cannot join {senderName}'s party: {errorMessage}");
+            SendResponse(senderName, errorMessage);
+        }
+        else
+        {
+            OnLogMessage?.Invoke($"📡 Joining {senderName}'s party via @join");
+            SendResponse(senderName, "Ok");
+        }
+    }
+
     private void HandleExecuteCommand(string senderName, PlayerData? player, string commandToExecute)
     {
         if (!HasPermission(player, p => p.ExecuteCommands, senderName))

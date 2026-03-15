@@ -21,6 +21,7 @@ public class SettingsDialog : Form
     private CheckBox _ignorePartyWaitCheckBox = null!;
     private NumericUpDown _partyWaitHealthThresholdNumeric = null!;
     private NumericUpDown _partyWaitTimeoutNumeric = null!;
+    private NumericUpDown _autoInviteWaitNumeric = null!;
 
     // Buff tab controls
     private CheckBox _buffWhileRestingCheckBox = null!;
@@ -101,7 +102,7 @@ public class SettingsDialog : Form
     private void InitializeComponent()
     {
         this.Text = "Settings";
-        this.Size = new Size(600, 580);
+        this.Size = new Size(600, 680);
         this.FormBorderStyle = FormBorderStyle.FixedDialog;
         this.StartPosition = FormStartPosition.CenterParent;
         this.MaximizeBox = false;
@@ -112,7 +113,7 @@ public class SettingsDialog : Form
         _tabControl = new TabControl
         {
             Location = new Point(10, 10),
-            Size = new Size(565, 480),
+            Size = new Size(565, 580),
             Font = new Font("Segoe UI", 9)
         };
         
@@ -135,7 +136,7 @@ public class SettingsDialog : Form
         {
             Text = "Save",
             Size = new Size(80, 30),
-            Location = new Point(405, 500),
+            Location = new Point(405, 600),
             BackColor = Color.FromArgb(0, 100, 0),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
@@ -150,7 +151,7 @@ public class SettingsDialog : Form
         {
             Text = "Cancel",
             Size = new Size(80, 30),
-            Location = new Point(495, 500),
+            Location = new Point(495, 600),
             BackColor = Color.FromArgb(60, 60, 60),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
@@ -1069,6 +1070,61 @@ public class SettingsDialog : Form
             Font = new Font("Segoe UI", 8)
         };
         tab.Controls.Add(healthHint);
+        y += 45;
+
+        // ── Auto-Invite section ──
+        var inviteSectionLabel = new Label
+        {
+            Text = "Auto-Invite",
+            Location = new Point(20, y),
+            AutoSize = true,
+            ForeColor = Color.White,
+            Font = new Font("Segoe UI", 9, FontStyle.Bold)
+        };
+        tab.Controls.Add(inviteSectionLabel);
+        y += 25;
+
+        var inviteWaitLabel = new Label
+        {
+            Text = "Wait for player to join",
+            Location = new Point(20, y + 3),
+            AutoSize = true,
+            ForeColor = Color.White
+        };
+        tab.Controls.Add(inviteWaitLabel);
+
+        _autoInviteWaitNumeric = new NumericUpDown
+        {
+            Location = new Point(180, y),
+            Size = new Size(55, 25),
+            Minimum = 0,
+            Maximum = 60,
+            Value = _gameManager.PartyManager.AutoInviteWaitSeconds,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White
+        };
+        tab.Controls.Add(_autoInviteWaitNumeric);
+
+        var inviteWaitSecondsLabel = new Label
+        {
+            Text = "secs (0=don't wait)",
+            Location = new Point(240, y + 3),
+            AutoSize = true,
+            ForeColor = Color.White
+        };
+        tab.Controls.Add(inviteWaitSecondsLabel);
+        y += 30;
+
+        var inviteWaitHint = new Label
+        {
+            Text = "Pauses walking/looping after auto-inviting a player,\n" +
+                   "giving them time to join before moving on.",
+            Location = new Point(40, y),
+            AutoSize = true,
+            ForeColor = Color.FromArgb(150, 150, 150),
+            Font = new Font("Segoe UI", 8)
+        };
+        tab.Controls.Add(inviteWaitHint);
         y += 45;
 
         // ── Party Wait System section ──
@@ -2083,6 +2139,7 @@ public class SettingsDialog : Form
         _gameManager.PartyManager.IgnorePartyWait = _ignorePartyWaitCheckBox.Checked;
         _gameManager.PartyManager.PartyWaitHealthThreshold = (int)_partyWaitHealthThresholdNumeric.Value;
         _gameManager.PartyManager.PartyWaitTimeoutMinutes = (int)_partyWaitTimeoutNumeric.Value;
+        _gameManager.PartyManager.AutoInviteWaitSeconds = (int)_autoInviteWaitNumeric.Value;
     }
     
     private void SaveCurePriorityOrder()

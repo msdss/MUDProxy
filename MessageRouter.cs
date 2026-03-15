@@ -112,12 +112,25 @@ public class MessageRouter
                 _partialLine = lines[i];
                 break;
             }
-            _gameManager.RoomTracker.ProcessLine(lines[i].TrimEnd('\r'));
+
+            var completeLine = lines[i].TrimEnd('\r');
+
+            // Inventory capture: intercept lines BEFORE RoomTracker.
+            // When InventoryManager is capturing multi-line inventory output,
+            // it returns true to consume the line and prevent it from
+            // contaminating room detection. Incremental single-line messages
+            // (pickup/drop/equip) return false so other managers still see them.
+            if (_gameManager.InventoryManager.ProcessLine(completeLine))
+                continue;
+
+            _gameManager.RoomTracker.ProcessLine(completeLine);
         }
         
         // --- Dispatch to sub-managers ---
-        _gameManager.RemoteCommandManager.ProcessMessage(text);
+        // PartyManager must run BEFORE RemoteCommandManager so that party state
+        // (isInParty, isPartyLeader) is up-to-date when @join/@wait/@ok are processed.
         _gameManager.PartyManager.ProcessMessage(text);
+        _gameManager.RemoteCommandManager.ProcessMessage(text);
         _gameManager.PlayerStateManager.ProcessMessage(text);
         _gameManager.CureManager.ProcessMessage(text, _gameManager.PartyManager.PartyMembers.ToList());
         _gameManager.PlayerDatabase.ProcessMessage(text);
