@@ -26,6 +26,8 @@ public class AutoWalkManager
     private readonly Func<bool> _shouldPauseCommands;    // GameManager.ShouldPauseCommands
     private Func<bool>? _shouldPauseForHealth;           // HealthManager.ShouldPauseWalking
     private Func<bool>? _shouldPauseForPartyWait;       // PartyManager.ShouldPauseForPartyWait
+    private Func<bool>? _shouldPauseForInviteWait;     // PartyManager.ShouldPauseForInviteWait
+    private Func<bool>? _isFollower;                     // PartyManager.IsFollower
     private readonly Action _clearRoomEnemies;            // CombatManager.ClearEnemyList
     private readonly Action _clearAlsoHereDedup;          // CombatManager.ClearAlsoHereDedup
     private readonly Func<bool> _usePicklock;             // NavigationSettings.UsePicklockInsteadOfBash
@@ -195,6 +197,25 @@ public class AutoWalkManager
     }
 
     /// <summary>
+    /// Set the auto-invite wait pause delegate. Called by GameManager after PartyManager is created.
+    /// When true, walking pauses while we wait for an auto-invited player to join.
+    /// </summary>
+    public void SetInviteWaitPauseCheck(Func<bool> shouldPauseForInviteWait)
+    {
+        _shouldPauseForInviteWait = shouldPauseForInviteWait;
+    }
+
+    /// <summary>
+    /// Set the follower-state delegate. When true, StartWalk() refuses to begin.
+    /// This is NOT a pause — followers are blocked from starting walks entirely.
+    /// Active walks are aborted externally by GameManager when the player becomes a follower.
+    /// </summary>
+    public void SetFollowerCheck(Func<bool> isFollower)
+    {
+        _isFollower = isFollower;
+    }
+
+    /// <summary>
     /// Exposes the steps and current index for backtrack-flee logic.
     /// </summary>
     public IReadOnlyList<PathStep> Steps => _steps.AsReadOnly();
@@ -209,6 +230,13 @@ public class AutoWalkManager
     /// </summary>
     public bool StartWalk(PathResult path, WalkMode mode = WalkMode.Normal)
     {
+        if (_isFollower?.Invoke() == true)
+        {
+            _logMessage("🚫 Cannot start auto-walk — currently following a party leader");
+            OnWalkFailed?.Invoke("Cannot auto-walk while following a party leader.");
+            return false;
+        }
+
         if (path == null || !path.Success || path.Steps.Count == 0)
         {
             OnWalkFailed?.Invoke("No valid path to walk.");
@@ -464,6 +492,15 @@ public class AutoWalkManager
         if (_shouldPauseForPartyWait?.Invoke() == true)
         {
             _logMessage("⏸️ Auto-walk paused — waiting for party members");
+            SetState(AutoWalkState.Paused);
+            StartPausePollTimer();
+            return;
+        }
+
+        // Check if paused for auto-invite wait (waiting for invited player to join)
+        if (_shouldPauseForInviteWait?.Invoke() == true)
+        {
+            _logMessage("⏸️ Auto-walk paused — waiting for invited player to join");
             SetState(AutoWalkState.Paused);
             StartPausePollTimer();
             return;
@@ -1395,7 +1432,8 @@ public class AutoWalkManager
 
         if (!_shouldPauseCommands() &&
             _shouldPauseForHealth?.Invoke() != true &&
-            _shouldPauseForPartyWait?.Invoke() != true)
+            _shouldPauseForPartyWait?.Invoke() != true &&
+            _shouldPauseForInviteWait?.Invoke() != true)
         {
             StopPausePollTimer();
             OnLogMessage?.Invoke("▶️ Auto-walk resuming — commands unpaused");

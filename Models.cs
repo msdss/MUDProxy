@@ -668,6 +668,7 @@ public class CharacterProfile
     public bool IgnorePartyWait { get; set; } = false;
     public int PartyWaitHealthThreshold { get; set; } = 0;   // 0 = disabled
     public int PartyWaitTimeoutMinutes { get; set; } = 2;    // 0 = unlimited
+    public int AutoInviteWaitSeconds { get; set; } = 15;    // 0 = disabled
 
     public int ManaReservePercent { get; set; } = 20;
     public bool BuffWhileResting { get; set; } = false;
@@ -683,6 +684,9 @@ public class CharacterProfile
     // Window layout (per-character)
     public WindowSettings? WindowSettings { get; set; }
     
+    // Inventory state (persisted for item-gated exit checks between sessions)
+    public InventoryState InventoryState { get; set; } = new();
+
     // Last known room (for position recovery on app restart)
     public string LastRoomKey { get; set; } = string.Empty;
     
@@ -1242,18 +1246,19 @@ public class MultiActionExitData
 
     /// <summary>
     /// Whether this exit can be automated as a same-room multi-action exit:
-    /// no remote actions, no item requirements, and all actions have valid commands.
+    /// no remote actions, and all actions have valid commands.
+    /// Item requirements are checked at runtime via GetExitFilter() (Phase 6 inventory tracking).
     /// </summary>
     public bool IsAutomatable =>
         !HasRemoteActions
-        && !HasItemRequirements
         && Actions.Count > 0
         && Actions.All(a => a.Commands.Count > 0);
 
     /// <summary>
     /// Whether this exit can be automated as a remote-action exit:
-    /// has remote actions, no item requirements, all actions have valid commands,
-    /// and all prerequisite rooms are reachable. Set during Pass 2b graph building.
+    /// has remote actions, all actions have valid commands, and all prerequisite
+    /// rooms are reachable. Set during Pass 2b graph building.
+    /// Item requirements are checked at runtime via GetExitFilter() (Phase 6 inventory tracking).
     /// </summary>
     public bool IsRemoteActionAutomatable { get; set; }
 }
@@ -1401,4 +1406,79 @@ public class PathRequirements
 
     /// <summary>True if any step uses a TextBlock teleport exit.</summary>
     public bool HasTeleportExits { get; set; } = false;
+}
+
+// ── Inventory Tracking ──────────────────────────────────────────────────
+
+/// <summary>
+/// A single item in the player's inventory.
+/// Represents equipped gear, carried items, or keys.
+/// </summary>
+public class InventoryItem
+{
+    /// <summary>Item name as displayed in inventory (e.g., "rope and grapple", "black silk robes").</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>How many of this item the player is carrying (e.g., "2 rope and grapple" → 2).</summary>
+    public int Quantity { get; set; } = 1;
+
+    /// <summary>
+    /// Equipment slot if worn (e.g., "Head", "Finger", "Weapon Hand"), or null if not equipped.
+    /// Valid slots: Head, Ears, Face, Neck, Back, Torso, Arms, Wrist, Hands, Finger,
+    /// Waist, Legs, Feet, Worn, Off-Hand, Weapon Hand.
+    /// </summary>
+    public string? EquippedSlot { get; set; }
+
+    /// <summary>True if this item appears in the keys section of inventory.</summary>
+    public bool IsKey { get; set; }
+}
+
+/// <summary>
+/// Breakdown of currency the player is carrying.
+/// Each field is a count of that coin type, not its value.
+/// </summary>
+public class CurrencyState
+{
+    public int RunicCoins { get; set; }
+    public int PlatinumPieces { get; set; }
+    public int GoldCrowns { get; set; }
+    public int SilverNobles { get; set; }
+    public int CopperFarthings { get; set; }
+
+    /// <summary>Total wealth in copper farthings as reported by the "Wealth:" line.</summary>
+    public long TotalWealthInCopper { get; set; }
+}
+
+/// <summary>
+/// Player's current carry weight and capacity.
+/// </summary>
+public class EncumbranceState
+{
+    /// <summary>Current carry weight.</summary>
+    public int CurrentWeight { get; set; }
+
+    /// <summary>Maximum carry weight capacity.</summary>
+    public int MaxWeight { get; set; }
+
+    /// <summary>Encumbrance as a percentage (0–100).</summary>
+    public int Percentage { get; set; }
+
+    /// <summary>Descriptive category: "None", "Light", "Medium", or "Heavy".</summary>
+    public string Category { get; set; } = "None";
+}
+
+/// <summary>
+/// Complete snapshot of the player's inventory at a point in time.
+/// Populated by parsing the output of the 'i' command.
+/// </summary>
+public class InventoryState
+{
+    public CurrencyState Currency { get; set; } = new();
+    public List<InventoryItem> EquippedItems { get; set; } = new();
+    public List<InventoryItem> CarriedItems { get; set; } = new();
+    public List<InventoryItem> Keys { get; set; } = new();
+    public EncumbranceState Encumbrance { get; set; } = new();
+
+    /// <summary>When this snapshot was last updated (DateTime.MinValue = never).</summary>
+    public DateTime LastUpdated { get; set; } = DateTime.MinValue;
 }

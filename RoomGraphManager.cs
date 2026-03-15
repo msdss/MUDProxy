@@ -459,11 +459,11 @@ public class RoomGraphManager
             exit.Traversable = true;
         }
         else if (data.HasRemoteActions
-                 && !data.HasItemRequirements
                  && data.Actions.Count > 0
                  && data.Actions.All(a => a.Commands.Count > 0))
         {
             // Check if all prerequisite rooms are reachable
+            // (Item requirements are checked at runtime via GetExitFilter — Phase 6 inventory tracking)
             var remoteActions = data.Actions.Where(a => a.ActionRoomKey != null).ToList();
             bool allReachable = remoteActions.All(a =>
                 _rooms.ContainsKey(a.ActionRoomKey!) && FindPath(ov.RoomKey, a.ActionRoomKey!).Success);
@@ -1037,11 +1037,11 @@ public class RoomGraphManager
                     multiActionTraversable++;
                 }
                 else if (data.HasRemoteActions
-                         && !data.HasItemRequirements
                          && data.Actions.Count > 0
                          && data.Actions.All(a => a.Commands.Count > 0))
                 {
                     // Remote-action exit: check if ALL prerequisite rooms are reachable
+                    // (Item requirements are checked at runtime via GetExitFilter — Phase 6 inventory tracking)
                     var remoteActions = data.Actions.Where(a => a.ActionRoomKey != null).ToList();
                     bool allReachable = remoteActions.All(a => FindPath(room.Key, a.ActionRoomKey!).Success);
 

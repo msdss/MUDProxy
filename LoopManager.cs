@@ -24,6 +24,7 @@ public class LoopManager
     private readonly RoomTracker _roomTracker;
     private readonly ExperienceTracker _experienceTracker;
     private readonly Action<string> _logMessage;
+    private Func<bool>? _isFollower;                     // PartyManager.IsFollower
 
     // ── Debug logging ──
     private DebugLogWriter? _debugLog;
@@ -102,6 +103,14 @@ public class LoopManager
     #endregion
 
     #region Public API
+
+    /// <summary>
+    /// Set the follower-state delegate. When true, Start() refuses to begin.
+    /// </summary>
+    public void SetFollowerCheck(Func<bool> isFollower)
+    {
+        _isFollower = isFollower;
+    }
 
     /// <summary>
     /// Validate a loop definition against the room graph.
@@ -198,6 +207,13 @@ public class LoopManager
     /// </summary>
     public bool Start(LoopDefinition loop)
     {
+        if (_isFollower?.Invoke() == true)
+        {
+            _logMessage("🚫 Cannot start loop — currently following a party leader");
+            OnLoopFailed?.Invoke("Cannot run loops while following a party leader.");
+            return false;
+        }
+
         if (IsActive)
         {
             _logMessage("⚠️ Loop already active — stop it first.");

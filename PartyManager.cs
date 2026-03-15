@@ -34,6 +34,17 @@ public class PartyManager
     private int _healthRequestIntervalSeconds = 60;
     private DateTime _lastHealthRequestCheck = DateTime.MinValue;
 
+    // Auto-invite cooldown — prevents spamming invite/@join on rapid room scans
+    private readonly Dictionary<string, DateTime> _recentlyInvited = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan InviteCooldown = TimeSpan.FromSeconds(30);
+
+    // Auto-invite wait state — pauses walking while waiting for invited players to join
+    private readonly HashSet<string> _pendingInviteJoins = new(StringComparer.OrdinalIgnoreCase);
+    private System.Timers.Timer? _inviteWaitTimer;
+
+    // Auto-invite wait setting (persisted via character profile)
+    private int _autoInviteWaitSeconds = 15;
+
     // Party wait system state
     private string _partyLeaderName = string.Empty;
     private readonly HashSet<string> _waitingMembers = new(StringComparer.OrdinalIgnoreCase);
@@ -49,6 +60,7 @@ public class PartyManager
     public event Action? OnPartyChanged;
     public event Action<IEnumerable<string>>? OnPartyMembersRemoved;  // Names of removed members
     public event Action<IReadOnlyList<PartyMember>>? OnPartyUpdated;  // Full party list after update
+    public event Action? OnBecameFollower;  // Fires when we join another player's party as follower
     
     // Regex patterns for party detection
     private static readonly Regex PartyMemberRegex = new(
@@ -154,7 +166,25 @@ public class PartyManager
         set => _partyWaitTimeoutMinutes = Math.Clamp(value, 0, 60);
     }
 
+    public int AutoInviteWaitSeconds
+    {
+        get => _autoInviteWaitSeconds;
+        set => _autoInviteWaitSeconds = Math.Clamp(value, 0, 60);  // 0 = disabled
+    }
+
+    /// <summary>
+    /// Returns true when walking should be paused because we auto-invited
+    /// a player and are waiting for them to join.
+    /// </summary>
+    public bool ShouldPauseForInviteWait => _pendingInviteJoins.Count > 0;
+
     public bool IsPartyLeader => _isPartyLeader;
+
+    /// <summary>True when in a party but NOT the leader (following someone).</summary>
+    public bool IsFollower => _isInParty && !_isPartyLeader;
+
+    /// <summary>Name of the party leader we are following. Empty when solo or leading.</summary>
+    public string PartyLeaderName => _partyLeaderName;
 
     /// <summary>
     /// Returns true when walking should be paused because we're the leader
@@ -369,18 +399,35 @@ public class PartyManager
     #region Party Membership Changes
     
     /// <summary>
-    /// Check if message contains a party invitation and auto-join if player has that option enabled
+    /// Check if message contains a party invitation and auto-join if player has that option enabled.
+    /// Party-aware: declines with explanation if already in a party.
     /// </summary>
     private void CheckPartyInvitation(string message)
     {
         var match = PartyInviteRegex.Match(message);
         if (!match.Success)
             return;
-        
+
         var inviterName = match.Groups[1].Value;
         _logMessage($"👥 Party invitation received from {inviterName}");
-        
-        // Check if this player is in our database with JoinPartyIfInvited enabled
+
+        // If we're already a follower, decline with explanation
+        if (_isInParty && !_isPartyLeader)
+        {
+            _logMessage($"👥 Declining invite from {inviterName} (following {_partyLeaderName})");
+            _sendCommand($"/{inviterName} {{Unable to join, following {_partyLeaderName}}}");
+            return;
+        }
+
+        // If we're already a leader, decline with explanation
+        if (_isInParty && _isPartyLeader)
+        {
+            _logMessage($"👥 Declining invite from {inviterName} (leading a party)");
+            _sendCommand($"/{inviterName} {{Unable to join, I'm leading a party}}");
+            return;
+        }
+
+        // Not in a party — check if auto-join is enabled for this player
         var playerDb = _getPlayerDb();
         var player = playerDb.GetPlayer(inviterName);
         if (player != null && player.JoinPartyIfInvited)
@@ -407,9 +454,10 @@ public class PartyManager
             _requestHealthAfterPartyUpdate = true;
             _logMessage($"👥 Joined party - now following {leaderName}");
             if (_parAutoEnabled) _sendCommand("par");
+            OnBecameFollower?.Invoke();
             return;
         }
-        
+
         // Check if someone started following us (they joined our party)
         if (SomeoneFollowingYouRegex.IsMatch(message))
         {
@@ -418,7 +466,7 @@ public class PartyManager
             var wasInParty = _isInParty;
             _isInParty = true;
             _isPartyLeader = true;
-            
+
             if (!wasInParty)
             {
                 _logMessage($"👥 Party formed - {followerName} is now following you");
@@ -428,48 +476,87 @@ public class PartyManager
                 _logMessage($"👥 {followerName} joined the party");
             }
             if (_parAutoEnabled) _sendCommand("par");
-            
+
             // Request health from the new party member immediately
             RequestHealthFromPlayer(followerName);
+
+            // Clear invite-wait pause if this player was pending
+            if (_pendingInviteJoins.Remove(followerName))
+            {
+                _logMessage($"▶️ {followerName} joined — invite wait cleared");
+                if (_pendingInviteJoins.Count == 0) StopInviteWaitTimeout();
+            }
             return;
         }
-        
-        // Check if someone left our party
-        if (SomeoneLeftPartyRegex.IsMatch(message))
+
+        // Check disbanded FIRST — when disbanding, the server sends individual
+        // "X is no longer following you." lines AND "Your party has been disbanded."
+        // in the same text block. Disbanded is comprehensive and supersedes individual leaves.
+        if (PartyDisbandedRegex.IsMatch(message))
         {
-            var match = SomeoneLeftPartyRegex.Match(message);
-            var followerName = match.Groups[1].Value;
-            _logMessage($"👥 {followerName} left the party");
-            _partyMembers.RemoveAll(m => m.Name.Equals(followerName, StringComparison.OrdinalIgnoreCase));
-            _waitingMembers.Remove(followerName);
+            _isInParty = false;
+            _isPartyLeader = false;
+            _partyLeaderName = string.Empty;
+            _followerWaitSent = false;
+            _waitingMembers.Clear();
+            StopWaitTimeout();
+            _pendingInviteJoins.Clear();
+            StopInviteWaitTimeout();
+            _partyMembers.Clear();
+            OnPartyChanged?.Invoke();
+            _logMessage("👤 Party disbanded - now solo");
+            return;
+        }
+
+        // Check if someone left our party — use Matches() to handle multiple
+        // leaves in the same text block (e.g., multiple followers leaving at once)
+        var leftMatches = SomeoneLeftPartyRegex.Matches(message);
+        if (leftMatches.Count > 0)
+        {
+            var removedNames = new List<string>();
+            foreach (System.Text.RegularExpressions.Match match in leftMatches)
+            {
+                var followerName = match.Groups[1].Value;
+                _logMessage($"👥 {followerName} left the party");
+                _partyMembers.RemoveAll(m => m.Name.Equals(followerName, StringComparison.OrdinalIgnoreCase));
+                _waitingMembers.Remove(followerName);
+                removedNames.Add(followerName);
+            }
             if (_waitingMembers.Count == 0) StopWaitTimeout();
             if (_partyMembers.Count == 0)
             {
                 _isInParty = false;
+                _isPartyLeader = false;
             }
-            OnPartyMembersRemoved?.Invoke(new List<string> { followerName });
+            OnPartyMembersRemoved?.Invoke(removedNames);
             OnPartyChanged?.Invoke();
             return;
         }
 
-        // Check if we kicked someone from our party
-        if (SomeoneRemovedFromPartyRegex.IsMatch(message))
+        // Check if we kicked someone from our party — use Matches() for multiple removals
+        var removedMatches = SomeoneRemovedFromPartyRegex.Matches(message);
+        if (removedMatches.Count > 0)
         {
-            var match = SomeoneRemovedFromPartyRegex.Match(message);
-            var followerName = match.Groups[1].Value;
-            _logMessage($"👥 {followerName} was removed from the party");
-            _partyMembers.RemoveAll(m => m.Name.Equals(followerName, StringComparison.OrdinalIgnoreCase));
-            _waitingMembers.Remove(followerName);
+            var removedNames = new List<string>();
+            foreach (System.Text.RegularExpressions.Match match in removedMatches)
+            {
+                var followerName = match.Groups[1].Value;
+                _logMessage($"👥 {followerName} was removed from the party");
+                _partyMembers.RemoveAll(m => m.Name.Equals(followerName, StringComparison.OrdinalIgnoreCase));
+                _waitingMembers.Remove(followerName);
+                removedNames.Add(followerName);
+            }
             if (_waitingMembers.Count == 0) StopWaitTimeout();
             if (_partyMembers.Count == 0)
             {
                 _isInParty = false;
+                _isPartyLeader = false;
             }
-            OnPartyMembersRemoved?.Invoke(new List<string> { followerName });
+            OnPartyMembersRemoved?.Invoke(removedNames);
             OnPartyChanged?.Invoke();
             return;
         }
-        
+
         // Check if we left someone else's party (now solo)
         if (YouLeftPartyRegex.IsMatch(message))
         {
@@ -484,22 +571,7 @@ public class PartyManager
             _logMessage($"👤 Left {leaderName}'s party - now solo");
             return;
         }
-        
-        // Check if party was disbanded
-        if (PartyDisbandedRegex.IsMatch(message))
-        {
-            _isInParty = false;
-            _isPartyLeader = false;
-            _partyLeaderName = string.Empty;
-            _followerWaitSent = false;
-            _waitingMembers.Clear();
-            StopWaitTimeout();
-            _partyMembers.Clear();
-            OnPartyChanged?.Invoke();
-            _logMessage("👤 Party disbanded - now solo");
-            return;
-        }
-        
+
         // Legacy detection
         if (message.Contains("You have invited") && message.Contains("to follow you"))
         {
@@ -510,35 +582,81 @@ public class PartyManager
     
     #endregion
     
-    #region Auto-Invite
-    
+    #region Auto-Invite / Auto-Join
+
+    /// <summary>
+    /// Attempt to join a player's party via @join remote command.
+    /// Returns null on success (join command sent), or an error message string
+    /// to relay back to the requester. Does NOT check JoinPartyIfInvited —
+    /// that flag is for MUD invite messages only. Permission checking
+    /// (ExecuteCommands) is the caller's responsibility.
+    /// </summary>
+    public string? TryJoinParty(string senderName)
+    {
+        if (_isInParty && !_isPartyLeader)
+        {
+            _logMessage($"👥 Cannot join {senderName}'s party (already following {_partyLeaderName})");
+            return $"Unable to join, following {_partyLeaderName}";
+        }
+
+        if (_isPartyLeader)
+        {
+            _logMessage($"👥 Cannot join {senderName}'s party (we are a party leader)");
+            return "Unable to join, I'm leading a party";
+        }
+
+        _logMessage($"👥 Joining {senderName}'s party (via @join)");
+        _sendCommand($"join {senderName}");
+        return null;
+    }
+
     /// <summary>
     /// Check "Also here:" content for players that should be auto-invited.
     /// Called from CombatManager when it parses room contents.
     /// </summary>
     public void CheckAutoInvitePlayers(IEnumerable<string> playersInRoom)
     {
+        // Followers don't invite — only leaders or solo players can
+        if (_isInParty && !_isPartyLeader)
+            return;
+
         var playerDb = _getPlayerDb();
         
+        // Clean up expired cooldowns
+        var now = DateTime.Now;
+        var expired = _recentlyInvited.Where(kvp => now - kvp.Value > InviteCooldown).Select(kvp => kvp.Key).ToList();
+        foreach (var key in expired) _recentlyInvited.Remove(key);
+
         foreach (var playerName in playersInRoom)
         {
             // Extract first name
             var firstName = playerName.Split(' ')[0].Trim();
             if (firstName.Contains("("))
                 firstName = firstName.Split('(')[0].Trim();
-            
+
             var player = playerDb.GetPlayer(firstName);
             if (player != null && player.InviteToPartyIfSeen)
             {
                 // Check if already in party
-                var inParty = _partyMembers.Any(m => 
+                var inParty = _partyMembers.Any(m =>
                     m.Name.StartsWith(firstName, StringComparison.OrdinalIgnoreCase));
-                
-                if (!inParty)
+
+                // Check invite cooldown — prevents spam on rapid room scans
+                var onCooldown = _recentlyInvited.ContainsKey(firstName);
+
+                if (!inParty && !onCooldown)
                 {
                     _logMessage($"👥 Auto-inviting {firstName} to party (seen in room)");
                     _sendCommand($"invite {firstName}");
                     _sendCommand($"/{firstName} @join");
+                    _recentlyInvited[firstName] = now;
+
+                    // Track pending join for invite-wait pause (pauses walking until they join or timeout)
+                    if (_autoInviteWaitSeconds > 0)
+                    {
+                        _pendingInviteJoins.Add(firstName);
+                        StartInviteWaitTimeoutIfNeeded();
+                    }
                 }
             }
         }
@@ -757,7 +875,8 @@ public class PartyManager
     /// </summary>
     public void LoadFromProfile(bool parAutoEnabled, int parFrequencySeconds, bool parAfterCombatTick,
         bool healthRequestEnabled, int healthRequestIntervalSeconds,
-        bool ignorePartyWait, int partyWaitHealthThreshold, int partyWaitTimeoutMinutes)
+        bool ignorePartyWait, int partyWaitHealthThreshold, int partyWaitTimeoutMinutes,
+        int autoInviteWaitSeconds)
     {
         _parAutoEnabled = parAutoEnabled;
         _parFrequencySeconds = parFrequencySeconds;
@@ -767,8 +886,9 @@ public class PartyManager
         _ignorePartyWait = ignorePartyWait;
         _partyWaitHealthThreshold = partyWaitHealthThreshold;
         _partyWaitTimeoutMinutes = partyWaitTimeoutMinutes;
+        _autoInviteWaitSeconds = autoInviteWaitSeconds;
     }
-    
+
     /// <summary>
     /// Reset settings to defaults. Called when creating a new character profile.
     /// </summary>
@@ -782,6 +902,7 @@ public class PartyManager
         _ignorePartyWait = false;
         _partyWaitHealthThreshold = 0;
         _partyWaitTimeoutMinutes = 2;
+        _autoInviteWaitSeconds = 15;
     }
 
     #endregion
@@ -883,6 +1004,32 @@ public class PartyManager
         _waitTimeoutTimer?.Stop();
         _waitTimeoutTimer?.Dispose();
         _waitTimeoutTimer = null;
+    }
+
+    private void StartInviteWaitTimeoutIfNeeded()
+    {
+        if (_autoInviteWaitSeconds <= 0 || _inviteWaitTimer != null) return;
+
+        _inviteWaitTimer = new System.Timers.Timer(_autoInviteWaitSeconds * 1000);
+        _inviteWaitTimer.AutoReset = false;
+        _inviteWaitTimer.Elapsed += (s, e) =>
+        {
+            if (_pendingInviteJoins.Count > 0)
+            {
+                _logMessage($"⏰ Auto-invite wait timeout ({_autoInviteWaitSeconds}s) — resuming walk");
+                _pendingInviteJoins.Clear();
+            }
+            StopInviteWaitTimeout();
+        };
+        _inviteWaitTimer.Start();
+        _logMessage($"⏸️ Waiting up to {_autoInviteWaitSeconds}s for invited player(s) to join");
+    }
+
+    private void StopInviteWaitTimeout()
+    {
+        _inviteWaitTimer?.Stop();
+        _inviteWaitTimer?.Dispose();
+        _inviteWaitTimer = null;
     }
 
     #endregion

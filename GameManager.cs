@@ -24,7 +24,8 @@ public class GameManager
     private readonly AutoWalkManager _autoWalkManager;
     private readonly LoopManager _loopManager;
     private readonly HealthManager _healthManager;
-    
+    private readonly InventoryManager _inventoryManager;
+
     // Events for UI updates
     public event Action? OnBuffsChanged;
     public event Action? OnPartyChanged;
@@ -37,6 +38,7 @@ public class GameManager
     public event Action? OnAutomationStateChanged;
     public event Action<bool>? OnTrainingScreenChanged;
     public event Action? OnBbsSettingsChanged;
+    public event Action? OnInventoryChanged;
     
     // Coordinator state
     private bool _commandsPaused = false;
@@ -95,6 +97,7 @@ public class GameManager
     public CastCoordinator CastCoordinator => _castCoordinator;
     public AutoWalkManager AutoWalkManager => _autoWalkManager;
     public LoopManager LoopManager => _loopManager;
+    public InventoryManager InventoryManager => _inventoryManager;
     
     /// <summary>
     /// Public helper for MessageRouter to raise log messages.
@@ -152,6 +155,25 @@ public class GameManager
             {
                 if (!exit.RaceRestriction.IsSatisfiedBy(raceId))
                     return false;
+            }
+
+            // Item requirement check — for exits gated by inventory items
+            if (exit.MultiActionData?.HasItemRequirements == true)
+            {
+                // If inventory not loaded → optimistic: allow through so paths are found.
+                // Pre-walk refresh will verify before actually executing the walk.
+                if (!_inventoryManager.IsInventoryLoaded)
+                    return true;
+
+                // Inventory loaded → check each action's required item
+                foreach (var action in exit.MultiActionData.Actions)
+                {
+                    if (action.RequiresItem && action.RequiredItemId > 0)
+                    {
+                        if (!_inventoryManager.HasItemById(action.RequiredItemId))
+                            return false;
+                    }
+                }
             }
 
             return true;
@@ -282,7 +304,8 @@ public class GameManager
         _remoteCommandManager.OnWaitCommandReceived += name => _partyManager.HandleWaitCommand(name);
         _remoteCommandManager.OnOkCommandReceived += name => _partyManager.HandleOkCommand(name);
         _remoteCommandManager.SetPartyMemberCheck(name => _partyManager.PartyMembers.Any(m => m.Name.Equals(name, StringComparison.OrdinalIgnoreCase)));
-        
+        _remoteCommandManager.SetJoinPartyHandler(name => _partyManager.TryJoinParty(name));
+
         _roomGraphManager = new RoomGraphManager();
         _roomGraphManager.OnLogMessage += msg => OnLogMessage?.Invoke(msg);
         _roomGraphManager.LoadFromGameData();
@@ -290,6 +313,14 @@ public class GameManager
         _roomTracker.OnLogMessage += msg => OnRoomTrackerLogMessage?.Invoke(msg);
         _roomTracker.OnAlsoHereDetected += content => _combatManager.ProcessAlsoHereDirect(content);
         OnSendCommand += cmd => { if (cmd != null) _roomTracker.OnCommandSent(cmd); };
+
+        // Create InventoryManager — inventory parsing, item tracking, currency
+        _inventoryManager = new InventoryManager(
+            sendCommand: cmd => OnSendCommand?.Invoke(cmd),
+            logMessage: msg => OnLogMessage?.Invoke(msg),
+            getItemNameById: id => _roomGraphManager.GetItemName(id)
+        );
+        _inventoryManager.OnInventoryChanged += () => OnInventoryChanged?.Invoke();
 
         _autoWalkManager = new AutoWalkManager(
             _roomTracker,
@@ -407,6 +438,28 @@ public class GameManager
 
         // Wire party-wait pause into AutoWalkManager (leader pauses for waiting members)
         _autoWalkManager.SetPartyWaitPauseCheck(() => _partyManager.ShouldPauseForPartyWait);
+
+        // Wire auto-invite wait pause into AutoWalkManager (pause while waiting for invited player to join)
+        _autoWalkManager.SetInviteWaitPauseCheck(() => _partyManager.ShouldPauseForInviteWait);
+
+        // Wire follower checks — followers cannot start walks or loops
+        _autoWalkManager.SetFollowerCheck(() => _partyManager.IsFollower);
+        _loopManager.SetFollowerCheck(() => _partyManager.IsFollower);
+
+        // Abort active walk/loop when becoming a follower
+        _partyManager.OnBecameFollower += () =>
+        {
+            if (_loopManager.IsActive)
+            {
+                OnLogMessage?.Invoke("🚫 Aborting loop — now following a party leader");
+                _loopManager.Stop();
+            }
+            else if (_autoWalkManager.IsActive)
+            {
+                OnLogMessage?.Invoke("🚫 Aborting walk — now following a party leader");
+                _autoWalkManager.Stop();
+            }
+        };
     }
 
     #endregion
@@ -424,6 +477,7 @@ public class GameManager
         _autoWalkManager.OnDisconnected();
         _loopManager.OnDisconnected();
         _healthManager.Reset();
+        _inventoryManager.MarkStale();
 
         OnLogMessage?.Invoke("📡 Disconnected - session state reset");
     }
@@ -435,6 +489,8 @@ public class GameManager
     /// </summary>
     public void OnLoginComplete()
     {
+        // Inventory refresh is now handled by PlayerStateManager alongside stat/exp/who commands
+
         if (_loopManager.IsActive || _autoWalkManager.State == AutoWalkState.Disconnected)
         {
             OnLogMessage?.Invoke("📡 Reconnected — waiting 5s for startup commands before resuming...");
@@ -550,10 +606,12 @@ public class GameManager
             IgnorePartyWait = _partyManager.IgnorePartyWait,
             PartyWaitHealthThreshold = _partyManager.PartyWaitHealthThreshold,
             PartyWaitTimeoutMinutes = _partyManager.PartyWaitTimeoutMinutes,
+            AutoInviteWaitSeconds = _partyManager.AutoInviteWaitSeconds,
 
             ManaReservePercent = _buffManager.ManaReservePercent,
             BuffWhileResting = _buffManager.BuffWhileResting,
             BuffWhileInCombat = _buffManager.BuffWhileInCombat,
+            InventoryState = _inventoryManager.GetInventorySnapshot(),
             NavigationSettings = _navigationSettings.Clone(),
             HealthSettings = _healthSettings.Clone(),
             WindowSettings = _windowSettings,
@@ -654,7 +712,8 @@ public class GameManager
         _partyManager.LoadFromProfile(
             profile.ParAutoEnabled, profile.ParFrequencySeconds, profile.ParAfterCombatTick,
             profile.HealthRequestEnabled, profile.HealthRequestIntervalSeconds,
-            profile.IgnorePartyWait, profile.PartyWaitHealthThreshold, profile.PartyWaitTimeoutMinutes);
+            profile.IgnorePartyWait, profile.PartyWaitHealthThreshold, profile.PartyWaitTimeoutMinutes,
+            profile.AutoInviteWaitSeconds);
         
         _buffManager.LoadSettingsFromProfile(profile.ManaReservePercent, profile.BuffWhileResting, profile.BuffWhileInCombat);
         
@@ -672,7 +731,16 @@ public class GameManager
             _healthSettings = profile.HealthSettings.Clone();
 
         _windowSettings = profile.WindowSettings;
-        
+
+        // Restore inventory state from profile
+        if (profile.InventoryState != null)
+        {
+            _inventoryManager.LoadFromState(profile.InventoryState);
+            if (profile.InventoryState.LastUpdated > DateTime.MinValue)
+                OnLogMessage?.Invoke($"📦 Restored inventory ({profile.InventoryState.EquippedItems.Count} equipped, " +
+                    $"{profile.InventoryState.CarriedItems.Count} carried, {profile.InventoryState.Keys.Count} keys)");
+        }
+
         // Restore last known room position and movement history
         if (!string.IsNullOrEmpty(profile.LastRoomKey) && _roomGraphManager.IsLoaded)
         {
