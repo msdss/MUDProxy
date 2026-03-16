@@ -782,12 +782,35 @@ public partial class MainForm : Form
         _cureToggleButton.FlatAppearance.BorderColor = Color.FromArgb(80, 80, 80);
         _cureToggleButton.Click += CureToggleButton_Click;
 
+        // Bug report snapshot button (top-right)
+        var bugReportButton = new Button
+        {
+            Text = "\U0001f41b",
+            Width = 35,
+            Height = 28,
+            BackColor = Color.FromArgb(60, 60, 60),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Font = new Font("Segoe UI", 12),
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            Cursor = Cursors.Hand
+        };
+        bugReportButton.FlatAppearance.BorderColor = Color.FromArgb(80, 80, 80);
+        bugReportButton.Click += BugReportSnapshot_Click;
+        new ToolTip().SetToolTip(bugReportButton, "Save debug snapshot for bug report");
 
         settingsPanel.Controls.AddRange(new Control[] {
             _connectButton,
             _serverAddressLabel,
-            _pauseButton, _combatToggleButton, _healToggleButton, _buffToggleButton, _cureToggleButton
+            _pauseButton, _combatToggleButton, _healToggleButton, _buffToggleButton, _cureToggleButton,
+            bugReportButton
         });
+        // Position bug button on right edge
+        settingsPanel.Resize += (s, e) =>
+        {
+            bugReportButton.Location = new Point(settingsPanel.Width - bugReportButton.Width - 10, 5);
+        };
+        bugReportButton.Location = new Point(settingsPanel.Width - bugReportButton.Width - 10, 5);
 
         // Combat info panel (right side - resizable via splitter)
         _combatPanel = new Panel
@@ -1091,30 +1114,15 @@ public partial class MainForm : Form
         clearLogLink.Click += ClearLog_Click;
         clearLogLink.MouseEnter += (s, e) => clearLogLink.ForeColor = Color.FromArgb(255, 100, 100);
         clearLogLink.MouseLeave += (s, e) => clearLogLink.ForeColor = Color.FromArgb(120, 120, 120);
-        var snapshotLogLink = new Label
-        {
-            Text = "📋 Snapshot",
-            Font = new Font("Segoe UI", 7, FontStyle.Underline),
-            ForeColor = Color.FromArgb(120, 120, 120),
-            AutoSize = true,
-            Cursor = Cursors.Hand,
-            Anchor = AnchorStyles.Top | AnchorStyles.Right
-        };
-        snapshotLogLink.Click += SnapshotLog_Click;
-        snapshotLogLink.MouseEnter += (s, e) => snapshotLogLink.ForeColor = Color.FromArgb(0, 191, 255);
-        snapshotLogLink.MouseLeave += (s, e) => snapshotLogLink.ForeColor = Color.FromArgb(120, 120, 120);
-        // Position both links right-aligned: [Snapshot] [Clear]
+        // Position Clear link right-aligned
         logHeaderPanel.Resize += (s, e) =>
         {
             clearLogLink.Location = new Point(logHeaderPanel.Width - clearLogLink.Width - 6, 3);
-            snapshotLogLink.Location = new Point(clearLogLink.Left - snapshotLogLink.Width - 8, 3);
         };
         clearLogLink.Location = new Point(logHeaderPanel.Width - clearLogLink.Width - 6, 3);
-        snapshotLogLink.Location = new Point(clearLogLink.Left - snapshotLogLink.Width - 8, 3);
         logHeaderPanel.Controls.Add(logHeaderLabel);
         logHeaderPanel.Controls.Add(_autoScrollLogsCheckBox);
         logHeaderPanel.Controls.Add(_showTimestampsCheckBox);
-        logHeaderPanel.Controls.Add(snapshotLogLink);
         logHeaderPanel.Controls.Add(clearLogLink);
         
         // System log text box (bottom panel)

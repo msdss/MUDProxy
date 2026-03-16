@@ -157,58 +157,85 @@ public partial class MainForm
         _systemLogTextBox.Clear();
     }
 
-    private void SnapshotLog_Click(object? sender, EventArgs e)
+    /// <summary>
+    /// Captures game log + system log into a StringBuilder and saves to Desktop.
+    /// Returns the file path on success, or null on failure.
+    /// </summary>
+    private string? TakeDebugSnapshot()
+    {
+        var sb = new System.Text.StringBuilder();
+
+        // Game log: last 100 lines from ScreenBuffer scrollback
+        sb.AppendLine("=== GAME LOG (last 100 lines) ===");
+        var snapshot = _screenBuffer.GetScrollbackSnapshot();
+        int gameSkip = Math.Max(0, snapshot.Count - 100);
+        for (int i = gameSkip; i < snapshot.Count; i++)
+        {
+            var cells = snapshot[i];
+            // Find last non-blank character to trim trailing whitespace
+            int lastNonSpace = -1;
+            for (int c = cells.Length - 1; c >= 0; c--)
+            {
+                if (cells[c].Ch != ' ' && cells[c].Ch != '\0')
+                {
+                    lastNonSpace = c;
+                    break;
+                }
+            }
+            if (lastNonSpace < 0)
+            {
+                sb.AppendLine();
+                continue;
+            }
+            var lineChars = new char[lastNonSpace + 1];
+            for (int c = 0; c <= lastNonSpace; c++)
+                lineChars[c] = cells[c].Ch == '\0' ? ' ' : cells[c].Ch;
+            sb.AppendLine(new string(lineChars));
+        }
+
+        // System log: last 100 lines
+        sb.AppendLine();
+        sb.AppendLine("=== SYSTEM LOG (last 100 lines) ===");
+        var sysLines = _systemLogTextBox.Lines;
+        int sysSkip = Math.Max(0, sysLines.Length - 100);
+        for (int i = sysSkip; i < sysLines.Length; i++)
+            sb.AppendLine(sysLines[i]);
+
+        // Save to Desktop
+        var filename = $"debug_snapshot_{DateTime.Now:yyyyMMdd_HHmmss}.txt";
+        var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+        var filePath = Path.Combine(desktopPath, filename);
+        File.WriteAllText(filePath, sb.ToString());
+        return filePath;
+    }
+
+    private void BugReportSnapshot_Click(object? sender, EventArgs e)
     {
         try
         {
-            var sb = new System.Text.StringBuilder();
+            // 1. Immediately capture the snapshot
+            var filePath = TakeDebugSnapshot();
+            if (filePath == null) return;
 
-            // Game log: last 100 lines from ScreenBuffer scrollback
-            sb.AppendLine("=== GAME LOG (last 100 lines) ===");
-            var snapshot = _screenBuffer.GetScrollbackSnapshot();
-            int gameSkip = Math.Max(0, snapshot.Count - 100);
-            for (int i = gameSkip; i < snapshot.Count; i++)
+            // 2. Show dialog for user to describe the issue
+            using var dialog = new BugReportDescriptionDialog();
+            dialog.ShowDialog(this);
+
+            // 3. Append description to snapshot file if provided
+            if (!string.IsNullOrEmpty(dialog.Description))
             {
-                var cells = snapshot[i];
-                // Find last non-blank character to trim trailing whitespace
-                int lastNonSpace = -1;
-                for (int c = cells.Length - 1; c >= 0; c--)
-                {
-                    if (cells[c].Ch != ' ' && cells[c].Ch != '\0')
-                    {
-                        lastNonSpace = c;
-                        break;
-                    }
-                }
-                if (lastNonSpace < 0)
-                {
-                    sb.AppendLine();
-                    continue;
-                }
-                var lineChars = new char[lastNonSpace + 1];
-                for (int c = 0; c <= lastNonSpace; c++)
-                    lineChars[c] = cells[c].Ch == '\0' ? ' ' : cells[c].Ch;
-                sb.AppendLine(new string(lineChars));
+                var descriptionBlock = new System.Text.StringBuilder();
+                descriptionBlock.AppendLine();
+                descriptionBlock.AppendLine("=== BUG DESCRIPTION ===");
+                descriptionBlock.AppendLine(dialog.Description);
+                File.AppendAllText(filePath, descriptionBlock.ToString());
             }
 
-            // System log: last 100 lines
-            sb.AppendLine();
-            sb.AppendLine("=== SYSTEM LOG (last 100 lines) ===");
-            var sysLines = _systemLogTextBox.Lines;
-            int sysSkip = Math.Max(0, sysLines.Length - 100);
-            for (int i = sysSkip; i < sysLines.Length; i++)
-                sb.AppendLine(sysLines[i]);
-
-            // Save to Desktop
-            var filename = $"debug_snapshot_{DateTime.Now:yyyyMMdd_HHmmss}.txt";
-            var desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-            var filePath = Path.Combine(desktopPath, filename);
-            File.WriteAllText(filePath, sb.ToString());
-            LogMessage($"📋 Debug snapshot saved: {filePath}", MessageType.System);
+            LogMessage($"\U0001f41b Bug snapshot saved: {filePath}", MessageType.System);
         }
         catch (Exception ex)
         {
-            LogMessage($"❌ Failed to save debug snapshot: {ex.Message}", MessageType.System);
+            LogMessage($"❌ Failed to save bug snapshot: {ex.Message}", MessageType.System);
         }
     }
 
